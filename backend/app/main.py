@@ -46,8 +46,7 @@ api_router.include_router(simulation.router)
 api_router.include_router(chat.router)
 app.include_router(api_router)
 
-# PRD 9.4: Docker 이미지 안에서 프론트엔드 빌드 결과(dist/)를 같은 컨테이너가 정적
-# 파일로 서빙한다. /api/*가 먼저 매칭되므로 그 외 경로만 SPA로 넘어간다.
-_FRONTEND_DIST_DIR = os.environ.get("FRONTEND_DIST_DIR", "/app/frontend_dist")
-if os.path.isdir(_FRONTEND_DIST_DIR):
-    app.mount("/", StaticFiles(directory=_FRONTEND_DIST_DIR, html=True), name="frontend")
+# PRD 9.4: 프론트엔드 빌드 결과(dist/)를 이 백엔드가 같은 프로세스에서 정적 파일로
+# 서빙한다(Docker든 systemd든 동일). /api/*가 먼저 매칭되므로 그 외 경로만 SPA로 넘어간다.
+if os.path.isdir(settings.frontend_dist_dir):
+    app.mount("/", StaticFiles(directory=settings.frontend_dist_dir, html=True), name="frontend")
