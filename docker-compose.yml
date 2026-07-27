@@ -1,0 +1,38 @@
+# PRD 9.4: 사내망 Linux 서버에서 `docker compose up -d` 한 번으로 웹 대시보드를
+# 구동한다. 데이터 수집 도구(ingestion-tool)는 여기 포함되지 않는다 — 운영자
+# Windows PC에 별도 배포된다(PRD 9.2, ingestion-tool/README.md 참조).
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cafeteria}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cafeteria}
+      POSTGRES_DB: ${POSTGRES_DB:-cafeteria}
+    volumes:
+      - cafeteria_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cafeteria}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cafeteria}:${POSTGRES_PASSWORD:-cafeteria}@db:5432/${POSTGRES_DB:-cafeteria}
+      INGEST_API_TOKEN: ${INGEST_API_TOKEN:?INGEST_API_TOKEN을 .env에 설정하세요}
+      INTERNAL_LLM_BASE_URL: ${INTERNAL_LLM_BASE_URL:-}
+      INTERNAL_LLM_API_KEY: ${INTERNAL_LLM_API_KEY:-}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-[]}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+
+volumes:
+  cafeteria_db_data:

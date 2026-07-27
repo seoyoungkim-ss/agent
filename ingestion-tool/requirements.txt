@@ -1,0 +1,7 @@
+# PRD 9.2: 운영자 Windows PC(Excel + 나스카 설치됨)에서 실행하는 수집 도구.
+# xlwings/pywin32는 Windows에서만 필요하므로 환경 마커로 제한한다 —
+# 파싱 로직(parsing/) 자체는 순수 파이썬이라 Linux/Mac에서도 단위 테스트가 가능하다.
+xlwings>=0.33; sys_platform == "win32"
+pywin32>=306; sys_platform == "win32"
+httpx>=0.27,<0.28
+pydantic>=2.8,<2.9
