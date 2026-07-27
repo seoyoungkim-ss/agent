@@ -28,6 +28,10 @@ class Settings(BaseSettings):
 
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 
+    # PRD 9.4: 프론트엔드 빌드 결과(dist/)를 이 백엔드가 정적 파일로 함께 서빙할 때
+    # 사용하는 경로. 디렉터리가 없으면 정적 서빙 자체를 건너뛴다(app/main.py).
+    frontend_dist_dir: str = "/app/frontend_dist"
+
 
 @lru_cache
 def get_settings() -> Settings:
