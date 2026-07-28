@@ -2,7 +2,19 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import { api, type Classification } from "../api/client";
-import { Button, Card, ErrorState, LoadingState, QuadrantBadge, SegmentedControl, StatTile } from "../components/ui";
+import {
+  Button,
+  Card,
+  ErrorState,
+  Legend,
+  LoadingState,
+  QuadrantBadge,
+  resolveColor,
+  SegmentedControl,
+  StatTile,
+  Table,
+  useChartTheme,
+} from "../components/ui";
 
 function mondayOf(date: Date): string {
   const d = new Date(date);
@@ -44,18 +56,39 @@ export function HomePage() {
   });
 
   const totalHeadcount = weekly.data?.reduce((sum, d) => sum + d.headcount, 0) ?? 0;
+  const chartTheme = useChartTheme();
+  const seriesWeekday = resolveColor("var(--series-1)");
+  const seriesHoliday = resolveColor("var(--series-2)");
 
   const chartOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 16, top: 16, bottom: 28 },
     tooltip: { trigger: "axis" },
-    xAxis: { type: "category", data: weekly.data?.map((d) => d.date) ?? [] },
-    yAxis: { type: "value", name: "식수" },
+    xAxis: {
+      type: "category",
+      data: weekly.data?.map((d) => d.date.slice(5)) ?? [],
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      name: "식수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
     series: [
       {
         type: "bar",
-        data: weekly.data?.map((d) => ({
-          value: d.headcount,
-          itemStyle: { color: d.classification === "주말+공휴일" ? "#f59e0b" : "#6366f1" },
-        })) ?? [],
+        barMaxWidth: 28,
+        itemStyle: {
+          borderRadius: [4, 4, 0, 0],
+          color: (params: { dataIndex: number }) => {
+            const d = weekly.data?.[params.dataIndex];
+            return d?.classification === "주말+공휴일" ? seriesHoliday : seriesWeekday;
+          },
+        },
+        data: weekly.data?.map((d) => d.headcount) ?? [],
       },
     ],
   };
@@ -67,7 +100,7 @@ export function HomePage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-bold">이번 주 카페테리아 현황</h1>
+        <h1 className="text-lg font-semibold">이번 주 카페테리아 현황</h1>
         <div className="flex items-center gap-3">
           <SegmentedControl value={classification} options={CLASSIFICATION_OPTIONS} onChange={setClassification} />
           <a href={exportUrl} download>
@@ -81,21 +114,47 @@ export function HomePage() {
         <StatTile
           label="집계 대상 일수"
           value={weekly.data?.length ?? 0}
-          sub={classification === "전체" ? "평일+주말+공휴일" : classification}
+          sub={classification === "전체" ? "평일 + 주말+공휴일" : classification}
         />
         <StatTile label="이번 달 VOE 클러스터 수" value={voe.data?.length ?? 0} />
       </div>
 
-      <Card title="주간 식수 추이 (평일/주말+공휴일 색상 구분)">
+      <Card title="주간 식수 추이">
+        <div className="mb-3">
+          <Legend
+            items={[
+              { label: "평일", color: "var(--series-1)" },
+              { label: "주말+공휴일", color: "var(--series-2)" },
+            ]}
+          />
+        </div>
         {weekly.isLoading && <LoadingState />}
         {weekly.isError && <ErrorState error={weekly.error} />}
-        {weekly.data && <ReactECharts option={chartOption} style={{ height: 320 }} />}
+        {weekly.data && <ReactECharts option={chartOption} style={{ height: 280 }} />}
+        {weekly.data && weekly.data.length > 0 && (
+          <div className="mt-4 overflow-x-auto">
+            <Table
+              columns={[
+                { key: "date", label: "날짜" },
+                { key: "classification", label: "구분" },
+                { key: "headcount", label: "식수", align: "right" },
+              ]}
+              rows={weekly.data.map((d) => ({
+                date: d.date,
+                classification: d.classification,
+                headcount: d.headcount.toLocaleString(),
+              }))}
+              rowKey={(r) => r.date as string}
+            />
+          </div>
+        )}
       </Card>
 
-      <Card title="이번 주 메뉴 이력 검색 (과거 만족도/코멘트)">
+      <Card title="이번 주 메뉴 이력 검색 (과거 만족도·코멘트)">
         <div className="mb-3 flex gap-2">
           <input
-            className="w-64 rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+            className="w-64 rounded-md border px-3 py-2 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
             placeholder="메뉴명 (예: 제육볶음)"
             value={menuName}
             onChange={(e) => setMenuName(e.target.value)}
@@ -106,33 +165,26 @@ export function HomePage() {
         {menuHistory.isLoading && <LoadingState />}
         {menuHistory.isError && <ErrorState error={menuHistory.error} />}
         {menuHistory.data && menuHistory.data.length === 0 && (
-          <p className="text-sm text-slate-400">이력이 없습니다 (recompute가 필요할 수 있습니다).</p>
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이력이 없습니다 (recompute가 필요할 수 있습니다).
+          </p>
         )}
         {menuHistory.data && menuHistory.data.length > 0 && (
-          <table className="w-full text-left text-sm">
-            <thead className="text-slate-400">
-              <tr>
-                <th className="py-1 pr-4">기간</th>
-                <th className="py-1 pr-4">만족도(표본보정)</th>
-                <th className="py-1 pr-4">평가건수</th>
-                <th className="py-1 pr-4">4분면</th>
-              </tr>
-            </thead>
-            <tbody>
-              {menuHistory.data.map((h) => (
-                <tr key={h.period_start} className="border-t border-slate-100 dark:border-slate-800">
-                  <td className="py-1.5 pr-4">
-                    {h.period_start} ~ {h.period_end}
-                  </td>
-                  <td className="py-1.5 pr-4">{h.adjusted_score?.toFixed(2) ?? "-"}</td>
-                  <td className="py-1.5 pr-4">{h.evaluation_count}</td>
-                  <td className="py-1.5 pr-4">
-                    <QuadrantBadge label={h.quadrant} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <Table
+            columns={[
+              { key: "period", label: "기간" },
+              { key: "score", label: "만족도(표본보정)", align: "right" },
+              { key: "count", label: "평가건수", align: "right" },
+              { key: "quadrant", label: "4분면" },
+            ]}
+            rows={menuHistory.data.map((h) => ({
+              period: `${h.period_start} ~ ${h.period_end}`,
+              score: h.adjusted_score?.toFixed(2) ?? "-",
+              count: h.evaluation_count,
+              quadrant: <QuadrantBadge label={h.quadrant} />,
+            }))}
+            rowKey={(r) => r.period as string}
+          />
         )}
       </Card>
 
@@ -140,25 +192,30 @@ export function HomePage() {
         {voe.isLoading && <LoadingState />}
         {voe.isError && <ErrorState error={voe.error} />}
         {voe.data && voe.data.length === 0 && (
-          <p className="text-sm text-slate-400">
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
             이번 달 클러스터링 결과가 없습니다. 사내 LLM 연동 후 배치(매월 1일)가 실행되면 표시됩니다.
           </p>
         )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {voe.data?.map((c) => (
-            <div key={c.cluster_label} className="rounded-lg border border-slate-100 p-3 dark:border-slate-800">
+            <div key={c.cluster_label} className="rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
               <div className="flex items-center justify-between">
-                <span className="font-semibold">{c.cluster_label}</span>
-                <span className="text-xs text-slate-400">{c.comment_count}건</span>
+                <span className="text-[13px] font-medium">{c.cluster_label}</span>
+                <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                  {c.comment_count}건
+                </span>
               </div>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{c.representative_comment}</p>
+              <p className="mt-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                {c.representative_comment}
+              </p>
               <div className="mt-2 flex flex-wrap gap-1">
                 {c.keywords.map((k) => (
                   <span
                     key={k}
-                    className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                    className="rounded px-1.5 py-0.5 text-xs"
+                    style={{ background: "var(--surface-2)", color: "var(--ink-secondary)" }}
                   >
-                    #{k}
+                    {k}
                   </span>
                 ))}
               </div>
