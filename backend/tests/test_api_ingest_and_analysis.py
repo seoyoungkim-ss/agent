@@ -257,3 +257,126 @@ def test_division_analysis_classification_filter(client, db_session):
     rows = resp.json()
     assert len(rows) == 1
     assert rows[0]["period"] == saturday.isoformat()
+
+
+def _set_food_vector(db_session, menu_name: str, vector: list[float]):
+    from app.models.master import MenuMaster
+
+    menu = db_session.query(MenuMaster).filter_by(menu_name=menu_name).one()
+    menu.food_vector = vector
+    db_session.commit()
+
+
+def test_taste_clusters_recompute_and_list(client, db_session):
+    # 매운맛 그룹(spicy 높음) 4명, 순한맛 그룹(protein 높음) 4명 — 명확히 갈리게 구성
+    for i in range(4):
+        _ingest_meal_log(client, f"S{i}", "맛남", company_name=None)
+        r = client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(12, i)).isoformat(),
+                        "employee_id": f"S{i}",
+                        "meal_type": "중식",
+                        "corner_name": "한식",
+                        "menu_name": "매운메뉴",
+                        "taste_score": "맛남",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+    for i in range(4):
+        client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(12, 30 + i)).isoformat(),
+                        "employee_id": f"P{i}",
+                        "meal_type": "중식",
+                        "corner_name": "그린미트",
+                        "menu_name": "고단백메뉴",
+                        "taste_score": "맛남",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    _set_food_vector(db_session, "매운메뉴", [0.9, 0.1, 0.1, 0.1, 0.1, 0.2, 0.1, 0.1, 0.1, 0.1])
+    _set_food_vector(db_session, "고단백메뉴", [0.1, 0.1, 0.1, 0.1, 0.1, 0.9, 0.1, 0.1, 0.1, 0.1])
+
+    resp = client.post("/api/analysis/users/taste-profile/recompute")
+    assert resp.status_code == 200
+    assert resp.json()["updated_employees"] == 8
+
+    # 표본 부족(8명인데 k=10 요구 -> 최소 20명 필요)이면 400
+    resp = client.post("/api/analysis/users/taste-clusters/recompute", params={"k": 10})
+    assert resp.status_code == 400
+
+    resp = client.post("/api/analysis/users/taste-clusters/recompute", params={"k": 2})
+    assert resp.status_code == 200
+    assert resp.json()["clusters_created"] == 2
+
+    resp = client.get("/api/analysis/users/taste-clusters")
+    assert resp.status_code == 200
+    clusters = resp.json()
+    assert len(clusters) == 2
+    assert {c["size"] for c in clusters} == {4, 4}
+    labels = {c["label"] for c in clusters}
+    assert any("매운맛" in label for label in labels)
+    assert any("단백질" in label for label in labels)
+
+    # 개별 사번 조회에도 소속 군집 라벨이 붙는지 확인
+    resp = client.get("/api/analysis/users/S0/taste-profile")
+    assert resp.status_code == 200
+    assert resp.json()["cluster_label"] is not None
+
+
+def test_menu_affinity_finds_co_occurring_menu(client):
+    # 떡볶이 먹는 3명 중 2명이 짜장면도 먹음
+    def eat(employee_id, menu_name, minute):
+        client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(11, minute)).isoformat(),
+                        "employee_id": employee_id,
+                        "meal_type": "중식",
+                        "corner_name": "분식",
+                        "menu_name": menu_name,
+                        "taste_score": "맛남",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    for emp in ["A1", "A2", "A3"]:
+        eat(emp, "떡볶이", 0)
+    for emp in ["A1", "A2"]:
+        eat(emp, "짜장면", 10)
+    for emp in ["B1", "B2", "B3"]:
+        eat(emp, "돈까스", 20)
+
+    resp = client.get(
+        "/api/analysis/menu-affinity/떡볶이",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "min_co_count": 1},
+    )
+    assert resp.status_code == 200
+    rows = resp.json()
+    jjajang = next(r for r in rows if r["menu_name"] == "짜장면")
+    assert jjajang["co_count"] == 2
+    assert jjajang["lift"] > 1
+
+
+def test_menu_affinity_unknown_menu_returns_404(client):
+    resp = client.get(
+        "/api/analysis/menu-affinity/존재하지않는메뉴",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 404

@@ -7,10 +7,18 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.master import CornerMaster, MenuMaster
-from app.models.stats import DailyCornerStats, DailyDivisionStats, EmployeeTasteProfile, MenuPerformanceStats
+from app.models.stats import (
+    DailyCornerStats,
+    DailyDivisionStats,
+    EmployeeTasteProfile,
+    MenuPerformanceStats,
+    TasteCluster,
+)
 from app.services.aggregation import aggregate_menu_performance, diagnose_menu_decline
 from app.services.food_vector import FOOD_VECTOR_DIMENSIONS
 from app.services.holidays import DayClassification
+from app.services.menu_affinity import build_employee_menu_sets, compute_menu_affinity
+from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -152,11 +160,13 @@ def user_taste_profile(employee_id: str, db: Session = Depends(get_db)):
     profile = db.query(EmployeeTasteProfile).filter_by(employee_id=employee_id).one_or_none()
     if profile is None:
         raise HTTPException(status_code=404, detail="취향 프로필이 없습니다. 먼저 recompute를 호출하세요.")
+    cluster = db.get(TasteCluster, profile.cluster_id) if profile.cluster_id else None
     return {
         "employee_id": employee_id,
-        "profile_vector": list(profile.profile_vector),
+        "profile_vector": [float(x) for x in profile.profile_vector],
         "dimensions": FOOD_VECTOR_DIMENSIONS,
         "sample_size": profile.sample_size,
+        "cluster_label": cluster.label if cluster else None,
     }
 
 
@@ -164,3 +174,55 @@ def user_taste_profile(employee_id: str, db: Session = Depends(get_db)):
 def recompute_taste_profiles(db: Session = Depends(get_db)):
     updated = compute_employee_taste_profiles(db)
     return {"updated_employees": updated}
+
+
+@router.get("/users/taste-clusters")
+def taste_clusters(db: Session = Depends(get_db)):
+    """PRD 6.1: 취향 군집 요약 목록 (사번 검색 없이 전체 경향을 보는 화면용)."""
+    clusters = db.query(TasteCluster).order_by(TasteCluster.size.desc()).all()
+    return [
+        {
+            "id": c.id,
+            "label": c.label,
+            "size": c.size,
+            "centroid_vector": [float(x) for x in c.centroid_vector],
+            "dimensions": FOOD_VECTOR_DIMENSIONS,
+            "avg_satisfaction": c.avg_satisfaction,
+            "top_menus": c.top_menus or [],
+            "dominant_corner": c.dominant_corner,
+        }
+        for c in clusters
+    ]
+
+
+@router.post("/users/taste-clusters/recompute")
+def recompute_taste_clusters(k: int = 5, db: Session = Depends(get_db)):
+    created = compute_taste_clusters(db, k=k)
+    if created == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"표본이 부족합니다 (군집 {k}개를 만들려면 최소 {k * 2}명의 취향 프로필이 필요). "
+            "먼저 /users/taste-profile/recompute로 프로필을 충분히 쌓으세요.",
+        )
+    return {"clusters_created": created}
+
+
+@router.get("/menu-affinity/{menu_name}")
+def menu_affinity(
+    menu_name: str,
+    period_start: dt.date,
+    period_end: dt.date,
+    min_co_count: int = 3,
+    top_n: int = 10,
+    db: Session = Depends(get_db),
+):
+    """PRD 6.1: 이 메뉴를 먹는 사람이 같이/대신 자주 고르는 메뉴 (동반 선택 경향성)."""
+    employee_menus = build_employee_menu_sets(db, period_start, period_end)
+    results = compute_menu_affinity(
+        employee_menus, menu_name, min_co_count=min_co_count, top_n=top_n
+    )
+    if not results and menu_name not in {m for menus in employee_menus.values() for m in menus}:
+        raise HTTPException(
+            status_code=404, detail=f"'{menu_name}' 메뉴의 취식 기록이 이 기간에 없습니다."
+        )
+    return [{"menu_name": r.menu_name, "co_count": r.co_count, "lift": r.lift} for r in results]

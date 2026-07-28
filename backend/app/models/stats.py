@@ -70,6 +70,30 @@ class EmployeeTasteProfile(Base):
     profile_vector: Mapped[list[float]] = mapped_column(Vector(FOOD_VECTOR_DIM))
     sample_size: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
+    # 이 사번이 가장 최근 취향 군집 배치에서 속한 그룹 (app/services/taste_clustering.py)
+    cluster_id: Mapped[int | None] = mapped_column(
+        ForeignKey("taste_cluster.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class TasteCluster(Base):
+    """PRD 6.1: employee_taste_profile.profile_vector를 K-means로 묶은 취향 군집 요약.
+
+    재계산 배치가 돌 때마다 기존 행을 지우고 새로 쓴다(monthly_voe_cluster와 동일
+    패턴) — cluster_index는 그 배치 내에서만 의미가 있고 배치마다 재배정된다.
+    """
+
+    __tablename__ = "taste_cluster"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    computed_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
+    cluster_index: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str] = mapped_column(String(128))
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    centroid_vector: Mapped[list[float]] = mapped_column(Vector(FOOD_VECTOR_DIM))
+    avg_satisfaction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    top_menus: Mapped[list[str] | None] = mapped_column(ARRAY(String(128)), nullable=True)
+    dominant_corner: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class MonthlyVoeCluster(Base):

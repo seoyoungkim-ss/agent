@@ -23,6 +23,8 @@
 | 메뉴 4분면 분류 | `app/services/menu_performance.py` (`classify_menu_quadrant`) + `app/services/aggregation.py` (`aggregate_menu_performance`의 threshold 계산) | - | 6.3.4 |
 | 코너별 통계(피크타임 서브속도 포함) | `app/services/aggregation.py` (`aggregate_daily_stats`) | `app/config.py` (`peak_time_start/end`) | 6.2 |
 | 개인 취향 벡터 | `app/services/taste_profile.py`, `app/services/food_vector.py` | `food_vector.py` (`FOOD_VECTOR_DIMENSIONS`) | 6.1 |
+| 취향 군집(K-means) + 자동 라벨링 | `app/services/taste_clustering.py` | `DEFAULT_TASTE_CLUSTER_K`(`scheduler.py`), `_LABEL_DEVIATION_THRESHOLD`(같은 파일) | 6.1 |
+| 메뉴 동반 선택 경향성(lift) | `app/services/menu_affinity.py` | `min_co_count` 파라미터 | 6.1 |
 | 시뮬레이션(what-if) | `app/api/simulation.py` (`what_if`) | 파일 상단 `_WEATHER_MULTIPLIER`, `_HISTORY_WINDOW` | 7.1 |
 | 혼잡도(대기시간) 예측 | `app/api/simulation.py` (`congestion_forecast`) | 같은 파일 | 7.2 |
 | 월간 VOE 클러스터링 | `app/services/voe_clustering.py` | `max_clusters` 파라미터 | 5.2 / 8 |
@@ -396,6 +398,8 @@ scheduler.add_job(run_monthly_voe_clustering, "cron", day=1, hour=3, minute=0, .
 | `meal_transaction_parser.py` | `ingestion-tool/tests/test_meal_transaction_parser.py` (7개) |
 | `taste_eval_parser.py` | `ingestion-tool/tests/test_taste_eval_parser.py` (5개) |
 | `merge.py` (조인 로직) | `ingestion-tool/tests/test_merge.py` (7개) |
+| `taste_clustering.py` (군집/라벨링) | `backend/tests/test_taste_clustering.py` (6개, 순수 함수) |
+| `menu_affinity.py` (동반 선택 lift) | `backend/tests/test_menu_affinity.py` (8개, 순수 함수) |
 
 ```bash
 cd backend && source .venv/bin/activate && pytest -q
@@ -455,3 +459,87 @@ master_data.py::get_or_create_employee(db, employee_id, company_name)`이 매번
 `backend/tests/test_api_ingest_and_analysis.py::
 test_meal_log_ingest_classifies_division_from_company_name`(API 엔드투엔드로
 실제 DB에 반영되는지 확인).
+
+---
+
+## 16. 취향 군집 + 메뉴 동반 선택 경향성 (PRD 6.1, 사번 검색 없이 전체 경향 보기)
+
+사번 1건씩 조회하는 것만으로는 "사람들 취향에 전체적으로 어떤 경향이 있는지" 알 수
+없다는 문제의식에서, 개인 취향 벡터(6.1)를 기반으로 두 가지를 추가했다 —
+① 비슷한 취향끼리 그룹으로 묶어 요약하는 **군집(clustering)**, ② 특정 메뉴를 먹는
+사람이 다른 어떤 메뉴도 잘 먹는지 보는 **동반 선택 경향성(co-occurrence)**. PRD 6.1의
+"떡볶이 먹는 사람은 짜장면도 잘 먹는다" 예시는 사실 ①(취향 벡터의 평균적 유사성)
+보다 ②(실제 메뉴 조합의 통계적 연관성)로 더 직접 확인된다.
+
+### 16.1 취향 군집 (K-means + 규칙 기반 라벨링)
+
+**파일**: `backend/app/services/taste_clustering.py`
+
+```python
+def cluster_vectors(vectors, k) -> ClusteringResult:  # sklearn KMeans 얇은 래퍼, 순수 함수
+def generate_cluster_label(centroid, global_mean, ...) -> str:  # 규칙 기반 라벨링, 순수 함수
+def compute_taste_clusters(db, k=5, min_total_employees=None) -> int:  # DB 오케스트레이션
+```
+
+- **군집화**: `employee_taste_profile.profile_vector`(전체) 를 `sklearn.cluster.KMeans`로
+  `k`개(기본 5, `scheduler.py`의 `DEFAULT_TASTE_CLUSTER_K`)로 나눈다.
+- **라벨링**: VOE 클러스터링(월간, 자유 텍스트)과 달리 food_vector는 이미 구조화된
+  수치라 **사내 LLM 없이 결정론적 규칙으로 라벨을 만든다** — 그 그룹의 centroid가
+  전체 평균보다 `_LABEL_DEVIATION_THRESHOLD`(기본 0.12, 0~1 스케일 기준) 이상 튀는
+  차원을 최대 `_LABEL_MAX_DIMENSIONS`(기본 2)개 뽑아 "매운맛·단백질 선호형"처럼
+  합성한다. 튀는 차원이 없으면 "균형형". **라벨 스타일을 바꾸려면 이 두 상수와
+  `FOOD_VECTOR_LABELS_KO`(`food_vector.py`, 차원 영문↔한글 매핑)만 고치면 된다.**
+- **군집별 부가 정보**: 그 군집에 속한 사번들의 `meal_log`를 다시 조회해서 대표
+  메뉴 top5(`Counter`), 주 이용 코너(최빈값), 평균 만족도(`TASTE_SCORE_POINTS` 평균)를
+  같이 저장한다 — 표본 보정(6.3.1)은 적용하지 않은 단순 평균이다.
+- **표본 부족 가드**: 전체 프로필 수가 `min_total_employees`(기본 `k*2`) 미만이면
+  아무것도 안 하고 0을 반환한다 (`/api/analysis/users/taste-clusters/recompute`는
+  이때 400을 응답).
+- **재계산 시 기존 결과 정리**: `employee_taste_profile.cluster_id`를 먼저 전부
+  NULL로 돌린 뒤 `taste_cluster` 테이블을 지우고 다시 쓴다 — monthly_voe_cluster와
+  같은 "매번 통째로 다시 쓰기" 패턴.
+- **배치**: 매월 1일 03:30(`scheduler.py::run_monthly_taste_clustering`). VOE
+  클러스터링(03:00)과 30분 간격을 둔 것뿐, 서로 의존관계는 없다.
+- **API**: `GET /api/analysis/users/taste-clusters`(목록), `POST .../recompute?k=5`,
+  그리고 개인 조회(`GET .../users/{employee_id}/taste-profile`)에도
+  `cluster_label` 필드가 같이 내려간다.
+- **프론트**: `frontend/src/pages/AnalysisPage.tsx`의 `TasteClusterSection` — 군집×
+  차원(10개) 히트맵(시퀀셜 blue, `SEQUENTIAL_BLUE_RAMP`) + 표. 사용자 분석 서브탭
+  맨 위(구분별 식수 아래, 개인 검색 위)에 있다.
+
+**⚠️ pgvector 응답 타입 주의**: `TasteCluster.centroid_vector`/`EmployeeTasteProfile.
+profile_vector`를 API로 내려줄 때 `list(...)`만 쓰면 원소가 `numpy.float32`로 남아
+FastAPI JSON 인코딩이 깨진다(실제로 이 기능 만들다가 걸림 — `test_taste_clusters_
+recompute_and_list` 테스트로 잡음). 반드시 `[float(x) for x in vector]`로 순수
+파이썬 float으로 변환할 것 (`app/api/analysis.py` 두 곳 참고).
+
+### 16.2 메뉴 동반 선택 경향성 (lift)
+
+**파일**: `backend/app/services/menu_affinity.py`
+
+```python
+def compute_menu_affinity(employee_menus: dict[str, set[str]], target_menu, min_co_count=3, top_n=10) -> list[MenuAffinityResult]
+def build_employee_menu_sets(db, period_start, period_end) -> dict[str, set[str]]
+```
+
+- 장바구니 분석(market-basket analysis)의 **lift** 지표를 그대로 쓴다:
+  `lift(A,B) = co_count(A,B) * total_employees / (count(A) * count(B))`.
+  1보다 크면 "우연보다 자주 같이 나옴", 1에 가까우면 무관, 1보다 작으면 오히려
+  같이 잘 안 나옴.
+- `build_employee_menu_sets`는 사번별로 그 기간에 **먹어본 메뉴명의 집합**을
+  만든다(빈도 무시, 존재 여부만) — `compute_menu_affinity`는 이 집합만 있으면
+  DB 없이도 순수 함수로 테스트 가능.
+- `min_co_count`(기본 3)로 표본이 너무 적은 우연한 쌍을 걸러낸다.
+- **API**: `GET /api/analysis/menu-affinity/{menu_name}?period_start&period_end
+  &min_co_count&top_n` — 대상 메뉴를 아무도 안 먹었으면 404.
+- **프론트**: `AnalysisPage.tsx`의 `MenuAffinitySection` — 메뉴 4분면 탭 하단에
+  검색창 + 표(동반 인원, lift).
+
+**튜닝 지점**: `min_co_count`를 올리면 결과가 더 보수적(확실한 연관만)이 되고,
+`top_n`은 화면에 몇 개 보여줄지. lift 계산식 자체를 바꿀 일은 거의 없겠지만,
+바꾸려면 `compute_menu_affinity` 하나만 고치면 됨(호출부는 결과 리스트 형태만 안다).
+
+**테스트**: `backend/tests/test_taste_clustering.py`(6개), `backend/tests/
+test_menu_affinity.py`(8개) — 둘 다 순수 함수라 DB 없이 빠르게 검증 가능.
+API 엔드투엔드는 `test_api_ingest_and_analysis.py::
+test_taste_clusters_recompute_and_list`, `::test_menu_affinity_finds_co_occurring_menu`.

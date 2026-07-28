@@ -9,6 +9,7 @@ from app.models.stats import (
     EmployeeTasteProfile,
     MenuPerformanceStats,
     MonthlyVoeCluster,
+    TasteCluster,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "EmployeeTasteProfile",
     "MenuPerformanceStats",
     "MonthlyVoeCluster",
+    "TasteCluster",
 ]

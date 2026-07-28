@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import { api, type Classification, type Granularity, type MenuPerformanceRow } from "../api/client";
 import {
@@ -134,6 +134,111 @@ function DivisionAnalysisSection() {
   );
 }
 
+// 히트맵 값(0~1)이 낮음→높음으로 진해지는 단일 색상(blue) 시퀀셜 램프.
+const SEQUENTIAL_BLUE_RAMP = ["#cde2fb", "#5598e7", "#0d366b"];
+
+function TasteClusterSection() {
+  const chartTheme = useChartTheme();
+  const query = useQuery({
+    queryKey: ["taste-clusters"],
+    queryFn: () => api.tasteClusters(),
+  });
+  const recompute = useMutation({
+    mutationFn: () => api.recomputeTasteClusters(5),
+    onSuccess: () => query.refetch(),
+  });
+
+  const clusters = query.data ?? [];
+  const dimensions = clusters[0]?.dimensions ?? [];
+
+  const heatmapOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 150, right: 90, top: 16, bottom: 70 },
+    tooltip: {
+      formatter: (p: { value: [number, number, number] }) =>
+        `${clusters[p.value[1]].label}<br/>${dimensions[p.value[0]]}: ${p.value[2]}`,
+    },
+    xAxis: {
+      type: "category",
+      data: dimensions,
+      axisLabel: { color: chartTheme.text, rotate: 40 },
+      splitArea: { show: true },
+    },
+    yAxis: {
+      type: "category",
+      data: clusters.map((c) => `${c.label} (${c.size}명)`),
+      axisLabel: { color: chartTheme.text },
+      splitArea: { show: true },
+    },
+    visualMap: {
+      min: 0,
+      max: 1,
+      calculable: true,
+      orient: "vertical" as const,
+      right: 0,
+      top: "middle" as const,
+      itemHeight: 120,
+      inRange: { color: SEQUENTIAL_BLUE_RAMP },
+      textStyle: { color: chartTheme.text },
+    },
+    series: [
+      {
+        type: "heatmap",
+        data: clusters.flatMap((c, ci) =>
+          c.centroid_vector.map((v, di) => [di, ci, Number(v.toFixed(2))]),
+        ),
+        label: { show: false },
+      },
+    ],
+  };
+
+  return (
+    <Card title="취향 군집 요약 — 사번 검색 없이 전체 경향 보기">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          전체 취향 벡터를 K-means로 묶어 몇 개의 취향 그룹으로 요약합니다.
+        </p>
+        <Button variant="secondary" onClick={() => recompute.mutate()} disabled={recompute.isPending}>
+          재계산
+        </Button>
+      </div>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {recompute.isError && <ErrorState error={recompute.error} />}
+      {clusters.length === 0 && !query.isLoading && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          군집 결과가 없습니다. 먼저 취향 프로필이 충분히 쌓인 뒤(사용자 분석 아래 "조회" 전 recompute 필요) "재계산"을
+          눌러보세요 — 군집 5개를 만들려면 최소 10명의 취향 프로필이 필요합니다.
+        </p>
+      )}
+      {clusters.length > 0 && (
+        <ReactECharts option={heatmapOption} style={{ height: 100 + clusters.length * 40 }} />
+      )}
+      {clusters.length > 0 && (
+        <div className="mt-4">
+          <Table
+            columns={[
+              { key: "label", label: "그룹" },
+              { key: "size", label: "인원수", align: "right" },
+              { key: "satisfaction", label: "평균 만족도", align: "right" },
+              { key: "corner", label: "주 이용 코너" },
+              { key: "menus", label: "대표 메뉴" },
+            ]}
+            rows={clusters.map((c) => ({
+              label: c.label,
+              size: c.size,
+              satisfaction: c.avg_satisfaction?.toFixed(2) ?? "-",
+              corner: c.dominant_corner ?? "-",
+              menus: c.top_menus.join(", ") || "-",
+            }))}
+            rowKey={(r) => r.label as string}
+          />
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function TasteProfileSection() {
   const [employeeId, setEmployeeId] = useState("");
   const [searched, setSearched] = useState<string | null>(null);
@@ -163,6 +268,15 @@ function TasteProfileSection() {
         <div>
           <p className="mb-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
             표본 {profile.data.sample_size}건 기반 취향 벡터 (메뉴 food_vector와 동일 차원)
+            {profile.data.cluster_label && (
+              <>
+                {" "}
+                ·{" "}
+                <span className="rounded px-1.5 py-0.5" style={{ background: "var(--surface-2)" }}>
+                  {profile.data.cluster_label}
+                </span>
+              </>
+            )}
           </p>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
             {profile.data.dimensions.map((dim, i) => (
@@ -184,6 +298,7 @@ function UserAnalysisTab() {
   return (
     <div className="space-y-4">
       <DivisionAnalysisSection />
+      <TasteClusterSection />
       <TasteProfileSection />
     </div>
   );
@@ -425,6 +540,59 @@ function MenuQuadrantTab() {
   );
 }
 
+function MenuAffinitySection() {
+  const [menuName, setMenuName] = useState("");
+  const [searched, setSearched] = useState<string | null>(null);
+  const query = useQuery({
+    queryKey: ["menu-affinity", searched],
+    queryFn: () =>
+      api.menuAffinity(searched as string, { period_start: PERIOD_START, period_end: PERIOD_END }),
+    enabled: !!searched,
+    retry: false,
+  });
+
+  return (
+    <Card title="메뉴 동반 선택 경향성 — 같이/대신 자주 고르는 메뉴">
+      <div className="mb-3 flex gap-2">
+        <input
+          className="w-48 rounded-md border px-3 py-2 text-[13px]"
+          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+          placeholder="메뉴명 (예: 떡볶이)"
+          value={menuName}
+          onChange={(e) => setMenuName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && setSearched(menuName)}
+        />
+        <Button onClick={() => setSearched(menuName)}>조회</Button>
+      </div>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {query.data && query.data.length === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          유의미한 동반 선택 메뉴가 없습니다 (표본이 너무 적거나 연관성이 낮음).
+        </p>
+      )}
+      {query.data && query.data.length > 0 && (
+        <Table
+          columns={[
+            { key: "menu", label: "메뉴" },
+            { key: "co_count", label: "동반 인원", align: "right" },
+            { key: "lift", label: "연관도(lift)", align: "right" },
+          ]}
+          rows={query.data.map((r) => ({
+            menu: r.menu_name,
+            co_count: r.co_count,
+            lift: r.lift.toFixed(2),
+          }))}
+          rowKey={(r) => r.menu as string}
+        />
+      )}
+      <p className="mt-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+        lift가 1보다 크면 우연히 같이 나오는 것보다 더 자주 동반 선택된다는 뜻입니다.
+      </p>
+    </Card>
+  );
+}
+
 function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -456,7 +624,12 @@ export function AnalysisPage() {
           </button>
         ))}
       </div>
-      {tab === "menus" && <MenuQuadrantTab />}
+      {tab === "menus" && (
+        <div className="space-y-4">
+          <MenuQuadrantTab />
+          <MenuAffinitySection />
+        </div>
+      )}
       {tab === "corners" && <CornerAnalysisTab />}
       {tab === "users" && <UserAnalysisTab />}
     </div>

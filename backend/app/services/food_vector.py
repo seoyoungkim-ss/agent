@@ -22,6 +22,21 @@ FOOD_VECTOR_DIMENSIONS: list[str] = [
 
 FOOD_VECTOR_DIM = len(FOOD_VECTOR_DIMENSIONS)
 
+# PRD 6.1: 취향 군집 라벨링(app/services/taste_clustering.py)에서 사람이 읽을 수 있는
+# 이름을 만들 때 쓰는 한글 표기.
+FOOD_VECTOR_LABELS_KO: dict[str, str] = {
+    "spicy": "매운맛",
+    "sweet": "단맛",
+    "salty": "짠맛",
+    "sour": "신맛",
+    "oily": "기름진맛",
+    "protein": "단백질",
+    "carb": "탄수화물",
+    "fried": "튀김",
+    "soup_based": "국물",
+    "vegetable_ratio": "채소",
+}
+
 # PRD 8 / 6.3.3: VOE(주관식 의견) 임베딩 차원. 사내 LLM 임베딩 모델의 출력 차원에
 # 맞춰야 하므로, 실제 모델이 정해지면 이 값과 관련 마이그레이션을 갱신해야 한다.
 COMMENT_EMBEDDING_DIM = 768

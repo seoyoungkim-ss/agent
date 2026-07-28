@@ -87,6 +87,24 @@ export interface TasteProfile {
   profile_vector: number[];
   dimensions: string[];
   sample_size: number;
+  cluster_label: string | null;
+}
+
+export interface TasteCluster {
+  id: number;
+  label: string;
+  size: number;
+  centroid_vector: number[];
+  dimensions: string[];
+  avg_satisfaction: number | null;
+  top_menus: string[];
+  dominant_corner: string | null;
+}
+
+export interface MenuAffinityRow {
+  menu_name: string;
+  co_count: number;
+  lift: number;
 }
 
 export interface WhatIfCornerResult {
@@ -161,6 +179,18 @@ export const api = {
 
   userTasteProfile: (employeeId: string) =>
     request<TasteProfile>(`/analysis/users/${encodeURIComponent(employeeId)}/taste-profile`),
+
+  tasteClusters: () => request<TasteCluster[]>(`/analysis/users/taste-clusters`),
+
+  recomputeTasteClusters: (k: number) =>
+    request<{ clusters_created: number }>(`/analysis/users/taste-clusters/recompute${qs({ k })}`, {
+      method: "POST",
+    }),
+
+  menuAffinity: (
+    menuName: string,
+    params: { period_start: string; period_end: string; min_co_count?: number; top_n?: number },
+  ) => request<MenuAffinityRow[]>(`/analysis/menu-affinity/${encodeURIComponent(menuName)}${qs(params)}`),
 
   whatIf: (payload: {
     target_date: string;
