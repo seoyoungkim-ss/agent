@@ -40,13 +40,14 @@ def _ingest_meal_log(
     company_name: str | None = None,
     eaten_date: dt.date = MONDAY,
     menu_name: str | None = None,
+    corner_name: str = "한식",
 ):
     rows = [
         {
             "eaten_at": dt.datetime.combine(eaten_date, dt.time(11, 52, 0)).isoformat(),
             "employee_id": employee_id,
             "meal_type": "중식",
-            "corner_name": "한식",
+            "corner_name": corner_name,
             "taste_score": taste,
             "comment": comment,
             "company_name": company_name,
@@ -481,6 +482,64 @@ def test_menu_affinity_finds_co_occurring_menu(client):
 def test_menu_affinity_unknown_menu_returns_404(client):
     resp = client.get(
         "/api/analysis/menu-affinity/존재하지않는메뉴",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 404
+
+
+def test_corner_core_layer_menu_pairs_splits_core_and_non_core(client, db_session):
+    # 코어층(E1~E3): 한식 코너를 4번씩 방문(전체 방문도 4번, share=1.0)하며 떡볶이/짜장면을 번갈아 먹음
+    for emp in ["E1", "E2", "E3"]:
+        for day_offset, menu in enumerate(["떡볶이", "짜장면", "떡볶이", "짜장면"]):
+            _ingest_meal_log(
+                client,
+                emp,
+                "맛남",
+                eaten_date=MONDAY + dt.timedelta(days=day_offset),
+                menu_name=menu,
+                corner_name="한식",
+            )
+
+    # 비코어층(N1~N3): 한식은 1번만(방문횟수 기준 미달), 양식을 주로 방문하며 스테이크/파스타를 먹음
+    for emp in ["N1", "N2", "N3"]:
+        _ingest_meal_log(client, emp, "맛남", eaten_date=MONDAY, menu_name="김치찌개", corner_name="한식")
+        for day_offset, menu in enumerate(["스테이크", "파스타", "스테이크", "파스타", "스테이크"]):
+            _ingest_meal_log(
+                client,
+                emp,
+                "맛남",
+                eaten_date=MONDAY + dt.timedelta(days=day_offset + 1),
+                menu_name=menu,
+                corner_name="양식",
+            )
+
+    from app.models.master import CornerMaster
+
+    corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    resp = client.get(
+        f"/api/analysis/corners/{corner.corner_id}/core-layer-menu-pairs",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=10)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["corner_name"] == "한식"
+    assert body["core_layer"]["employee_count"] == 3
+    assert body["non_core"]["employee_count"] == 3
+
+    core_pairs = {frozenset((p["menu_a"], p["menu_b"])) for p in body["core_layer"]["top_pairs"]}
+    assert frozenset({"떡볶이", "짜장면"}) in core_pairs
+
+    non_core_pairs = {frozenset((p["menu_a"], p["menu_b"])) for p in body["non_core"]["top_pairs"]}
+    assert frozenset({"스테이크", "파스타"}) in non_core_pairs
+
+
+def test_corner_core_layer_menu_pairs_unknown_corner_returns_404(client):
+    resp = client.get(
+        "/api/analysis/corners/999999/core-layer-menu-pairs",
         params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
     )
     assert resp.status_code == 404

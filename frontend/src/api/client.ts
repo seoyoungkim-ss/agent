@@ -107,6 +107,28 @@ export interface MenuAffinityRow {
   lift: number;
 }
 
+export interface MenuPairRow {
+  menu_a: string;
+  menu_b: string;
+  co_count: number;
+  lift: number;
+}
+
+export interface CornerCoreLayerMenuPairsResponse {
+  corner_id: number;
+  corner_name: string;
+  core_layer: {
+    employee_count: number;
+    min_visit_count: number;
+    min_share: number;
+    top_pairs: MenuPairRow[];
+  };
+  non_core: {
+    employee_count: number;
+    top_pairs: MenuPairRow[];
+  };
+}
+
 export type FoodVectorSource = "규칙기반" | "LLM추정" | "관리자수동";
 
 export interface MenuFoodVectorRow {
@@ -201,6 +223,21 @@ export const api = {
     menuName: string,
     params: { period_start: string; period_end: string; min_co_count?: number; top_n?: number },
   ) => request<MenuAffinityRow[]>(`/analysis/menu-affinity/${encodeURIComponent(menuName)}${qs(params)}`),
+
+  cornerCoreLayerMenuPairs: (
+    cornerId: number,
+    params: {
+      period_start: string;
+      period_end: string;
+      min_visit_count?: number;
+      min_share?: number;
+      min_co_count?: number;
+      top_n?: number;
+    },
+  ) =>
+    request<CornerCoreLayerMenuPairsResponse>(
+      `/analysis/corners/${cornerId}/core-layer-menu-pairs${qs(params)}`,
+    ),
 
   menuFoodVectors: (params: { untagged_only?: boolean } = {}) =>
     request<MenuFoodVectorRow[]>(`/analysis/menus/food-vectors${qs(params)}`),

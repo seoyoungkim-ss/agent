@@ -6,6 +6,7 @@ import {
   type Classification,
   type Granularity,
   type MenuFoodVectorRow,
+  type MenuPairRow,
   type MenuPerformanceRow,
 } from "../api/client";
 import {
@@ -374,63 +375,173 @@ function CornerAnalysisTab() {
   };
 
   return (
-    <Card title="코너별 분석 — 이용자 수 / 만족도 / 피크타임 서브속도">
-      <div className="mb-4">
+    <div className="space-y-4">
+      <Card title="코너별 분석 — 이용자 수 / 만족도 / 피크타임 서브속도">
+        <div className="mb-4">
+          <SegmentedControl
+            value={classification}
+            options={[
+              { label: "전체", value: "전체" },
+              { label: "평일", value: "평일" },
+              { label: "주말+공휴일", value: "주말+공휴일" },
+            ]}
+            onChange={setClassification}
+          />
+        </div>
+        {query.isLoading && <LoadingState />}
+        {query.isError && <ErrorState error={query.error} />}
+        {query.data && query.data.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다.
+          </p>
+        )}
+        {query.data && query.data.length > 0 && (
+          <>
+            {/* 식수(건수)와 만족도(0~5점)는 단위가 달라 하나의 차트에 두 축으로 겹쳐 그리지 않고
+                별도 차트 두 개로 분리한다 — 이중축 차트는 임의의 상관관계를 만들어 보여준다. */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  누적 식수
+                </p>
+                <ReactECharts option={headcountOption} style={{ height: 240 }} />
+              </div>
+              <div>
+                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  평균 만족도 (5점 만점)
+                </p>
+                <ReactECharts option={satisfactionOption} style={{ height: 240 }} />
+              </div>
+            </div>
+            <div className="mt-4">
+              <Table
+                columns={[
+                  { key: "corner", label: "코너" },
+                  { key: "diet", label: "그린미트" },
+                  { key: "headcount", label: "누적 식수", align: "right" },
+                  { key: "score", label: "평균 만족도", align: "right" },
+                  { key: "throughput", label: "피크타임 분당 서브", align: "right" },
+                ]}
+                rows={query.data.map((c) => ({
+                  corner: c.corner_name,
+                  diet: c.is_diet_corner ? "예" : "-",
+                  headcount: c.headcount_total.toLocaleString(),
+                  score: c.avg_taste_score?.toFixed(2) ?? "-",
+                  throughput: c.avg_peak_throughput_per_min?.toFixed(1) ?? "-",
+                }))}
+                rowKey={(r) => r.corner as string}
+              />
+            </div>
+          </>
+        )}
+      </Card>
+      <CornerCoreLayerSection corners={query.data ?? []} />
+    </div>
+  );
+}
+
+function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; corner_name: string }[] }) {
+  const [cornerId, setCornerId] = useState<number | null>(null);
+  const [minVisitCount, setMinVisitCount] = useState(3);
+  const [minShare, setMinShare] = useState(30);
+
+  const effectiveCornerId = cornerId ?? corners[0]?.corner_id ?? null;
+
+  const query = useQuery({
+    queryKey: ["corner-core-layer-menu-pairs", effectiveCornerId, minVisitCount, minShare],
+    queryFn: () =>
+      api.cornerCoreLayerMenuPairs(effectiveCornerId as number, {
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+        min_visit_count: minVisitCount,
+        min_share: minShare / 100,
+      }),
+    enabled: effectiveCornerId != null,
+  });
+
+  const pairColumns = [
+    { key: "pair", label: "메뉴 쌍" },
+    { key: "co_count", label: "동반 인원", align: "right" as const },
+    { key: "lift", label: "연관도(lift, 그룹 내부 기준)", align: "right" as const },
+  ];
+  const pairRows = (rows: MenuPairRow[]) =>
+    rows.map((r) => ({ pair: `${r.menu_a} + ${r.menu_b}`, co_count: r.co_count, lift: r.lift.toFixed(2) }));
+
+  if (corners.length === 0) return null;
+
+  return (
+    <Card title="코너 코어층 × 메뉴 동반 선택 쌍 비교">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+        선택한 코너를 반복적으로 이용하는 "코어층"과 나머지 인원이 가장 흔하게 함께 고르는 메뉴 쌍을
+        나란히 비교합니다. lift는 각 그룹 내부 기준이라 두 그룹 간 직접 비교는 동반 인원 수로 합니다.
+      </p>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
         <SegmentedControl
-          value={classification}
-          options={[
-            { label: "전체", value: "전체" },
-            { label: "평일", value: "평일" },
-            { label: "주말+공휴일", value: "주말+공휴일" },
-          ]}
-          onChange={setClassification}
+          value={String(effectiveCornerId)}
+          options={corners.map((c) => ({ label: c.corner_name, value: String(c.corner_id) }))}
+          onChange={(v) => setCornerId(Number(v))}
         />
+        <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+          최소 방문횟수
+          <input
+            type="number"
+            min={1}
+            className="w-14 rounded-md border px-2 py-1 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={minVisitCount}
+            onChange={(e) => setMinVisitCount(Number(e.target.value))}
+          />
+        </label>
+        <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+          최소 비중(%)
+          <input
+            type="number"
+            min={0}
+            max={100}
+            className="w-14 rounded-md border px-2 py-1 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={minShare}
+            onChange={(e) => setMinShare(Number(e.target.value))}
+          />
+        </label>
       </div>
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
-      {query.data && query.data.length === 0 && (
-        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다.
-        </p>
-      )}
-      {query.data && query.data.length > 0 && (
-        <>
-          {/* 식수(건수)와 만족도(0~5점)는 단위가 달라 하나의 차트에 두 축으로 겹쳐 그리지 않고
-              별도 차트 두 개로 분리한다 — 이중축 차트는 임의의 상관관계를 만들어 보여준다. */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                누적 식수
+      {query.data && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              코어층 ({query.data.core_layer.employee_count}명)
+            </p>
+            {query.data.core_layer.top_pairs.length === 0 ? (
+              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                표본 부족
               </p>
-              <ReactECharts option={headcountOption} style={{ height: 240 }} />
-            </div>
-            <div>
-              <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                평균 만족도 (5점 만점)
+            ) : (
+              <Table
+                columns={pairColumns}
+                rows={pairRows(query.data.core_layer.top_pairs)}
+                rowKey={(r) => r.pair as string}
+              />
+            )}
+          </div>
+          <div>
+            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              나머지 ({query.data.non_core.employee_count}명)
+            </p>
+            {query.data.non_core.top_pairs.length === 0 ? (
+              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                표본 부족
               </p>
-              <ReactECharts option={satisfactionOption} style={{ height: 240 }} />
-            </div>
+            ) : (
+              <Table
+                columns={pairColumns}
+                rows={pairRows(query.data.non_core.top_pairs)}
+                rowKey={(r) => r.pair as string}
+              />
+            )}
           </div>
-          <div className="mt-4">
-            <Table
-              columns={[
-                { key: "corner", label: "코너" },
-                { key: "diet", label: "그린미트" },
-                { key: "headcount", label: "누적 식수", align: "right" },
-                { key: "score", label: "평균 만족도", align: "right" },
-                { key: "throughput", label: "피크타임 분당 서브", align: "right" },
-              ]}
-              rows={query.data.map((c) => ({
-                corner: c.corner_name,
-                diet: c.is_diet_corner ? "예" : "-",
-                headcount: c.headcount_total.toLocaleString(),
-                score: c.avg_taste_score?.toFixed(2) ?? "-",
-                throughput: c.avg_peak_throughput_per_min?.toFixed(1) ?? "-",
-              }))}
-              rowKey={(r) => r.corner as string}
-            />
-          </div>
-        </>
+        </div>
       )}
     </Card>
   );

@@ -9,6 +9,7 @@
 import datetime as dt
 from collections import defaultdict
 from dataclasses import dataclass
+from itertools import combinations
 
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,14 @@ class MenuAffinityResult:
     menu_name: str
     co_count: int  # 두 메뉴를 모두 먹은 사번 수
     lift: float  # (동반 비율) / (각자 비율의 곱) — 1보다 크면 "같이 잘 나옴"
+
+
+@dataclass(frozen=True)
+class MenuPairResult:
+    menu_a: str
+    menu_b: str
+    co_count: int
+    lift: float
 
 
 def compute_menu_affinity(
@@ -64,6 +73,42 @@ def compute_menu_affinity(
         results.append(MenuAffinityResult(menu_name=menu, co_count=co_count, lift=lift))
 
     results.sort(key=lambda r: r.lift, reverse=True)
+    return results[:top_n]
+
+
+def compute_top_menu_pairs(
+    employee_menus: dict[str, set[str]],
+    *,
+    min_co_count: int = 2,
+    top_n: int = 10,
+) -> list[MenuPairResult]:
+    """순수 함수 — 대상 메뉴를 고정하지 않고 가장 흔한 메뉴 쌍 top_n을 뽑는다.
+
+    1차 정렬은 co_count(가장 흔한 조합) 내림차순, 2차는 lift(참고용 연관 강도) —
+    compute_menu_affinity가 lift를 1차 정렬 기준으로 쓰는 것과 의도적으로 다르다.
+    min_co_count 기본값도 3이 아닌 2인데, 이 함수는 코어층처럼 표본이 작은
+    부분집합에서 자주 호출될 것이라 3으로 두면 결과가 자주 비기 때문.
+    """
+    total = len(employee_menus)
+    if total == 0:
+        return []
+
+    menu_counts: dict[str, int] = defaultdict(int)
+    pair_counts: dict[tuple[str, str], int] = defaultdict(int)
+    for menus in employee_menus.values():
+        for menu in menus:
+            menu_counts[menu] += 1
+        for a, b in combinations(sorted(menus), 2):
+            pair_counts[(a, b)] += 1
+
+    results = []
+    for (a, b), co_count in pair_counts.items():
+        if co_count < min_co_count:
+            continue
+        lift = (co_count * total) / (menu_counts[a] * menu_counts[b])
+        results.append(MenuPairResult(menu_a=a, menu_b=b, co_count=co_count, lift=lift))
+
+    results.sort(key=lambda r: (r.co_count, r.lift), reverse=True)
     return results[:top_n]
 
 

@@ -18,11 +18,16 @@ from app.models.stats import (
     TasteCluster,
 )
 from app.services.aggregation import aggregate_menu_performance, diagnose_menu_decline
+from app.services.corner_core_layer import build_employee_corner_counts, classify_corner_core_layer
 from app.services.food_vector import FOOD_VECTOR_DIMENSIONS
 from app.services.food_vector_tagging import run_llm_food_vector_tagging
 from app.services.holidays import DayClassification
 from app.services.llm_client import InternalLLMClient
-from app.services.menu_affinity import build_employee_menu_sets, compute_menu_affinity
+from app.services.menu_affinity import (
+    build_employee_menu_sets,
+    compute_menu_affinity,
+    compute_top_menu_pairs,
+)
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
 
@@ -102,6 +107,64 @@ def corner_analysis(
             }
         )
     return result
+
+
+@router.get("/corners/{corner_id}/core-layer-menu-pairs")
+def corner_core_layer_menu_pairs(
+    corner_id: int,
+    period_start: dt.date,
+    period_end: dt.date,
+    min_visit_count: int = 3,
+    min_share: float = 0.3,
+    min_co_count: int = 2,
+    top_n: int = 10,
+    db: Session = Depends(get_db),
+):
+    """PRD 6.2: 코너 코어층(반복 이용자) vs 나머지 인원의 메뉴 동반 선택 쌍 비교.
+
+    lift는 각 그룹(코어층/나머지) 내부 모집단 기준으로 따로 계산되므로, 두 그룹의
+    lift 수치를 직접 비교하면 안 된다 — co_count(동반 인원 수)만 그룹 간 비교에
+    쓸 수 있다.
+    """
+    corner = db.get(CornerMaster, corner_id)
+    if corner is None:
+        raise HTTPException(status_code=404, detail="코너를 찾을 수 없습니다")
+
+    employee_corner_counts = build_employee_corner_counts(db, period_start, period_end)
+    core_results = classify_corner_core_layer(
+        employee_corner_counts, corner_id, min_visit_count=min_visit_count, min_share=min_share
+    )
+    core_employee_ids = {r.employee_id for r in core_results}
+    non_core_employee_ids = set(employee_corner_counts.keys()) - core_employee_ids
+
+    employee_menus = build_employee_menu_sets(db, period_start, period_end)
+    core_menus = {e: m for e, m in employee_menus.items() if e in core_employee_ids}
+    non_core_menus = {e: m for e, m in employee_menus.items() if e in non_core_employee_ids}
+
+    def _serialize(pairs):
+        return [
+            {"menu_a": p.menu_a, "menu_b": p.menu_b, "co_count": p.co_count, "lift": p.lift}
+            for p in pairs
+        ]
+
+    return {
+        "corner_id": corner_id,
+        "corner_name": corner.corner_name,
+        "core_layer": {
+            "employee_count": len(core_employee_ids),
+            "min_visit_count": min_visit_count,
+            "min_share": min_share,
+            "top_pairs": _serialize(
+                compute_top_menu_pairs(core_menus, min_co_count=min_co_count, top_n=top_n)
+            ),
+        },
+        "non_core": {
+            "employee_count": len(non_core_employee_ids),
+            "top_pairs": _serialize(
+                compute_top_menu_pairs(non_core_menus, min_co_count=min_co_count, top_n=top_n)
+            ),
+        },
+    }
 
 
 @router.get("/menu-performance")

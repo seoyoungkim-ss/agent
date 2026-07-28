@@ -24,6 +24,7 @@
 | 코너별 통계(피크타임 서브속도 포함) | `app/services/aggregation.py` (`aggregate_daily_stats`) | `app/config.py` (`peak_time_start/end`) | 6.2 |
 | 개인 취향 벡터 | `app/services/taste_profile.py`, `app/services/food_vector.py` | `food_vector.py` (`FOOD_VECTOR_DIMENSIONS`) | 6.1 |
 | 메뉴 food_vector 자동 태깅(규칙→LLM→관리자수동) | `app/services/food_vector_tagging.py` | `_KEYWORD_RULES`(같은 파일) | 6.1 |
+| 코너 코어층 × 메뉴 동반 선택 쌍 비교 | `app/services/corner_core_layer.py`, `app/services/menu_affinity.py`(`compute_top_menu_pairs`) | `min_visit_count`/`min_share`/`min_co_count`(API 파라미터) | 6.2 |
 | 취향 군집(K-means) + 자동 라벨링 | `app/services/taste_clustering.py` | `DEFAULT_TASTE_CLUSTER_K`(`scheduler.py`), `_LABEL_DEVIATION_THRESHOLD`(같은 파일) | 6.1 |
 | 메뉴 동반 선택 경향성(lift) | `app/services/menu_affinity.py` | `min_co_count` 파라미터 | 6.1 |
 | 시뮬레이션(what-if) | `app/api/simulation.py` (`what_if`) | 파일 상단 `_WEATHER_MULTIPLIER`, `_HISTORY_WINDOW` | 7.1 |
@@ -593,3 +594,92 @@ test_taste_clusters_recompute_and_list`, `::test_menu_affinity_finds_co_occurrin
   읽어 헤더/행수/기간 밖 데이터 제외를 검증(테스트 전용 의존성이므로 `openpyxl`은
   `requirements-dev.txt`에만 있고 운영 `requirements.txt`에는 없음 — 운영에는
   xlsxwriter로 "쓰기"만 하면 되므로 필요 없음).
+
+## 18. 코너 코어층 × 메뉴 동반 선택 쌍 비교 (PRD 6.2)
+
+PRD 6.2 원문에 "코너별 코어층 분석 (해당 코너를 반복적으로 선택하는 사번 그룹의
+특성)"이라고만 정의돼 있고 실제 구현은 없던 항목이다. "가장 흔한 취향(메뉴) pair를
+코어층 분류랑 엮어서 확인"하고 싶다는 요청에 맞춰, 이번에 코어층 정의와 전체 메뉴
+쌍 랭킹을 함께 구현했다.
+
+### 18.1 코어층 분류
+
+**파일**: `backend/app/services/corner_core_layer.py`
+
+```python
+def classify_corner_core_layer(
+    employee_corner_counts: dict[str, dict[int, int]],  # {사번: {corner_id: 방문횟수}}
+    corner_id: int,
+    *,
+    min_visit_count: int = 3,
+    min_share: float = 0.3,
+) -> list[CoreLayerResult]
+def build_employee_corner_counts(db, period_start, period_end) -> dict[str, dict[int, int]]
+```
+
+- 어떤 코너의 코어층 = (a) 그 코너 방문 횟수 ≥ `min_visit_count` **그리고** (b) 그
+  코너가 그 사람 전체 방문 중 차지하는 비중(`corner_share`) ≥ `min_share`를 **모두**
+  만족하는 사번. AND 조건인 이유: 방문횟수만 보면 "여기저기 다 자주 가는
+  헤비유저"가 모든 코너의 코어층으로 잘못 잡히고, 비중만 보면 표본이 아주 적은
+  사람(1번 방문해서 그게 100%)이 섞여 들어온다.
+- `build_employee_corner_counts`는 기간 내 `meal_log`를 사번×코너별로 카운트만
+  한다(메뉴는 안 봄) — `menu_affinity.py::build_employee_menu_sets`와 동일한
+  `[period_start, period_end+1일 배타적상한]` 기간 필터 패턴을 그대로 따른다.
+
+### 18.2 전체 메뉴 쌍 랭킹 (대상 메뉴 고정 없이)
+
+**파일**: `backend/app/services/menu_affinity.py`의 `compute_top_menu_pairs`
+
+```python
+def compute_top_menu_pairs(
+    employee_menus: dict[str, set[str]], *, min_co_count: int = 2, top_n: int = 10
+) -> list[MenuPairResult]
+```
+
+- 기존 `compute_menu_affinity`는 대상 메뉴 하나를 지정해야만 그 메뉴와 동반되는
+  메뉴 목록을 볼 수 있다. 이 함수는 대상 메뉴 없이 **가장 흔한 메뉴 쌍 자체의
+  전체 랭킹**을 낸다(사번별 메뉴 집합에서 `itertools.combinations`로 모든 쌍을
+  세는 market-basket 방식).
+- **정렬 기준이 기존 함수와 다름**: `co_count`(동반 인원 수) 내림차순이 1차,
+  `lift`는 2차/참고용. "가장 흔한"이라는 표현 그대로 co_count를 우선한 것 —
+  lift를 1차로 쓰면 표본 1~2명짜리 우연한 조합이 최상위로 튀어나올 수 있다.
+- `min_co_count` 기본값도 `compute_menu_affinity`(3)와 다르게 2로 낮췄다 — 이
+  함수는 코어층처럼 표본이 작은 부분집합에서 자주 호출되므로 3으로 두면 결과가
+  자주 비어버리기 때문.
+- 계산 비용: 사번마다 그 사람이 먹은 메뉴 수의 조합(C(n,2))을 전부 세므로 한
+  사람이 아주 많은 메뉴를 먹었다면(수백 종) 느려질 수 있다 — 현재 규모(기간 내
+  메뉴 종류 수십~백 단위)에서는 문제없음.
+
+### 18.3 교차 비교 엔드포인트
+
+**API**: `GET /api/analysis/corners/{corner_id}/core-layer-menu-pairs
+?period_start&period_end&min_visit_count&min_share&min_co_count&top_n`
+(`backend/app/api/analysis.py::corner_core_layer_menu_pairs`)
+
+- 코너 코어층(`core_employee_ids`)과 **그 여집합**(`non_core` = 그 기간에 어떤
+  메뉴든 먹은 사람 중 코어층이 아닌 사람 전체, "모든 사람"이 아님)을 나눠서 각각
+  독립적으로 `compute_top_menu_pairs`를 돌린다.
+- 응답 형태: `{corner_id, corner_name, core_layer: {employee_count,
+  min_visit_count, min_share, top_pairs}, non_core: {employee_count, top_pairs}}`.
+  기존 `analysis.py` 관례대로 별도 pydantic 응답 모델 없이 dict 그대로 반환.
+- **주의**: `lift`는 각 그룹(코어층/나머지) **내부 모집단** 기준으로 따로
+  계산되므로, 두 그룹의 lift 수치를 직접 비교하면 안 된다. 그룹 간 비교엔
+  `co_count`(동반 인원 수)만 쓴다 — API 설명(docstring)과 프론트 안내 문구에도
+  명시했다.
+- 존재하지 않는 `corner_id`는 404.
+- **프론트**: `AnalysisPage.tsx`의 `CornerCoreLayerSection` — "코너별 분석" 탭에
+  기존 코너 통계 카드 아래로 추가. 코너 선택은 `/analysis/corners` 응답을 재사용한
+  `SegmentedControl`, `min_visit_count`/`min_share`(%) 숫자 입력 2개, 결과는
+  코어층/나머지 `Table` 두 개를 `grid-cols-2`로 나란히 배치(이중축 차트 등 새
+  시각화는 안 만듦 — 랭킹 비교엔 표가 적합하다는 이 앱의 dataviz 원칙).
+
+**튜닝 지점**: `min_visit_count`/`min_share`는 코어층 기준 자체를 바꾸는
+파라미터(API 호출 시 넘김, 코드 수정 불필요). 코어층 정의 로직 자체를 바꾸려면
+`classify_corner_core_layer` 하나만 고치면 됨.
+
+**테스트**: `backend/tests/test_corner_core_layer.py`(6개, 순수 함수),
+`backend/tests/test_menu_affinity.py`의 `compute_top_menu_pairs` 관련 5개(순수
+함수). API 엔드투엔드는 `test_api_ingest_and_analysis.py::
+test_corner_core_layer_menu_pairs_splits_core_and_non_core`(반복 방문 그룹과
+가끔 방문 그룹을 인입해 실제로 코어층/나머지가 갈리고 각자 다른 메뉴 쌍이 나오는지
+검증), `::test_corner_core_layer_menu_pairs_unknown_corner_returns_404`.
