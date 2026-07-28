@@ -23,6 +23,7 @@
 | 메뉴 4분면 분류 | `app/services/menu_performance.py` (`classify_menu_quadrant`) + `app/services/aggregation.py` (`aggregate_menu_performance`의 threshold 계산) | - | 6.3.4 |
 | 코너별 통계(피크타임 서브속도 포함) | `app/services/aggregation.py` (`aggregate_daily_stats`) | `app/config.py` (`peak_time_start/end`) | 6.2 |
 | 개인 취향 벡터 | `app/services/taste_profile.py`, `app/services/food_vector.py` | `food_vector.py` (`FOOD_VECTOR_DIMENSIONS`) | 6.1 |
+| 메뉴 food_vector 자동 태깅(규칙→LLM→관리자수동) | `app/services/food_vector_tagging.py` | `_KEYWORD_RULES`(같은 파일) | 6.1 |
 | 취향 군집(K-means) + 자동 라벨링 | `app/services/taste_clustering.py` | `DEFAULT_TASTE_CLUSTER_K`(`scheduler.py`), `_LABEL_DEVIATION_THRESHOLD`(같은 파일) | 6.1 |
 | 메뉴 동반 선택 경향성(lift) | `app/services/menu_affinity.py` | `min_co_count` 파라미터 | 6.1 |
 | 시뮬레이션(what-if) | `app/api/simulation.py` (`what_if`) | 파일 상단 `_WEATHER_MULTIPLIER`, `_HISTORY_WINDOW` | 7.1 |
@@ -194,17 +195,42 @@ FOOD_VECTOR_DIMENSIONS = ["spicy","sweet","salty","sour","oily",
                           "protein","carb","fried","soup_based","vegetable_ratio"]
 ```
 **계산** — `backend/app/services/taste_profile.py::compute_employee_taste_profiles`:
-사번별로 그 사람이 먹은 메뉴들의 `food_vector`를 단순 평균(`numpy.mean`).
+사번별로 그 사람이 먹은 메뉴들의 `food_vector`를 단순 평균(`numpy.mean`). 이 필터는
+`MenuMaster.food_vector.isnot(None)`이므로, **아직 태깅 안 된(NULL) 메뉴는 자동으로
+제외**된다(에러 없이 조용히 빠짐 — 태깅 진행 상황을 확인하려면 아래 목록 API를 본다).
 
-**⚠️ 가장 중요한 미해결 지점**: `menu_master.food_vector`는 **어디서도 자동으로
-채워지지 않는다.** 지금은 전부 `NULL`이라, 이 취향 벡터 기능은 값이 하나도 안 나온다.
-매운맛/단백질 등 특성을 메뉴마다 입력하는 화면이나 일괄 업로드 기능이 없다 —
-이 값을 채우는 방법(수기 입력 화면 추가, 엑셀 업로드 API 추가, 혹은 사내 LLM으로 메뉴명
-보고 자동 태깅하는 배치 추가 등)을 별도로 만들어야 6.1 기능이 실제로 동작한다.
-가장 빠른 임시 방법은 `menu_master` 테이블에 직접 SQL로 값을 채우는 것.
+**`food_vector`는 어떻게 채워지는가 — 3단계 태깅 파이프라인 (PRD 6.1)**:
+파일: `backend/app/services/food_vector_tagging.py`, 연동: `backend/app/services/master_data.py::get_or_create_menu`
+
+1. **규칙 기반(즉시, 신메뉴 인입 시)** — `tag_food_vector_from_name(menu_name)`이
+   메뉴명에 포함된 키워드(`_KEYWORD_RULES` 딕셔너리, 예: "매운"→spicy, "국/탕/찌개"→
+   soup_based)로 10차원 벡터를 만든다. 키워드가 하나라도 걸리면(`matched_any=True`)
+   `food_vector`를 채우고 `food_vector_source="규칙기반"`으로 표시한다. 하나도 안
+   걸리면 `food_vector`를 `NULL`로 남겨 2·3단계를 기다린다.
+   **튜닝 지점**: `_KEYWORD_RULES` 딕셔너리에 키워드만 추가/수정하면 됨.
+2. **LLM 보강(관리자 트리거)** — `POST /api/analysis/menus/tag-with-llm`을 호출하면
+   `run_llm_food_vector_tagging()`이 `food_vector IS NULL`인 메뉴만 골라 사내 LLM에게
+   "이 메뉴의 매운맛/단맛/...을 0~1로 평가해줘" 프롬프트를 보내고, 응답을
+   `_parse_llm_vector_response()`로 파싱해 채운다(성공 시 `food_vector_source="LLM추정"`).
+   응답 형식이 깨지거나 10개 차원이 다 안 나오면 그 메뉴는 건너뛰고 다음 배치 때 재시도.
+   사내 LLM 미설정 환경(로컬 개발)에서는 `InternalLLMClient`의 모의 응답이 이 형식으로
+   파싱되지 않으므로 실제로는 0건 태깅됨 — 배선만 검증됨.
+3. **관리자 수동 조정(언제든 가능)** — `PUT /api/analysis/menus/{menu_id}/food-vector`
+   (프론트: `AnalysisPage.tsx`의 `MenuFoodVectorAdminSection`, 메뉴 4분면 탭 하단)로
+   10개 값(0.0~1.0)을 직접 입력하면 `food_vector_source="MANUAL"`(관리자수동)로
+   잠긴다. 1·2단계 배치는 둘 다 `food_vector IS NULL`인 메뉴만 대상으로 하므로,
+   한 번이라도 값이 채워진 메뉴(수동이든 규칙/LLM이든)는 자동으로 재태깅 대상에서
+   빠진다 — 별도의 "잠금 확인" 로직이 없어도 이 필터 하나로 보호됨.
+   목록 조회는 `GET /api/analysis/menus/food-vectors?untagged_only=`.
 
 `taste_profile.py::cosine_similarity`도 정의만 돼 있고 아직 어떤 API에서도 호출하지
 않는다 (추후 "취향 비슷한 사람이 고른 메뉴 추천" 같은 기능에 쓰라고 만들어둔 유틸).
+
+**테스트**: `backend/tests/test_food_vector_tagging.py`(순수 함수, 5개),
+`test_api_ingest_and_analysis.py`의 `test_menu_food_vector_auto_tagged_by_rule_on_ingest`,
+`test_menu_food_vector_stays_untagged_when_no_rule_matches`,
+`test_list_menu_food_vectors_endpoint`, `test_update_menu_food_vector_manual_override`,
+`test_tag_menus_with_llm_leaves_untagged_when_llm_unconfigured`.
 
 ---
 

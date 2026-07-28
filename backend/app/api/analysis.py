@@ -3,9 +3,12 @@ import statistics
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
+from app.models.enums import FoodVectorSource
 from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import (
     DailyCornerStats,
@@ -16,7 +19,9 @@ from app.models.stats import (
 )
 from app.services.aggregation import aggregate_menu_performance, diagnose_menu_decline
 from app.services.food_vector import FOOD_VECTOR_DIMENSIONS
+from app.services.food_vector_tagging import run_llm_food_vector_tagging
 from app.services.holidays import DayClassification
+from app.services.llm_client import InternalLLMClient
 from app.services.menu_affinity import build_employee_menu_sets, compute_menu_affinity
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
@@ -205,6 +210,69 @@ def recompute_taste_clusters(k: int = 5, db: Session = Depends(get_db)):
             "먼저 /users/taste-profile/recompute로 프로필을 충분히 쌓으세요.",
         )
     return {"clusters_created": created}
+
+
+@router.get("/menus/food-vectors")
+def list_menu_food_vectors(untagged_only: bool = False, db: Session = Depends(get_db)):
+    """PRD 6.1: 관리자용 메뉴 food_vector 현황 — 수동 조정 화면에서 목록으로 쓴다."""
+    query = db.query(MenuMaster)
+    if untagged_only:
+        query = query.filter(MenuMaster.food_vector.is_(None))
+    menus = query.order_by(MenuMaster.menu_name).all()
+    return [
+        {
+            "menu_id": m.menu_id,
+            "menu_name": m.menu_name,
+            "food_vector": [float(x) for x in m.food_vector] if m.food_vector is not None else None,
+            "dimensions": FOOD_VECTOR_DIMENSIONS,
+            "source": m.food_vector_source.value if m.food_vector_source else None,
+        }
+        for m in menus
+    ]
+
+
+class FoodVectorUpdateRequest(BaseModel):
+    vector: list[float]
+
+
+@router.put("/menus/{menu_id}/food-vector")
+def update_menu_food_vector(
+    menu_id: int, payload: FoodVectorUpdateRequest, db: Session = Depends(get_db)
+):
+    """PRD 6.1: 관리자가 규칙/LLM 태깅 결과를 수동으로 덮어쓴다.
+
+    source=MANUAL로 표시되면 이후 규칙(신메뉴 인입 시엔 이미 다른 메뉴라 해당 없음)/
+    LLM 재태깅 배치가 건드리지 않는다 — 두 배치 모두 food_vector가 NULL인 메뉴만
+    고르는데, 수동 조정 후에는 NULL이 아니게 되므로 자동으로 보호된다.
+    """
+    menu = db.get(MenuMaster, menu_id)
+    if menu is None:
+        raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다")
+    if len(payload.vector) != len(FOOD_VECTOR_DIMENSIONS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"vector는 {len(FOOD_VECTOR_DIMENSIONS)}개 값이어야 합니다: {FOOD_VECTOR_DIMENSIONS}",
+        )
+    if any(v < 0.0 or v > 1.0 for v in payload.vector):
+        raise HTTPException(status_code=400, detail="각 값은 0.0~1.0 범위여야 합니다")
+
+    menu.food_vector = payload.vector
+    menu.food_vector_source = FoodVectorSource.MANUAL
+    db.commit()
+    return {
+        "menu_id": menu_id,
+        "food_vector": payload.vector,
+        "dimensions": FOOD_VECTOR_DIMENSIONS,
+        "source": FoodVectorSource.MANUAL.value,
+    }
+
+
+@router.post("/menus/tag-with-llm")
+async def tag_menus_with_llm(db: Session = Depends(get_db)):
+    """PRD 6.1: 규칙 기반으로 태깅 못 한(food_vector NULL) 메뉴를 사내 LLM으로 보강한다."""
+    client = InternalLLMClient(get_settings())
+    tagged = await run_llm_food_vector_tagging(db, client)
+    return {"tagged_menus": tagged}
 
 
 @router.get("/menu-affinity/{menu_name}")

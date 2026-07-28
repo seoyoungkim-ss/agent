@@ -1,7 +1,13 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
-import { api, type Classification, type Granularity, type MenuPerformanceRow } from "../api/client";
+import {
+  api,
+  type Classification,
+  type Granularity,
+  type MenuFoodVectorRow,
+  type MenuPerformanceRow,
+} from "../api/client";
 import {
   Button,
   Card,
@@ -593,6 +599,122 @@ function MenuAffinitySection() {
   );
 }
 
+function MenuFoodVectorEditor({ row, onSaved }: { row: MenuFoodVectorRow; onSaved: () => void }) {
+  const dims = row.dimensions;
+  const [expanded, setExpanded] = useState(false);
+  const [values, setValues] = useState<number[]>(row.food_vector ?? dims.map(() => 0.2));
+  const save = useMutation({
+    mutationFn: () => api.updateMenuFoodVector(row.menu_id, values),
+    onSuccess: () => {
+      onSaved();
+      setExpanded(false);
+    },
+  });
+
+  return (
+    <div className="rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
+      <div className="flex items-center justify-between">
+        <div>
+          <span className="text-[13px] font-medium">{row.menu_name}</span>
+          <span className="ml-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+            {row.source ?? "미태깅"}
+          </span>
+        </div>
+        <Button variant="secondary" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? "닫기" : "조정"}
+        </Button>
+      </div>
+      {expanded && (
+        <div className="mt-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            {dims.map((dim, i) => (
+              <label
+                key={dim}
+                className="flex flex-col gap-1 text-center text-xs"
+                style={{ color: "var(--ink-muted)" }}
+              >
+                {dim}
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  className="rounded-md border px-2 py-1 text-center text-[13px]"
+                  style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                  value={values[i]}
+                  onChange={(e) =>
+                    setValues((v) => v.map((x, j) => (j === i ? Number(e.target.value) : x)))
+                  }
+                />
+              </label>
+            ))}
+          </div>
+          {save.isError && <ErrorState error={save.error} />}
+          <div className="mt-3 flex justify-end">
+            <Button onClick={() => save.mutate()} disabled={save.isPending}>
+              저장 (관리자수동으로 잠김)
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuFoodVectorAdminSection() {
+  const [untaggedOnly, setUntaggedOnly] = useState(false);
+  const query = useQuery({
+    queryKey: ["menu-food-vectors", untaggedOnly],
+    queryFn: () => api.menuFoodVectors({ untagged_only: untaggedOnly }),
+  });
+  const tagWithLlm = useMutation({
+    mutationFn: () => api.tagMenusWithLlm(),
+    onSuccess: () => query.refetch(),
+  });
+
+  const rows = query.data ?? [];
+
+  return (
+    <Card title="메뉴 음식벡터 관리 (개인 취향 벡터 계산의 기초 데이터)">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+        신메뉴는 이름 키워드 규칙으로 1차 자동 태깅되고, 규칙이 못 잡은 메뉴는 아래 버튼으로 사내 LLM에 보강
+        요청할 수 있습니다. 값을 직접 조정하면 "관리자수동"으로 표시되어 이후 자동 재태깅 대상에서 제외됩니다.
+      </p>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          <input
+            type="checkbox"
+            checked={untaggedOnly}
+            onChange={(e) => setUntaggedOnly(e.target.checked)}
+          />
+          미태깅 메뉴만 보기
+        </label>
+        <Button variant="secondary" onClick={() => tagWithLlm.mutate()} disabled={tagWithLlm.isPending}>
+          LLM으로 미태깅 메뉴 보강
+        </Button>
+      </div>
+      {tagWithLlm.data && (
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          {tagWithLlm.data.tagged_menus}건 태깅됨
+        </p>
+      )}
+      {tagWithLlm.isError && <ErrorState error={tagWithLlm.error} />}
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {rows.length === 0 && !query.isLoading && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          {untaggedOnly ? "미태깅 메뉴가 없습니다." : "메뉴 데이터가 없습니다."}
+        </p>
+      )}
+      <div className="space-y-2">
+        {rows.map((row) => (
+          <MenuFoodVectorEditor key={row.menu_id} row={row} onSaved={() => query.refetch()} />
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -628,6 +750,7 @@ export function AnalysisPage() {
         <div className="space-y-4">
           <MenuQuadrantTab />
           <MenuAffinitySection />
+          <MenuFoodVectorAdminSection />
         </div>
       )}
       {tab === "corners" && <CornerAnalysisTab />}

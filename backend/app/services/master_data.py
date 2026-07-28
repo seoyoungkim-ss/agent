@@ -2,8 +2,10 @@
 
 from sqlalchemy.orm import Session
 
+from app.models.enums import FoodVectorSource
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.services.company_classification import classify_division
+from app.services.food_vector_tagging import tag_food_vector_from_name
 
 _GREEN_MEAT_NAMES = {"그린미트"}
 
@@ -20,10 +22,20 @@ def get_or_create_corner(db: Session, corner_name: str) -> tuple[CornerMaster, b
 
 
 def get_or_create_menu(db: Session, menu_name: str) -> tuple[MenuMaster, bool]:
-    """returns (menu, is_new) — is_new는 이번에 menu_master에 처음 생성됐는지."""
+    """returns (menu, is_new) — is_new는 이번에 menu_master에 처음 생성됐는지.
+
+    신메뉴는 이름 기반 규칙(food_vector_tagging.py)으로 즉시 1차 태깅을 시도한다.
+    규칙이 아무것도 못 잡으면 food_vector를 NULL로 남겨 이후 LLM 배치/관리자 수동
+    조정을 기다린다.
+    """
     menu = db.query(MenuMaster).filter_by(menu_name=menu_name).one_or_none()
     if menu is None:
-        menu = MenuMaster(menu_name=menu_name)
+        vector, matched_any = tag_food_vector_from_name(menu_name)
+        menu = MenuMaster(
+            menu_name=menu_name,
+            food_vector=vector if matched_any else None,
+            food_vector_source=FoodVectorSource.RULE if matched_any else None,
+        )
         db.add(menu)
         db.flush()
         return menu, True

@@ -107,6 +107,16 @@ export interface MenuAffinityRow {
   lift: number;
 }
 
+export type FoodVectorSource = "규칙기반" | "LLM추정" | "관리자수동";
+
+export interface MenuFoodVectorRow {
+  menu_id: number;
+  menu_name: string;
+  food_vector: number[] | null;
+  dimensions: string[];
+  source: FoodVectorSource | null;
+}
+
 export interface WhatIfCornerResult {
   corner_id: number;
   corner_name: string;
@@ -191,6 +201,18 @@ export const api = {
     menuName: string,
     params: { period_start: string; period_end: string; min_co_count?: number; top_n?: number },
   ) => request<MenuAffinityRow[]>(`/analysis/menu-affinity/${encodeURIComponent(menuName)}${qs(params)}`),
+
+  menuFoodVectors: (params: { untagged_only?: boolean } = {}) =>
+    request<MenuFoodVectorRow[]>(`/analysis/menus/food-vectors${qs(params)}`),
+
+  updateMenuFoodVector: (menuId: number, vector: number[]) =>
+    request<{ menu_id: number; food_vector: number[]; dimensions: string[]; source: FoodVectorSource }>(
+      `/analysis/menus/${menuId}/food-vector`,
+      { method: "PUT", body: JSON.stringify({ vector }) },
+    ),
+
+  tagMenusWithLlm: () =>
+    request<{ tagged_menus: number }>(`/analysis/menus/tag-with-llm`, { method: "POST" }),
 
   whatIf: (payload: {
     target_date: string;

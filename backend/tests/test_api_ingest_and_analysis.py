@@ -39,6 +39,7 @@ def _ingest_meal_log(
     comment: str | None = None,
     company_name: str | None = None,
     eaten_date: dt.date = MONDAY,
+    menu_name: str | None = None,
 ):
     rows = [
         {
@@ -49,6 +50,7 @@ def _ingest_meal_log(
             "taste_score": taste,
             "comment": comment,
             "company_name": company_name,
+            "menu_name": menu_name,
         }
     ]
     resp = client.post("/api/ingest/meal-log", json={"rows": rows}, headers=AUTH_HEADERS)
@@ -81,6 +83,79 @@ def test_ingest_meal_log_links_to_main_menu_snapshot(client, db_session):
 
     menu = db_session.query(MenuMaster).filter_by(menu_id=log.menu_id).one()
     assert menu.menu_name == "제육볶음"
+
+
+def test_menu_food_vector_auto_tagged_by_rule_on_ingest(client, db_session):
+    _ingest_weekly_menu(client)
+
+    from app.models.master import MenuMaster
+
+    menu = db_session.query(MenuMaster).filter_by(menu_name="제육볶음").one()
+    assert menu.food_vector is not None  # "제육"(protein) + "볶음"(oily) 키워드에 걸림
+    assert menu.food_vector_source.value == "규칙기반"
+
+
+def test_menu_food_vector_stays_untagged_when_no_rule_matches(client, db_session):
+    _ingest_meal_log(client, "E55555", "맛남", menu_name="모듬과일")
+
+    from app.models.master import MenuMaster
+
+    menu = db_session.query(MenuMaster).filter_by(menu_name="모듬과일").one()
+    assert menu.food_vector is None
+    assert menu.food_vector_source is None
+
+
+def test_list_menu_food_vectors_endpoint(client):
+    _ingest_weekly_menu(client)
+    _ingest_meal_log(client, "E55555", "맛남", menu_name="모듬과일")
+
+    resp = client.get("/api/analysis/menus/food-vectors")
+    assert resp.status_code == 200
+    names = {row["menu_name"] for row in resp.json()}
+    assert "제육볶음" in names
+    assert "모듬과일" in names
+
+    resp_untagged = client.get("/api/analysis/menus/food-vectors", params={"untagged_only": True})
+    untagged_names = {row["menu_name"] for row in resp_untagged.json()}
+    assert untagged_names == {"모듬과일"}
+
+
+def test_update_menu_food_vector_manual_override(client, db_session):
+    _ingest_meal_log(client, "E55555", "맛남", menu_name="모듬과일")
+    from app.models.master import MenuMaster
+
+    menu = db_session.query(MenuMaster).filter_by(menu_name="모듬과일").one()
+
+    vector = [0.1] * 10
+    resp = client.put(f"/api/analysis/menus/{menu.menu_id}/food-vector", json={"vector": vector})
+    assert resp.status_code == 200
+    assert resp.json()["source"] == "관리자수동"
+
+    db_session.refresh(menu)
+    assert menu.food_vector_source.value == "관리자수동"
+    assert list(menu.food_vector) == vector
+
+    resp_bad_length = client.put(
+        f"/api/analysis/menus/{menu.menu_id}/food-vector", json={"vector": [0.1] * 3}
+    )
+    assert resp_bad_length.status_code == 400
+
+    resp_out_of_range = client.put(
+        f"/api/analysis/menus/{menu.menu_id}/food-vector", json={"vector": [1.5] * 10}
+    )
+    assert resp_out_of_range.status_code == 400
+
+    resp_missing = client.put("/api/analysis/menus/999999/food-vector", json={"vector": [0.1] * 10})
+    assert resp_missing.status_code == 404
+
+
+def test_tag_menus_with_llm_leaves_untagged_when_llm_unconfigured(client):
+    _ingest_meal_log(client, "E55555", "맛남", menu_name="모듬과일")
+
+    resp = client.post("/api/analysis/menus/tag-with-llm")
+    assert resp.status_code == 200
+    # 사내 LLM 미설정 환경에서는 모의 응답이 벡터 형식으로 파싱되지 않으므로 0건이어야 함
+    assert resp.json()["tagged_menus"] == 0
 
 
 def test_health_endpoint(client):
