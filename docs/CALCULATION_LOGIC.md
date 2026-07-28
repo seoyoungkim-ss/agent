@@ -36,6 +36,7 @@
 | 취식 로그 ↔ 메뉴 연결 | `app/api/ingest.py` (`ingest_meal_log`) | - | 6.1/6.3 전제조건 |
 | 본사/계열사/기타 분류 | `app/services/company_classification.py` (`classify_division`) | `COMPANY_DIVISION_MAP` (같은 파일) | 6.1 |
 | 배치 스케줄 주기 | `app/scheduler.py` | 같은 파일 (cron 표현식) | 9.3 |
+| 전체 취식 데이터 원본 엑셀 다운로드(기간 선택) | `app/api/dashboard.py` (`meal_log_export`) | - (순수 조회, 계산 없음) | - |
 
 ---
 
@@ -543,3 +544,26 @@ def build_employee_menu_sets(db, period_start, period_end) -> dict[str, set[str]
 test_menu_affinity.py`(8개) — 둘 다 순수 함수라 DB 없이 빠르게 검증 가능.
 API 엔드투엔드는 `test_api_ingest_and_analysis.py::
 test_taste_clusters_recompute_and_list`, `::test_menu_affinity_finds_co_occurring_menu`.
+
+## 17. 전체 취식 데이터 원본 엑셀 다운로드 (기간 선택)
+
+**파일**: `backend/app/api/dashboard.py`의 `meal_log_export()`
+
+- 집계/가공 없이 `meal_log`를 `employee_master`(구분·회사명) + `corner_master`
+  + `menu_master`(메뉴 없으면 outer join)와 그대로 조인해 행 단위로 xlsx에 쓴다.
+  계산 로직이 아니라 순수 조회+포맷이라 튜닝 지점은 없음.
+- 기간 필터는 `[period_start, period_end]`를 **양끝 포함**으로 해석: 내부적으로는
+  `period_end + 1일`을 배타적 상한으로 써서(`eaten_at < period_end+1일 00:00`)
+  `eaten_at`에 시각이 있어도 종료일 하루 전체가 포함되게 한다. 다른 기간 필터들
+  (`aggregation.py`, `menu_affinity.py` 등)도 같은 패턴을 쓰므로 여기만 다르게
+  바꾸면 일관성이 깨진다.
+- **API**: `GET /api/dashboard/meal-log/export?period_start&period_end` →
+  `취식일시·사번·구분·회사명·식사구분·코너·메뉴·맛평가·의견` 9개 컬럼 xlsx.
+- **프론트**: `HomePage.tsx`의 "전체 취식 데이터 다운로드 (기간 선택)" 카드 —
+  시작일/종료일 `<input type="date">` 두 개 + 다운로드 버튼(다른 export와 동일하게
+  `<a href=... download>` 패턴, 별도 fetch 코드 없음).
+- **테스트**: `test_api_ingest_and_analysis.py::
+  test_meal_log_export_returns_xlsx_for_selected_period` — xlsx를 openpyxl로 다시
+  읽어 헤더/행수/기간 밖 데이터 제외를 검증(테스트 전용 의존성이므로 `openpyxl`은
+  `requirements-dev.txt`에만 있고 운영 `requirements.txt`에는 없음 — 운영에는
+  xlsxwriter로 "쓰기"만 하면 되므로 필요 없음).

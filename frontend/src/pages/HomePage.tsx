@@ -23,6 +23,12 @@ function mondayOf(date: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+function isoDaysAgo(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
 const CLASSIFICATION_OPTIONS: { label: string; value: Classification | "전체" }[] = [
   { label: "전체", value: "전체" },
   { label: "평일", value: "평일" },
@@ -33,6 +39,8 @@ export function HomePage() {
   const [classification, setClassification] = useState<Classification | "전체">("전체");
   const [menuName, setMenuName] = useState("");
   const [searchedMenu, setSearchedMenu] = useState<string | null>(null);
+  const [exportStart, setExportStart] = useState(isoDaysAgo(30));
+  const [exportEnd, setExportEnd] = useState(isoDaysAgo(0));
   const startDate = mondayOf(new Date());
 
   const weekly = useQuery({
@@ -96,6 +104,8 @@ export function HomePage() {
   const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${startDate}${
     classification !== "전체" ? `&classification=${encodeURIComponent(classification)}` : ""
   }`;
+
+  const mealLogExportUrl = `/api/dashboard/meal-log/export?period_start=${exportStart}&period_end=${exportEnd}`;
 
   return (
     <div className="space-y-6">
@@ -221,6 +231,40 @@ export function HomePage() {
               </div>
             </div>
           ))}
+        </div>
+      </Card>
+
+      <Card title="전체 취식 데이터 다운로드 (기간 선택)">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          요약이 아닌 개별 취식 기록(취식일시·사번·구분·회사명·식사구분·코너·메뉴·맛평가·의견)을 선택한 기간 그대로 엑셀로 내려받습니다.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            시작일
+            <input
+              type="date"
+              className="rounded-md border px-3 py-2 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              value={exportStart}
+              max={exportEnd}
+              onChange={(e) => setExportStart(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            종료일
+            <input
+              type="date"
+              className="rounded-md border px-3 py-2 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              value={exportEnd}
+              min={exportStart}
+              max={isoDaysAgo(0)}
+              onChange={(e) => setExportEnd(e.target.value)}
+            />
+          </label>
+          <a href={mealLogExportUrl} download>
+            <Button variant="secondary">엑셀 다운로드</Button>
+          </a>
         </div>
       </Card>
     </div>

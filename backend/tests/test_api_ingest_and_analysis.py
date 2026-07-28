@@ -1,4 +1,5 @@
 import datetime as dt
+import io
 
 from app.config import get_settings
 
@@ -162,6 +163,34 @@ def test_weekly_summary_export_returns_xlsx(client):
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert resp.content[:2] == b"PK"  # xlsx는 zip 컨테이너이므로 PK 매직 바이트로 시작
+
+
+def test_meal_log_export_returns_xlsx_for_selected_period(client, db_session):
+    _ingest_weekly_menu(client)
+    _ingest_meal_log(client, "E11111", "맛남", "맛있어요", company_name="삼성전자")
+    _ingest_meal_log(client, "E22222", "보통", None, company_name="삼성SDI")
+    # 기간 밖 데이터는 제외돼야 함
+    _ingest_meal_log(client, "E33333", "개선", None, eaten_date=MONDAY + dt.timedelta(days=10))
+
+    resp = client.get(
+        "/api/dashboard/meal-log/export",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert resp.content[:2] == b"PK"
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(resp.content))
+    sheet = wb.active
+    rows = list(sheet.iter_rows(values_only=True))
+    assert rows[0] == ("취식일시", "사번", "구분", "회사명", "식사구분", "코너", "메뉴", "맛평가", "의견")
+    assert len(rows) == 3  # header + 2 rows (기간 밖 1건 제외)
+    employee_ids = {row[1] for row in rows[1:]}
+    assert employee_ids == {"E11111", "E22222"}
 
 
 def test_simulation_what_if_returns_all_corners(client):
