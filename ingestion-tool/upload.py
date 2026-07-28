@@ -54,6 +54,7 @@ def _meal_log_row_to_dict(row: ParsedMealLogRow) -> dict:
         "employee_id": row.employee_id,
         "meal_type": row.meal_type.value,
         "corner_name": row.corner_name,
+        "menu_name": row.menu_name,
         "taste_score": row.taste_score.value if row.taste_score else None,
         "comment": row.comment,
     }

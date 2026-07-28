@@ -27,6 +27,10 @@
 | 혼잡도(대기시간) 예측 | `app/api/simulation.py` (`congestion_forecast`) | 같은 파일 | 7.2 |
 | 월간 VOE 클러스터링 | `app/services/voe_clustering.py` | `max_clusters` 파라미터 | 5.2 / 8 |
 | 주간 식단표 파싱(메인/부찬 분리) | `ingestion-tool/parsing/weekly_menu_parser.py` | `split_cell_into_items()` | 2.2 / 9.2 |
+| 식당취식정보(POS) 파싱 | `ingestion-tool/parsing/meal_transaction_parser.py` | `_REQUIRED_HEADERS` | 2.1 (실측 스키마) |
+| 맛평가 리스트 파싱 | `ingestion-tool/parsing/taste_eval_parser.py` | `_HEADER_NAMES` | 2.1 (실측 스키마) |
+| 취식기록 ↔ 맛평가 병합(조인) | `ingestion-tool/parsing/merge.py` | `merge_transactions_with_taste()` | 9.2 |
+| 식사구분 어휘 정규화(중식↔점심 등) | `ingestion-tool/models.py` (`MEAL_TYPE_ALIASES`) | 같은 파일 | - |
 | 취식 로그 ↔ 메뉴 연결 | `app/api/ingest.py` (`ingest_meal_log`) | - | 6.1/6.3 전제조건 |
 | 배치 스케줄 주기 | `app/scheduler.py` | 같은 파일 (cron 표현식) | 9.3 |
 
@@ -287,21 +291,73 @@ test_weekly_menu_parser.py`에 합성 그리드로 만든 테스트가 있으니
 
 ---
 
-## 12. 취식 로그 ↔ 실제 제공 메뉴 연결
+## 12. 취식기록 ↔ 맛평가 병합 (실측 스키마로 교체됨)
 
-**파일**: `backend/app/api/ingest.py::ingest_meal_log`
+PRD 작성 시점엔 `mealdata.csv` 한 파일에 취식일자/사번/식구분/코너/맛평가/의견이
+전부 있다고 가정했었다. **실제로는 두 개의 별도 파일**이고(사용자가 스크린샷으로 확인),
+컬럼도 훨씬 많다:
 
-`mealdata.csv`에는 메뉴명이 없고 코너만 있어서, 같은 날짜·같은 식사구분·같은 코너의
-`weekly_menu_plan`에서 `menu_role=MAIN`인 행을 찾아 연결한다. **그 코너가 그 날 메인을
-정확히 1개만 제공했을 때만 연결**하고(모호하면 연결 안 함, `menu_id=NULL`로 남음):
+**① 식당취식정보(POS 결제 로그)** — 25개 컬럼. 파서: `ingestion-tool/parsing/
+meal_transaction_parser.py::parse_meal_transaction_grid`. 헤더 **이름**으로 컬럼을
+찾으므로 열 순서가 바뀌어도 안전하다(`_REQUIRED_HEADERS` 딕셔너리 참고). 핵심 컬럼:
+일시, 부문명, 사업장명, 회사, 사원번호, 회사구분(협력사/관계사/…), 급식업체, 식당,
+코너, 식구분, 포장구분, **메뉴명(코드성)**, **화면표시명(한글)(실제 표시 이름)**,
+영수증번호, 구분(정상 등), 정정여부.
+
+⚠️ **협력사 직원은 사원번호가 빈 값인 실제 사례가 있었다** (스크린샷의 이철*/김입*/
+천명* — 회사구분=협력사, 사원번호 공란. 관계사인 박휘*만 사원번호=14131244로 채워져
+있었음). `parse_meal_transaction_grid`는 사원번호가 없는 행을 **건너뛴다**
+(`if not employee_id: continue`) — 즉 협력사 인력의 취식은 지금 구조로는 개인 단위
+분석(6.1)에서 빠진다. 이게 의도된 정책인지, 협력사도 다른 식별자로 잡아야 하는지는
+확인이 더 필요하다.
+
+**② 맛평가 리스트** — `N0, 취식일자, Knox ID, 식사구분, 평가, 메뉴명, 의견, 평가의견,
+IF 생성 날짜, IF 수정 날짜`. 파서: `ingestion-tool/parsing/taste_eval_parser.py`.
+`취식일자`엔 **시간 정보가 없다**(날짜만). `의견`/`평가의견` 두 컬럼 중 값이 있는 걸
+합쳐서 `comment`로 쓴다(`" / "`로 연결, `_summarize` 아님 — 둘 다 있으면 둘 다 남김).
+
+**③ 병합** — `ingestion-tool/parsing/merge.py::merge_transactions_with_taste`.
+조인 키는 `(사번, 취식 날짜, 식사구분, 메뉴명)` 4개 조합. 코너는 맛평가 쪽에 아예
+없어서 조인 키에 못 쓴다.
+
 ```python
-menu_snapshot = main_plans[0] if len(main_plans) == 1 else None
+def employee_key(transaction_employee_id: str) -> str:
+    return transaction_employee_id.strip()   # ⚠️ 아래 가정 참고
 ```
-한 코너가 하루에 메인을 여러 개 제공하는 구조(예: 일품 코너가 A/B 메뉴 중 택1)라면
-이 연결이 계속 실패해서 `menu_id`가 안 채워진다 — 그러면 6.3(메뉴별 분석)이 그 코너
-데이터를 못 잡는다. **이 경우 별도 신원 확인 수단(예: 결제 시스템의 메뉴 선택 로그)이
-없으면 근본적으로 풀 수 없는 데이터 한계**이니, 실제 데이터 구조를 보고 이 함수의
-매칭 조건을 조정해야 할 수 있다.
+
+**⚠️ 확인 안 된 핵심 가정 3가지** (merge.py 맨 위 docstring에도 적어둠):
+1. **맛평가의 Knox ID == 취식기록의 사원번호**라고 가정하고 문자열 그대로 비교한다.
+   실제로 Knox ID가 계정명 형식이고 사원번호가 숫자형이라 서로 다른 체계라면, 매칭이
+   전부 실패한다 — 그 경우 `employee_key()` 안에 변환 로직이나 별도 매핑 테이블 조회를
+   추가해야 한다 (지금은 아무 매핑도 없이 그대로 비교).
+2. **메뉴명 매칭은 "화면표시명(한글)"** 기준이다(코드성 메뉴명이 아니라). 두 값이
+   실제로도 문자열이 정확히 같은지(공백, 표기 차이 등) 실물 데이터로 검증 필요.
+3. **식사구분 어휘가 다르다** — 취식기록 "중식", 맛평가 "점심". `models.py`의
+   `MEAL_TYPE_ALIASES` 딕셔너리에서 정규화하므로, 다른 표기(예: "런치")가 또 나오면
+   여기에 한 줄만 추가하면 된다.
+
+**status 필터**: `merge_transactions_with_taste(..., only_normal_status=True)` 기본값이
+`구분 != "정상"`인 행을 제외한다. "정상" 외에 어떤 값들이 있는지(취소/환불 등) 아직
+확인 못 했다 — 실제 파일 받으면 `구분` 컬럼의 고유값 목록부터 확인해서 이 필터 조건을
+맞게 조정할 것.
+
+**직접 실행해서 검증하는 법**: `ingestion-tool/sample_data/`에 사용자가 보내준 실제
+스크린샷 샘플을 그대로 재현한 xlsx 2개(`sample_transactions.xlsx`,
+`sample_taste_eval.xlsx`)와 그걸 파싱+병합해서 결과를 출력하는 `demo_merge.py`가
+있다. 이 합성 파일은 DRM이 없어서 xlwings/Excel 없이도 (openpyxl로) 바로 돌려볼 수
+있다:
+```bash
+cd ingestion-tool && source .venv/bin/activate
+python sample_data/demo_merge.py
+```
+실제 파일을 받으면 이 스크립트의 `read_grid()`를 실제 파일 경로로 바꿔서 그대로
+재사용하면 된다 — 파싱/병합 로직 자체는 안 건드려도 됨.
+
+**백엔드 연결**: `menu_name`이 있으면(위 파이프라인은 항상 채워서 보낸다)
+`backend/app/api/ingest.py::ingest_meal_log`가 그 이름으로 바로
+`menu_master`를 조회/생성해서 연결한다 — 예전의 "코너의 그날 메인 메뉴 하나로
+추정" 방식보다 훨씬 정확하다. `menu_name`이 없는 경우(과거 방식 호환용)에만 예전
+추정 로직으로 폴백한다.
 
 ---
 
@@ -334,11 +390,14 @@ scheduler.add_job(run_monthly_voe_clustering, "cron", day=1, hour=3, minute=0, .
 | `holidays.py` / 휴일 시드 | `backend/tests/test_holidays.py` (6개) |
 | `ingest.py`, `aggregation.py`, API 전반 | `backend/tests/test_api_ingest_and_analysis.py` (37개 중 나머지, 실제 DB에 데이터 넣고 API 호출까지 검증) |
 | `weekly_menu_parser.py` | `ingestion-tool/tests/test_weekly_menu_parser.py` (9개) |
-| `meal_log_parser.py` | `ingestion-tool/tests/test_meal_log_parser.py` (8개) |
+| `meal_transaction_parser.py` | `ingestion-tool/tests/test_meal_transaction_parser.py` (7개) |
+| `taste_eval_parser.py` | `ingestion-tool/tests/test_taste_eval_parser.py` (5개) |
+| `merge.py` (조인 로직) | `ingestion-tool/tests/test_merge.py` (7개) |
 
 ```bash
 cd backend && source .venv/bin/activate && pytest -q
 cd ingestion-tool && source .venv/bin/activate && pytest -q
+python sample_data/demo_merge.py   # 실물과 비슷한 합성 파일로 전체 파이프라인 눈으로 확인
 ```
 
 새 계산 로직을 추가하면(예: food_vector 자동 태깅 배치), 반드시 같은 패턴으로
