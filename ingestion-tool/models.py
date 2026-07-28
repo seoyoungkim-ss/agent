@@ -104,5 +104,9 @@ class ParsedMealLogRow:
     meal_type: MealType
     corner_name: str
     menu_name: str | None
+    # 취식기록의 "회사"(예: 삼성전자/삼성SDI/지리산 등) 원문 그대로. 백엔드가 이
+    # 값으로 본사/계열사/기타를 분류한다 (app/services/company_classification.py) —
+    # 분류 매핑을 바꿀 때 이 도구를 재배포할 필요 없게 하려는 의도적 설계.
+    company_name: str
     taste_score: TasteScore | None
     comment: str | None

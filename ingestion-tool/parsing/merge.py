@@ -63,6 +63,7 @@ def merge_transactions_with_taste(
                 meal_type=tx.meal_type,
                 corner_name=tx.corner_name,
                 menu_name=_normalize_menu(tx.menu_display_name) or tx.menu_code_name or None,
+                company_name=tx.company_name,
                 taste_score=evaluation.taste_score if evaluation else None,
                 comment=evaluation.comment if evaluation else None,
             )

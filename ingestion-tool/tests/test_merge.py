@@ -48,6 +48,11 @@ def test_matching_transaction_gets_taste_score_and_comment():
     assert merged[0].menu_name == "해물잡탕밥"
 
 
+def test_company_name_carried_through_for_division_classification():
+    merged = merge_transactions_with_taste([_tx(company_name="삼성전자")], [])
+    assert merged[0].company_name == "삼성전자"
+
+
 def test_unmatched_transaction_has_no_evaluation():
     merged = merge_transactions_with_taste([_tx(employee_id="E9999")], [_ev()])
     assert merged[0].taste_score is None

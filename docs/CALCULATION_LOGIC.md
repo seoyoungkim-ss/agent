@@ -32,6 +32,7 @@
 | 취식기록 ↔ 맛평가 병합(조인) | `ingestion-tool/parsing/merge.py` | `merge_transactions_with_taste()` | 9.2 |
 | 식사구분 어휘 정규화(중식↔점심 등) | `ingestion-tool/models.py` (`MEAL_TYPE_ALIASES`) | 같은 파일 | - |
 | 취식 로그 ↔ 메뉴 연결 | `app/api/ingest.py` (`ingest_meal_log`) | - | 6.1/6.3 전제조건 |
+| 본사/계열사/기타 분류 | `app/services/company_classification.py` (`classify_division`) | `COMPANY_DIVISION_MAP` (같은 파일) | 6.1 |
 | 배치 스케줄 주기 | `app/scheduler.py` | 같은 파일 (cron 표현식) | 9.3 |
 
 ---
@@ -405,3 +406,47 @@ python sample_data/demo_merge.py   # 실물과 비슷한 합성 파일로 전체
 새 계산 로직을 추가하면(예: food_vector 자동 태깅 배치), 반드시 같은 패턴으로
 (1) 순수 함수로 분리 (2) `tests/`에 단위테스트 추가를 지켜서 다음 사람이 또 이 문서
 없이도 안전하게 고칠 수 있게 해두는 걸 권장한다.
+
+---
+
+## 15. 본사/계열사/기타 분류 (PRD 6.1)
+
+**확정된 규칙** (사용자, 2026-07-28): 취식기록의 "회사" 원문 기준으로
+- `삼성전자` → 본사
+- `삼성SDI`, `삼성에스원`, `삼성SDS` → 계열사
+- 그 외 전부(지리산, 제일원, (주)아이원 등) → 기타
+
+**파일**: `backend/app/services/company_classification.py`
+```python
+COMPANY_DIVISION_MAP: dict[str, Division] = {
+    "삼성전자": Division.HEADQUARTERS,
+    "삼성SDI": Division.AFFILIATE,
+    "삼성에스원": Division.AFFILIATE,
+    "삼성SDS": Division.AFFILIATE,
+}
+def classify_division(company_name): ...  # 없으면 기타
+```
+**분류 매핑을 바꾸려면 이 딕셔너리만 고치면 된다** — ingestion-tool(운영자 PC)은
+원문 회사명만 그대로 실어 보내고 분류는 백엔드가 하므로, 매핑이 바뀌어도 운영자
+PC의 실행 파일을 다시 배포할 필요가 없다.
+
+**중요**: 계열사(B/C/D)라도 화면에는 "계열사"라는 라벨이 아니라 **실제 회사명을
+그대로 보여줘야 한다**(사용자 요구사항). 이를 위해 `employee_master`에
+`division`(집계용 대분류)과 `company_name`(원문, 표시용) 두 컬럼을 같이 저장한다
+— 계열사 집계는 `division`으로 묶어서 보되, 개별 표시가 필요한 화면에서는
+`company_name`을 쓰면 된다. **아직 프론트엔드에 이 값을 보여주는 화면이 없다** —
+PRD 6.1이 요구하는 "본사/계열사/기타 구분 식수" 차트/표 자체가 아직 안 만들어져
+있고(지금은 홈 화면의 전체 합산 식수만 있음), `daily_division_stats` 테이블에는
+이제 division이 정확히 채워지므로 데이터는 이미 준비돼 있다 — API
+(`/api/analysis/...`에 새 엔드포인트 추가)와 프론트 차트만 얹으면 된다.
+
+**데이터 흐름**: `ingestion-tool/models.py`의 `ParsedMealLogRow.company_name`
+(취식기록의 "회사" 원문) → `merge.py`가 그대로 옮김 → `upload.py`가 JSON에 포함 →
+`backend/app/schemas/ingest.py`의 `MealLogRowIn.company_name` → `app/services/
+master_data.py::get_or_create_employee(db, employee_id, company_name)`이 매번
+최신 값으로 `division`/`company_name`을 갱신.
+
+**테스트**: `backend/tests/test_company_classification.py`(5개, 순수 함수),
+`backend/tests/test_api_ingest_and_analysis.py::
+test_meal_log_ingest_classifies_division_from_company_name`(API 엔드투엔드로
+실제 DB에 반영되는지 확인).

@@ -55,7 +55,7 @@ def ingest_meal_log(payload: MealLogIngestRequest, db: Session = Depends(get_db)
     new_menus = 0
 
     for row in payload.rows:
-        employee = get_or_create_employee(db, row.employee_id)
+        employee = get_or_create_employee(db, row.employee_id, row.company_name)
         corner, _ = get_or_create_corner(db, row.corner_name)
 
         menu_id: int | None = None

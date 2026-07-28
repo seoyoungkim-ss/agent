@@ -2,8 +2,8 @@
 
 from sqlalchemy.orm import Session
 
-from app.models.enums import Division
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
+from app.services.company_classification import classify_division
 
 _GREEN_MEAT_NAMES = {"그린미트"}
 
@@ -30,14 +30,24 @@ def get_or_create_menu(db: Session, menu_name: str) -> tuple[MenuMaster, bool]:
     return menu, False
 
 
-def get_or_create_employee(db: Session, employee_id: str) -> EmployeeMaster:
-    """meal_log만으로는 본사/계열사/기타 구분을 알 수 없어 기본값 OTHER로 생성한다.
+def get_or_create_employee(
+    db: Session, employee_id: str, company_name: str | None = None
+) -> EmployeeMaster:
+    """식당취식정보의 "회사" 원문(company_name)으로 본사/계열사/기타를 분류한다
+    (app/services/company_classification.py). company_name이 없는 소스(과거 방식
+    호환)는 기타로 남는다.
 
-    실제 구분은 별도 HR 마스터 업로드(추후 구현)로 갱신하는 것을 전제로 한다.
+    매번 최신 company_name/division으로 갱신한다 — 사람이 회사를 옮기거나, 분류
+    매핑(COMPANY_DIVISION_MAP)이 나중에 바뀌어도 다음 배치 인입 때 자동 반영되게
+    하려는 의도.
     """
     employee = db.query(EmployeeMaster).filter_by(employee_id=employee_id).one_or_none()
+    division = classify_division(company_name)
     if employee is None:
-        employee = EmployeeMaster(employee_id=employee_id, division=Division.OTHER)
+        employee = EmployeeMaster(employee_id=employee_id, division=division, company_name=company_name)
         db.add(employee)
         db.flush()
+    elif company_name:
+        employee.company_name = company_name
+        employee.division = division
     return employee

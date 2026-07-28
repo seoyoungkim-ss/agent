@@ -31,7 +31,7 @@ def _ingest_weekly_menu(client):
     return resp.json()
 
 
-def _ingest_meal_log(client, employee_id: str, taste: str, comment: str | None = None):
+def _ingest_meal_log(client, employee_id: str, taste: str, comment: str | None = None, company_name: str | None = None):
     rows = [
         {
             "eaten_at": dt.datetime.combine(MONDAY, dt.time(11, 52, 0)).isoformat(),
@@ -40,6 +40,7 @@ def _ingest_meal_log(client, employee_id: str, taste: str, comment: str | None =
             "corner_name": "한식",
             "taste_score": taste,
             "comment": comment,
+            "company_name": company_name,
         }
     ]
     resp = client.post("/api/ingest/meal-log", json={"rows": rows}, headers=AUTH_HEADERS)
@@ -166,3 +167,25 @@ def test_simulation_what_if_returns_all_corners(client):
     body = resp.json()
     assert body["classification"] == "평일"
     assert any(c["corner_name"] == "한식" for c in body["corners"])
+
+
+def test_meal_log_ingest_classifies_division_from_company_name(client, db_session):
+    _ingest_meal_log(client, "E1001", "맛남", company_name="삼성전자")
+    _ingest_meal_log(client, "E1002", "맛남", company_name="삼성SDI")
+    _ingest_meal_log(client, "E1003", "맛남", company_name="지리산")
+    _ingest_meal_log(client, "E1004", "맛남")  # company_name 없음(과거 방식 호환)
+
+    from app.models.master import EmployeeMaster
+
+    employees = {
+        e.employee_id: e for e in db_session.query(EmployeeMaster).filter(
+            EmployeeMaster.employee_id.in_(["E1001", "E1002", "E1003", "E1004"])
+        )
+    }
+    assert employees["E1001"].division.value == "본사"
+    assert employees["E1001"].company_name == "삼성전자"
+    assert employees["E1002"].division.value == "계열사"
+    assert employees["E1002"].company_name == "삼성SDI"
+    assert employees["E1003"].division.value == "기타"
+    assert employees["E1004"].division.value == "기타"
+    assert employees["E1004"].company_name is None
