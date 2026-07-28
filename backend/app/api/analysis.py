@@ -1,18 +1,56 @@
 import datetime as dt
 import statistics
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.master import CornerMaster, MenuMaster
-from app.models.stats import DailyCornerStats, EmployeeTasteProfile, MenuPerformanceStats
+from app.models.stats import DailyCornerStats, DailyDivisionStats, EmployeeTasteProfile, MenuPerformanceStats
 from app.services.aggregation import aggregate_menu_performance, diagnose_menu_decline
 from app.services.food_vector import FOOD_VECTOR_DIMENSIONS
 from app.services.holidays import DayClassification
 from app.services.taste_profile import compute_employee_taste_profiles
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
+
+
+def _period_bucket(stat_date: dt.date, granularity: str) -> str:
+    if granularity == "monthly":
+        return stat_date.strftime("%Y-%m")
+    if granularity == "weekly":
+        monday = stat_date - dt.timedelta(days=stat_date.weekday())
+        return monday.isoformat()
+    return stat_date.isoformat()
+
+
+@router.get("/divisions")
+def division_analysis(
+    period_start: dt.date,
+    period_end: dt.date,
+    granularity: Literal["daily", "weekly", "monthly"] = "daily",
+    classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
+    db: Session = Depends(get_db),
+):
+    """PRD 6.1: 본사/계열사/기타 구분 일간/주간/월간 식수."""
+    query = db.query(DailyDivisionStats).filter(
+        DailyDivisionStats.stat_date.between(period_start, period_end)
+    )
+    if classification == DayClassification.WEEKDAY.value:
+        query = query.filter(DailyDivisionStats.is_holiday.is_(False))
+    elif classification == DayClassification.HOLIDAY.value:
+        query = query.filter(DailyDivisionStats.is_holiday.is_(True))
+
+    totals: dict[tuple[str, str], int] = {}
+    for row in query.all():
+        key = (_period_bucket(row.stat_date, granularity), row.division.value)
+        totals[key] = totals.get(key, 0) + row.headcount
+
+    return [
+        {"period": period, "division": division, "headcount": headcount}
+        for (period, division), headcount in sorted(totals.items())
+    ]
 
 
 @router.get("/corners")

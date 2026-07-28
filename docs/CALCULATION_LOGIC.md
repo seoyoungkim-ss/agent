@@ -434,11 +434,16 @@ PC의 실행 파일을 다시 배포할 필요가 없다.
 그대로 보여줘야 한다**(사용자 요구사항). 이를 위해 `employee_master`에
 `division`(집계용 대분류)과 `company_name`(원문, 표시용) 두 컬럼을 같이 저장한다
 — 계열사 집계는 `division`으로 묶어서 보되, 개별 표시가 필요한 화면에서는
-`company_name`을 쓰면 된다. **아직 프론트엔드에 이 값을 보여주는 화면이 없다** —
-PRD 6.1이 요구하는 "본사/계열사/기타 구분 식수" 차트/표 자체가 아직 안 만들어져
-있고(지금은 홈 화면의 전체 합산 식수만 있음), `daily_division_stats` 테이블에는
-이제 division이 정확히 채워지므로 데이터는 이미 준비돼 있다 — API
-(`/api/analysis/...`에 새 엔드포인트 추가)와 프론트 차트만 얹으면 된다.
+`company_name`을 쓰면 된다.
+
+**PRD 6.1 "본사/계열사/기타 구분 일간/주간/월간 식수" 화면 (완료)**: `GET
+/api/analysis/divisions?period_start&period_end&granularity=daily|weekly|monthly
+&classification=평일|주말+공휴일`(`app/api/analysis.py::division_analysis`)이
+`daily_division_stats`를 기간 버킷(일/주/월)별로 묶어서 반환한다. 주간 버킷은
+그 주의 월요일 날짜, 월간은 `YYYY-MM`을 라벨로 쓴다(`_period_bucket()`). 프론트는
+`frontend/src/pages/AnalysisPage.tsx`의 `DivisionAnalysisSection`(분석 탭 →
+사용자 분석 서브탭 맨 위)이 본사/계열사/기타를 각각 categorical 색상(series-1/2/3,
+고정 순서)의 막대로 그린다.
 
 **데이터 흐름**: `ingestion-tool/models.py`의 `ParsedMealLogRow.company_name`
 (취식기록의 "회사" 원문) → `merge.py`가 그대로 옮김 → `upload.py`가 JSON에 포함 →

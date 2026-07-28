@@ -74,6 +74,14 @@ export interface MenuPerformanceRow {
   quadrant: Quadrant | null;
 }
 
+export type Granularity = "daily" | "weekly" | "monthly";
+
+export interface DivisionRow {
+  period: string;
+  division: string; // 본사 | 계열사 | 기타
+  headcount: number;
+}
+
 export interface TasteProfile {
   employee_id: string;
   profile_vector: number[];
@@ -127,6 +135,13 @@ export const api = {
 
   cornerAnalysis: (params: { period_start: string; period_end: string; classification?: Classification }) =>
     request<CornerAnalysisRow[]>(`/analysis/corners${qs(params)}`),
+
+  divisionAnalysis: (params: {
+    period_start: string;
+    period_end: string;
+    granularity?: Granularity;
+    classification?: Classification;
+  }) => request<DivisionRow[]>(`/analysis/divisions${qs(params)}`),
 
   menuPerformance: (params: { period_start: string; period_end: string }) =>
     request<MenuPerformanceRow[]>(`/analysis/menu-performance${qs(params)}`),

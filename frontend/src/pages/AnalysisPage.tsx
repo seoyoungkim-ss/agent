@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
-import { api, type Classification, type MenuPerformanceRow } from "../api/client";
+import { api, type Classification, type Granularity, type MenuPerformanceRow } from "../api/client";
 import {
   Button,
   Card,
@@ -27,7 +27,114 @@ function isoDaysAgo(days: number): string {
 const PERIOD_END = isoDaysAgo(0);
 const PERIOD_START = isoDaysAgo(180); // PRD: 취식 데이터 6개월 누적 기준
 
-function UserAnalysisTab() {
+// 본사/계열사/기타를 항상 이 순서·색으로 그린다 (팔레트 categorical 순서 고정 원칙).
+const DIVISION_ORDER = ["본사", "계열사", "기타"];
+const DIVISION_SERIES_VAR = ["var(--series-1)", "var(--series-2)", "var(--series-3)"];
+
+function DivisionAnalysisSection() {
+  const [granularity, setGranularity] = useState<Granularity>("weekly");
+  const [classification, setClassification] = useState<Classification | "전체">("전체");
+  const chartTheme = useChartTheme();
+
+  const query = useQuery({
+    queryKey: ["division-analysis", granularity, classification],
+    queryFn: () =>
+      api.divisionAnalysis({
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+        granularity,
+        classification: classification === "전체" ? undefined : classification,
+      }),
+  });
+
+  const rows = query.data ?? [];
+  const periods = [...new Set(rows.map((r) => r.period))].sort();
+  const byDivision: Record<string, Map<string, number>> = {};
+  for (const r of rows) {
+    (byDivision[r.division] ??= new Map()).set(r.period, r.headcount);
+  }
+  const divisions = DIVISION_ORDER.filter((d) => byDivision[d]);
+
+  const option = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 16, top: 32, bottom: 28 },
+    tooltip: { trigger: "axis" },
+    legend: { top: 0, textStyle: { color: chartTheme.text } },
+    xAxis: {
+      type: "category",
+      data: periods,
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      name: "식수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: divisions.map((division) => ({
+      name: division,
+      type: "bar",
+      barMaxWidth: 22,
+      itemStyle: {
+        borderRadius: [4, 4, 0, 0],
+        color: resolveColor(DIVISION_SERIES_VAR[DIVISION_ORDER.indexOf(division)]),
+      },
+      data: periods.map((p) => byDivision[division].get(p) ?? 0),
+    })),
+  };
+
+  return (
+    <Card title="본사/계열사/기타 식수 (PRD 6.1)">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <SegmentedControl
+          value={granularity}
+          options={[
+            { label: "일간", value: "daily" },
+            { label: "주간", value: "weekly" },
+            { label: "월간", value: "monthly" },
+          ]}
+          onChange={setGranularity}
+        />
+        <SegmentedControl
+          value={classification}
+          options={[
+            { label: "전체", value: "전체" },
+            { label: "평일", value: "평일" },
+            { label: "주말+공휴일", value: "주말+공휴일" },
+          ]}
+          onChange={setClassification}
+        />
+      </div>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {rows.length === 0 && !query.isLoading && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          데이터가 없습니다. 배치 집계(daily_division_stats)가 먼저 필요합니다.
+        </p>
+      )}
+      {rows.length > 0 && <ReactECharts option={option} style={{ height: 280 }} />}
+      {rows.length > 0 && (
+        <div className="mt-4">
+          <Table
+            columns={[
+              { key: "period", label: "기간" },
+              ...divisions.map((d) => ({ key: d, label: d, align: "right" as const })),
+            ]}
+            rows={periods.map((p) => ({
+              period: p,
+              ...Object.fromEntries(divisions.map((d) => [d, (byDivision[d].get(p) ?? 0).toLocaleString()])),
+            }))}
+            rowKey={(r) => r.period as string}
+          />
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function TasteProfileSection() {
   const [employeeId, setEmployeeId] = useState("");
   const [searched, setSearched] = useState<string | null>(null);
   const profile = useQuery({
@@ -70,6 +177,15 @@ function UserAnalysisTab() {
         </div>
       )}
     </Card>
+  );
+}
+
+function UserAnalysisTab() {
+  return (
+    <div className="space-y-4">
+      <DivisionAnalysisSection />
+      <TasteProfileSection />
+    </div>
   );
 }
 

@@ -31,10 +31,17 @@ def _ingest_weekly_menu(client):
     return resp.json()
 
 
-def _ingest_meal_log(client, employee_id: str, taste: str, comment: str | None = None, company_name: str | None = None):
+def _ingest_meal_log(
+    client,
+    employee_id: str,
+    taste: str,
+    comment: str | None = None,
+    company_name: str | None = None,
+    eaten_date: dt.date = MONDAY,
+):
     rows = [
         {
-            "eaten_at": dt.datetime.combine(MONDAY, dt.time(11, 52, 0)).isoformat(),
+            "eaten_at": dt.datetime.combine(eaten_date, dt.time(11, 52, 0)).isoformat(),
             "employee_id": employee_id,
             "meal_type": "중식",
             "corner_name": "한식",
@@ -189,3 +196,64 @@ def test_meal_log_ingest_classifies_division_from_company_name(client, db_sessio
     assert employees["E1003"].division.value == "기타"
     assert employees["E1004"].division.value == "기타"
     assert employees["E1004"].company_name is None
+
+
+def test_division_analysis_daily_breakdown(client, db_session):
+    _ingest_meal_log(client, "E3001", "맛남", company_name="삼성전자")
+    _ingest_meal_log(client, "E3002", "맛남", company_name="삼성SDI")
+    _ingest_meal_log(client, "E3003", "맛남", company_name="지리산")
+
+    from app.services.aggregation import aggregate_daily_stats
+
+    aggregate_daily_stats(db_session, MONDAY)
+
+    resp = client.get(
+        "/api/analysis/divisions",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    by_division = {r["division"]: r["headcount"] for r in resp.json()}
+    assert by_division == {"본사": 1, "계열사": 1, "기타": 1}
+
+
+def test_division_analysis_monthly_granularity_combines_days(client, db_session):
+    from app.services.aggregation import aggregate_daily_stats
+
+    day1 = MONDAY
+    day2 = MONDAY + dt.timedelta(days=1)
+    _ingest_meal_log(client, "E4001", "맛남", company_name="삼성전자", eaten_date=day1)
+    _ingest_meal_log(client, "E4002", "맛남", company_name="삼성전자", eaten_date=day2)
+    aggregate_daily_stats(db_session, day1)
+    aggregate_daily_stats(db_session, day2)
+
+    resp = client.get(
+        "/api/analysis/divisions",
+        params={"period_start": day1.isoformat(), "period_end": day2.isoformat(), "granularity": "monthly"},
+    )
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert len(rows) == 1  # 같은 달 두 날짜가 한 버킷으로 합쳐져야 함
+    assert rows[0]["period"] == day1.strftime("%Y-%m")
+    assert rows[0]["headcount"] == 2
+
+
+def test_division_analysis_classification_filter(client, db_session):
+    from app.services.aggregation import aggregate_daily_stats
+
+    saturday = MONDAY + dt.timedelta(days=5)
+    _ingest_meal_log(client, "E5001", "맛남", company_name="삼성전자", eaten_date=MONDAY)
+    _ingest_meal_log(client, "E5002", "맛남", company_name="삼성전자", eaten_date=saturday)
+    aggregate_daily_stats(db_session, MONDAY)
+    aggregate_daily_stats(db_session, saturday)
+
+    resp = client.get(
+        "/api/analysis/divisions",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": saturday.isoformat(),
+            "classification": "주말+공휴일",
+        },
+    )
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["period"] == saturday.isoformat()
