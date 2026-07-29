@@ -51,6 +51,36 @@ async def test_chat_stream_posts_non_streaming_request_and_yields_words(monkeypa
     assert "".join(chunks) == "안녕 하세요 "
 
 
+def test_is_configured_does_not_require_api_key():
+    """인증이 필요 없는 사내 API도 있어(2026-07 실사용 확인) base_url만 있어도
+    설정된 것으로 간주해야 한다 — api_key를 필수로 요구하면 안 된다."""
+    settings = Settings(internal_llm_base_url="https://internal-llm.example.com/v1", internal_llm_api_key="")
+    assert InternalLLMClient(settings).is_configured is True
+
+
+def test_is_configured_false_without_base_url():
+    settings = Settings(internal_llm_base_url="", internal_llm_api_key="")
+    assert InternalLLMClient(settings).is_configured is False
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_omits_auth_header_when_api_key_not_set(monkeypatch):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "응답"}}]})
+
+    _patch_async_client(monkeypatch, handler)
+
+    settings = Settings(internal_llm_base_url="https://internal-llm.example.com/v1", internal_llm_api_key="")
+    client = InternalLLMClient(settings)
+
+    [c async for c in client.chat_stream([{"role": "user", "content": "안녕"}])]
+
+    assert captured["auth"] is None
+
+
 @pytest.mark.asyncio
 async def test_chat_complete_joins_words_from_non_streaming_response(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:

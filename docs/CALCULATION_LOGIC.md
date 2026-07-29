@@ -1172,3 +1172,14 @@ chat-completions **스트리밍(SSE)** 형식을 가정하고 구현돼 있었�
 `{base_url}/chat/completions`인지, 인증 헤더가 `Bearer {api_key}`인지,
 응답의 `message.content`가 단어 단위로 쪼개져 yield되는지, `chat_complete()`가
 그 조각들을 다시 합쳐 원문을 복원하는지.
+
+**추가 수정(2026-07)**: `is_configured`가 `base_url`과 `api_key`를 **둘 다**
+요구해서, 인증이 필요 없는 사내 API(실사용 확인 — 별도 인증 없는 내부망 전용
+API)를 쓰는 경우 `api_key`가 비어있다는 이유만으로 계속 모의 응답으로
+빠지는 문제가 있었다. `is_configured`는 이제 `base_url`만 확인하고,
+`api_key`가 비어있으면 `Authorization` 헤더 자체를 안 보낸다
+(`_auth_headers()`).
+
+**테스트 추가**: `test_is_configured_does_not_require_api_key`,
+`test_is_configured_false_without_base_url`,
+`test_chat_stream_omits_auth_header_when_api_key_not_set`.

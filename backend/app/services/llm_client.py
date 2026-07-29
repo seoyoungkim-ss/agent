@@ -23,7 +23,14 @@ class InternalLLMClient:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self._settings.internal_llm_base_url and self._settings.internal_llm_api_key)
+        # 인증이 필요 없는 사내 API도 있어(2026-07 실사용 확인) api_key는 필수로
+        # 안 본다 — base_url만 있으면 연동된 것으로 간주.
+        return bool(self._settings.internal_llm_base_url)
+
+    def _auth_headers(self) -> dict[str, str]:
+        if not self._settings.internal_llm_api_key:
+            return {}
+        return {"Authorization": f"Bearer {self._settings.internal_llm_api_key}"}
 
     async def chat_stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         if not self.is_configured:
@@ -32,7 +39,7 @@ class InternalLLMClient:
             return
 
         url = f"{self._settings.internal_llm_base_url.rstrip('/')}/chat/completions"
-        headers = {"Authorization": f"Bearer {self._settings.internal_llm_api_key}"}
+        headers = self._auth_headers()
         body = {
             "model": self._settings.internal_llm_chat_model,
             "messages": messages,
@@ -55,7 +62,7 @@ class InternalLLMClient:
             return [self._mock_embedding(t) for t in texts]
 
         url = f"{self._settings.internal_llm_base_url.rstrip('/')}/embeddings"
-        headers = {"Authorization": f"Bearer {self._settings.internal_llm_api_key}"}
+        headers = self._auth_headers()
         body = {"model": self._settings.internal_llm_embedding_model, "input": texts}
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, headers=headers, json=body)
@@ -68,7 +75,7 @@ class InternalLLMClient:
         reply = (
             "[사내 LLM 미설정 — 모의 응답] "
             f"'{last_user}' 에 대한 답변을 사내 LLM API 연동 후 실제로 제공할 수 있습니다. "
-            "INTERNAL_LLM_BASE_URL / INTERNAL_LLM_API_KEY를 .env에 설정하세요."
+            "INTERNAL_LLM_BASE_URL을 .env에 설정하세요(인증이 필요하면 INTERNAL_LLM_API_KEY도)."
         )
         for word in reply.split(" "):
             yield word + " "
