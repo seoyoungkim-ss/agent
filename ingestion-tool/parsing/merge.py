@@ -155,6 +155,60 @@ def diagnose_match_failure_by_evaluation(
     return result
 
 
+def sample_field_mismatches(
+    transactions: list[ParsedMealTransactionRow],
+    evaluations: list[ParsedTasteEvalRow],
+    *,
+    employee_mapping: dict[str, str] | None = None,
+    n: int = 5,
+) -> dict[str, list[tuple]]:
+    """`diagnose_match_failure_by_evaluation()`로 원인 필드를 좁힌 뒤, 그 필드의
+    실제 값이 맛평가/취식기록 사이에 어떻게 다른지(공백, 자릿수, 매핑 누락 등)
+    눈으로 비교할 샘플을 뽑는다.
+
+    아직 매칭 안 된 맛평가마다, 그 필드만 빼면 매칭되는 취식기록 후보가 있고
+    그 후보의 해당 필드 값이 맛평가 쪽 값과 실제로 다르면 (맛평가 값, 취식기록 값)
+    쌍으로 담는다. 필드별 최대 n건. 반환 키: "id", "date", "menu".
+    """
+    tx_full_keys: set[tuple] = set()
+    id_group: dict[tuple, set[str]] = defaultdict(set)
+    date_group: dict[tuple, set] = defaultdict(set)
+    menu_group: dict[tuple, set[str]] = defaultdict(set)
+    for tx in transactions:
+        knox_id = employee_key(tx.employee_id, employee_mapping)
+        date = tx.eaten_at.date()
+        menu = _normalize_menu(tx.menu_display_name)
+        tx_full_keys.add((knox_id, date, tx.meal_type, menu))
+        id_group[(date, tx.meal_type, menu)].add(knox_id)
+        date_group[(knox_id, tx.meal_type, menu)].add(date)
+        menu_group[(knox_id, date, tx.meal_type)].add(menu)
+
+    samples: dict[str, list[tuple]] = {"id": [], "date": [], "menu": []}
+    for ev in evaluations:
+        knox_id = ev.knox_id.strip()
+        menu = _normalize_menu(ev.menu_name)
+        date = ev.eaten_date
+        if (knox_id, date, ev.meal_type, menu) in tx_full_keys:
+            continue
+
+        if len(samples["id"]) < n:
+            candidates = id_group.get((date, ev.meal_type, menu))
+            if candidates and knox_id not in candidates:
+                samples["id"].append((knox_id, sorted(candidates)[0]))
+
+        if len(samples["date"]) < n:
+            candidates = date_group.get((knox_id, ev.meal_type, menu))
+            if candidates and date not in candidates:
+                samples["date"].append((date, sorted(candidates)[0]))
+
+        if len(samples["menu"]) < n:
+            candidates = menu_group.get((knox_id, date, ev.meal_type))
+            if candidates and menu not in candidates:
+                samples["menu"].append((menu, sorted(candidates)[0]))
+
+    return samples
+
+
 def merge_transactions_with_taste(
     transactions: list[ParsedMealTransactionRow],
     evaluations: list[ParsedTasteEvalRow],

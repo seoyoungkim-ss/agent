@@ -25,6 +25,7 @@ from parsing.merge import (
     diagnose_match_failure_by_evaluation,
     employee_key,
     merge_transactions_with_taste,
+    sample_field_mismatches,
 )
 from parsing.taste_eval_parser import parse_taste_eval_grid
 from parsing.weekly_menu_parser import parse_weekly_menu_grid
@@ -66,6 +67,23 @@ def _print_match_diagnosis(transactions, evaluations, employee_mapping) -> None:
     print(f"  날짜만 무시하고 매칭: {d['match_without_date']}행")
     print(f"  식사구분만 무시하고 매칭: {d['match_without_meal_type']}행")
     print(f"  메뉴명만 무시하고 매칭: {d['match_without_menu']}행")
+
+
+def _print_field_mismatch_samples(transactions, evaluations, employee_mapping, n: int) -> None:
+    """진단 A에서 어느 필드가 원인인지 좁혀진 뒤, 그 필드의 실제 값이 맛평가와
+    취식기록 사이에 어떻게 다른지(공백, 자릿수, 매핑 누락 등) 나란히 보여준다.
+    """
+    samples = sample_field_mismatches(transactions, evaluations, employee_mapping=employee_mapping, n=n)
+    labels = {"id": "ID(사번/Knox ID)", "date": "날짜", "menu": "메뉴명"}
+    print(f"\n--- 진단 C: 필드별 값 비교 샘플 (필드당 최대 {n}건) ---")
+    for field, label in labels.items():
+        rows = samples[field]
+        if not rows:
+            print(f"  {label}: 값이 다른 샘플 없음")
+            continue
+        print(f"  {label}:")
+        for eval_value, tx_value in rows:
+            print(f"    맛평가={eval_value!r}  vs  취식기록={tx_value!r}")
 
 
 def _print_debug_sample(transactions, evaluations, employee_mapping, n: int) -> None:
@@ -148,6 +166,7 @@ def _cmd_meal_log(args: argparse.Namespace) -> int:
 
     if args.debug_sample:
         _print_match_diagnosis(transactions, evaluations, employee_mapping)
+        _print_field_mismatch_samples(transactions, evaluations, employee_mapping, args.debug_sample)
         _print_debug_sample(transactions, evaluations, employee_mapping, args.debug_sample)
 
     if not args.yes and not _confirm("백엔드로 전송할까요?"):

@@ -1,7 +1,12 @@
 import datetime as dt
 
 from models import MealType, ParsedMealTransactionRow, ParsedTasteEvalRow, TasteScore
-from parsing.merge import diagnose_match_failure, diagnose_match_failure_by_evaluation, merge_transactions_with_taste
+from parsing.merge import (
+    diagnose_match_failure,
+    diagnose_match_failure_by_evaluation,
+    merge_transactions_with_taste,
+    sample_field_mismatches,
+)
 
 
 def _tx(**overrides) -> ParsedMealTransactionRow:
@@ -227,3 +232,46 @@ def test_diagnose_match_failure_by_evaluation_bounded_by_evaluation_count():
     assert d["total_evaluations"] == 1
     for key in ("full_match", "match_without_id", "match_without_date", "match_without_meal_type", "match_without_menu"):
         assert d[key] <= 1
+
+
+def test_sample_field_mismatches_finds_id_only_difference():
+    # 날짜/식사구분/메뉴명은 같은데 ID만 다름 — "id" 샘플에 (맛평가 값, 취식기록 값) 쌍이 잡혀야 함
+    transactions = [_tx(employee_id="E9999")]
+    evaluations = [_ev(knox_id="E1001")]
+
+    samples = sample_field_mismatches(transactions, evaluations)
+    assert samples["id"] == [("E1001", "E9999")]
+    assert samples["date"] == []
+    assert samples["menu"] == []
+
+
+def test_sample_field_mismatches_finds_menu_only_difference():
+    transactions = [_tx(menu_display_name="다른메뉴")]
+    evaluations = [_ev(menu_name="해물잡탕밥")]
+
+    samples = sample_field_mismatches(transactions, evaluations)
+    assert samples["menu"] == [("해물잡탕밥", "다른메뉴")]
+    assert samples["id"] == []
+
+
+def test_sample_field_mismatches_finds_date_only_difference():
+    transactions = [_tx(eaten_at=dt.datetime(2026, 6, 26, 12, 0, 0))]
+    evaluations = [_ev(eaten_date=dt.date(2026, 6, 25))]
+
+    samples = sample_field_mismatches(transactions, evaluations)
+    assert samples["date"] == [(dt.date(2026, 6, 25), dt.date(2026, 6, 26))]
+
+
+def test_sample_field_mismatches_empty_when_fully_matched():
+    samples = sample_field_mismatches([_tx()], [_ev()])
+    assert samples == {"id": [], "date": [], "menu": []}
+
+
+def test_sample_field_mismatches_respects_employee_mapping():
+    transactions = [_tx(employee_id="88887777")]
+    evaluations = [_ev(knox_id="knoxABC")]
+    mapping = {"88887777": "knoxABC"}
+
+    # 매핑 적용하면 완전 매칭이라 id 샘플이 비어 있어야 함
+    samples = sample_field_mismatches(transactions, evaluations, employee_mapping=mapping)
+    assert samples["id"] == []
