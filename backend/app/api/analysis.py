@@ -23,6 +23,7 @@ from app.services.food_vector import FOOD_VECTOR_DIMENSIONS
 from app.services.food_vector_tagging import run_llm_food_vector_tagging
 from app.services.holidays import DayClassification
 from app.services.llm_client import InternalLLMClient
+from app.services.master_data import TAKE_OUT_CORNER_NAME
 from app.services.menu_affinity import (
     build_employee_menu_sets,
     compute_menu_affinity,
@@ -71,22 +72,35 @@ def division_analysis(
     ]
 
 
-@router.get("/corners")
-def corner_analysis(
-    period_start: dt.date,
-    period_end: dt.date,
-    classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
-    db: Session = Depends(get_db),
-):
-    """PRD 6.2: 코너별 이용자 수/만족도/피크타임 서브속도."""
+def _load_corner_stats(
+    db: Session, period_start: dt.date, period_end: dt.date, classification: str | None
+) -> tuple[list[DailyCornerStats], dict[int, CornerMaster]]:
     query = db.query(DailyCornerStats).filter(DailyCornerStats.stat_date.between(period_start, period_end))
     if classification == DayClassification.WEEKDAY.value:
         query = query.filter(DailyCornerStats.is_holiday.is_(False))
     elif classification == DayClassification.HOLIDAY.value:
         query = query.filter(DailyCornerStats.is_holiday.is_(True))
-    rows = query.all()
-
     corners = {c.corner_id: c for c in db.query(CornerMaster).all()}
+    return query.all(), corners
+
+
+@router.get("/corners")
+def corner_analysis(
+    period_start: dt.date,
+    period_end: dt.date,
+    classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
+    exclude_take_out: bool = Query(
+        default=False, description="Take Out 코너 제외 — 착석 취식이 아니라 혼잡도/만족도 분석에 안 맞음"
+    ),
+    db: Session = Depends(get_db),
+):
+    """PRD 6.2: 코너별 이용자 수/만족도/피크타임 서브속도.
+
+    그린미트(다이어트식, 매니아층 전용)는 항상 마지막 행으로 정렬한다 — 코너가
+    나오는 화면 어디서든 일반 코너 비교에 섞이지 않도록.
+    """
+    rows, corners = _load_corner_stats(db, period_start, period_end, classification)
+
     by_corner: dict[int, list[DailyCornerStats]] = {}
     for row in rows:
         by_corner.setdefault(row.corner_id, []).append(row)
@@ -94,6 +108,8 @@ def corner_analysis(
     result = []
     for corner_id, stats in by_corner.items():
         corner = corners.get(corner_id)
+        if exclude_take_out and corner and corner.corner_name == TAKE_OUT_CORNER_NAME:
+            continue
         scores = [s.avg_taste_score for s in stats if s.avg_taste_score is not None]
         throughputs = [s.peak_throughput_per_min for s in stats if s.peak_throughput_per_min is not None]
         result.append(
@@ -102,6 +118,46 @@ def corner_analysis(
                 "corner_name": corner.corner_name if corner else None,
                 "is_diet_corner": corner.is_diet_corner if corner else None,
                 "headcount_total": sum(s.headcount for s in stats),
+                "avg_taste_score": statistics.fmean(scores) if scores else None,
+                "avg_peak_throughput_per_min": statistics.fmean(throughputs) if throughputs else None,
+            }
+        )
+    result.sort(key=lambda r: (bool(r["is_diet_corner"]), -r["headcount_total"]))
+    return result
+
+
+@router.get("/corners/trend")
+def corner_analysis_trend(
+    period_start: dt.date,
+    period_end: dt.date,
+    granularity: Literal["weekly", "monthly"] = "weekly",
+    classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
+    exclude_take_out: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    """PRD 6.2 확장: 코너별 만족도/피크타임 서브속도의 기간별(주간·월간) 추이."""
+    rows, corners = _load_corner_stats(db, period_start, period_end, classification)
+
+    buckets: dict[tuple[str, int], list[DailyCornerStats]] = {}
+    for row in rows:
+        corner = corners.get(row.corner_id)
+        if exclude_take_out and corner and corner.corner_name == TAKE_OUT_CORNER_NAME:
+            continue
+        key = (_period_bucket(row.stat_date, granularity), row.corner_id)
+        buckets.setdefault(key, []).append(row)
+
+    result = []
+    for (period, corner_id), stats in sorted(buckets.items()):
+        corner = corners.get(corner_id)
+        scores = [s.avg_taste_score for s in stats if s.avg_taste_score is not None]
+        throughputs = [s.peak_throughput_per_min for s in stats if s.peak_throughput_per_min is not None]
+        result.append(
+            {
+                "period": period,
+                "corner_id": corner_id,
+                "corner_name": corner.corner_name if corner else None,
+                "is_diet_corner": corner.is_diet_corner if corner else None,
+                "headcount": sum(s.headcount for s in stats),
                 "avg_taste_score": statistics.fmean(scores) if scores else None,
                 "avg_peak_throughput_per_min": statistics.fmean(throughputs) if throughputs else None,
             }

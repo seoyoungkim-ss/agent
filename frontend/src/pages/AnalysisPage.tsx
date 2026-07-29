@@ -4,6 +4,7 @@ import ReactECharts from "echarts-for-react";
 import {
   api,
   type Classification,
+  type CornerTrendRow,
   type Granularity,
   type MenuFoodVectorRow,
   type MenuPairRow,
@@ -332,12 +333,44 @@ function CornerAnalysisTab() {
         period_start: PERIOD_START,
         period_end: PERIOD_END,
         classification: classification === "전체" ? undefined : classification,
+        exclude_take_out: true, // Take Out은 착석 취식이 아니라 혼잡도/만족도 분석 대상이 아님(홈 화면 식수 추이엔 남김)
       }),
   });
   const recomputeDailyStats = useMutation({
     mutationFn: () => api.recomputeDailyStats({ period_start: PERIOD_START, period_end: PERIOD_END }),
     onSuccess: () => query.refetch(),
   });
+
+  // 파이차트·꺾은선그래프 색상을 코너 인기 순위가 아니라 코너 자체(corner_id)에 고정한다
+  // (dataviz 스킬: "색은 순위가 아니라 개체를 따라간다" — 기간별로 랭킹이 바뀌어도 같은 코너는 같은 색).
+  const SHARE_EXCLUDED_CORNER_NAMES = new Set(["미캠회관(전골)"]); // 그린미트(is_diet_corner)와 함께 점유율 비교에서 제외
+  const stableCorners = [...(query.data ?? [])].sort((a, b) => a.corner_id - b.corner_id);
+  const cornerColor = new Map(stableCorners.map((c, i) => [c.corner_id, `var(--series-${(i % 8) + 1})`]));
+
+  const shareRows = (query.data ?? []).filter(
+    (c) => !c.is_diet_corner && !SHARE_EXCLUDED_CORNER_NAMES.has(c.corner_name),
+  );
+
+  const [trendGranularity, setTrendGranularity] = useState<"weekly" | "monthly">("weekly");
+  const trendQuery = useQuery({
+    queryKey: ["corner-analysis-trend", classification, trendGranularity],
+    queryFn: () =>
+      api.cornerAnalysisTrend({
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+        granularity: trendGranularity,
+        classification: classification === "전체" ? undefined : classification,
+        exclude_take_out: true,
+      }),
+  });
+  const trendPeriods = [...new Set((trendQuery.data ?? []).map((r) => r.period))].sort();
+  const trendByCorner: Map<string, Map<string, CornerTrendRow>> = new Map();
+  for (const row of trendQuery.data ?? []) {
+    if (!trendByCorner.has(row.corner_name)) trendByCorner.set(row.corner_name, new Map());
+    trendByCorner.get(row.corner_name)!.set(row.period, row);
+  }
+  // 시리즈 순서·색은 이미 정렬된 query.data(그린미트 항상 마지막) 순서를 그대로 따라간다.
+  const trendCorners = (query.data ?? []).filter((c) => trendByCorner.has(c.corner_name));
 
   const axisStyle = {
     axisLine: { lineStyle: { color: chartTheme.axis } },
@@ -387,6 +420,78 @@ function CornerAnalysisTab() {
         data: query.data?.map((c) => c.avg_taste_score) ?? [],
       },
     ],
+  };
+
+  const shareOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    tooltip: { trigger: "item", formatter: "{b}: {c}건 ({d}%)" },
+    series: [
+      {
+        type: "pie",
+        radius: ["45%", "70%"],
+        avoidLabelOverlap: true,
+        itemStyle: { borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
+        label: { color: chartTheme.text, formatter: "{b}\n{d}%" },
+        labelLine: { lineStyle: { color: chartTheme.axis } },
+        data: shareRows.map((c) => ({
+          name: c.corner_name,
+          value: c.headcount_total,
+          itemStyle: { color: resolveColor(cornerColor.get(c.corner_id) ?? "var(--series-1)") },
+        })),
+      },
+    ],
+  };
+
+  const trendLegend = {
+    top: 0,
+    textStyle: { color: chartTheme.text },
+    data: trendCorners.map((c) => c.corner_name),
+  };
+  const trendSeries = (field: "avg_taste_score" | "avg_peak_throughput_per_min") =>
+    trendCorners.map((c) => ({
+      name: c.corner_name,
+      type: "line" as const,
+      symbol: "circle",
+      symbolSize: 8,
+      lineStyle: { width: 2, color: resolveColor(cornerColor.get(c.corner_id) ?? "var(--series-1)") },
+      itemStyle: {
+        color: resolveColor(cornerColor.get(c.corner_id) ?? "var(--series-1)"),
+        borderColor: resolveColor("var(--surface)"),
+        borderWidth: 2,
+      },
+      data: trendPeriods.map((p) => trendByCorner.get(c.corner_name)?.get(p)?.[field] ?? null),
+    }));
+
+  const satisfactionTrendOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 40, right: 16, top: 40, bottom: 28 },
+    tooltip: { trigger: "axis" },
+    legend: trendLegend,
+    xAxis: { type: "category", data: trendPeriods, ...axisStyle },
+    yAxis: {
+      type: "value",
+      name: "만족도",
+      min: 0,
+      max: 5,
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: trendSeries("avg_taste_score"),
+  };
+
+  const throughputTrendOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 16, top: 40, bottom: 28 },
+    tooltip: { trigger: "axis" },
+    legend: trendLegend,
+    xAxis: { type: "category", data: trendPeriods, ...axisStyle },
+    yAxis: {
+      type: "value",
+      name: "피크타임 분당 서브",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: trendSeries("avg_peak_throughput_per_min"),
   };
 
   return (
@@ -454,6 +559,51 @@ function CornerAnalysisTab() {
                 }))}
                 rowKey={(r) => r.corner as string}
               />
+            </div>
+            <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+              <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                코너별 점유율 (Take Out·그린미트·미캠회관(전골) 제외 — 착석 취식 코너 간 경쟁 비교 목적)
+              </p>
+              {shareRows.length === 0 ? (
+                <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                  비교할 코너가 없습니다.
+                </p>
+              ) : (
+                <ReactECharts option={shareOption} style={{ height: 280 }} />
+              )}
+            </div>
+            <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                  코너별 만족도·피크타임 서브속도 추이
+                </p>
+                <SegmentedControl
+                  value={trendGranularity}
+                  options={[
+                    { label: "주간", value: "weekly" },
+                    { label: "월간", value: "monthly" },
+                  ]}
+                  onChange={setTrendGranularity}
+                />
+              </div>
+              {trendQuery.isLoading && <LoadingState />}
+              {trendQuery.isError && <ErrorState error={trendQuery.error} />}
+              {trendQuery.data && trendPeriods.length > 0 && (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                      평균 만족도 추이
+                    </p>
+                    <ReactECharts option={satisfactionTrendOption} style={{ height: 260 }} />
+                  </div>
+                  <div>
+                    <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                      피크타임 분당 서브 추이
+                    </p>
+                    <ReactECharts option={throughputTrendOption} style={{ height: 260 }} />
+                  </div>
+                </div>
+              )}
             </div>
           </>
         )}

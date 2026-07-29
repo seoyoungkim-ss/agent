@@ -219,6 +219,76 @@ def test_corner_analysis_requires_daily_stats(client, db_session):
     assert hansik["headcount_total"] == 1
 
 
+def test_corner_analysis_merges_take_out_aliases_and_excludes_on_request(client, db_session):
+    from app.services.aggregation import aggregate_daily_stats
+
+    _ingest_weekly_menu(client)
+    _ingest_meal_log(client, "E1", "맛남", corner_name="Take Out R")
+    _ingest_meal_log(client, "E2", "맛남", corner_name="Take Out M")
+    _ingest_meal_log(client, "E3", "맛남", corner_name="Take Out L")
+    aggregate_daily_stats(db_session, MONDAY)
+
+    resp = client.get(
+        "/api/analysis/corners",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    rows = resp.json()
+    take_out_rows = [r for r in rows if r["corner_name"] == "Take Out"]
+    assert len(take_out_rows) == 1  # R/M/L 세 이름이 하나로 합쳐짐
+    assert take_out_rows[0]["headcount_total"] == 3
+    assert not any(r["corner_name"] in ("Take Out R", "Take Out M", "Take Out L") for r in rows)
+
+    resp = client.get(
+        "/api/analysis/corners",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "exclude_take_out": True},
+    )
+    rows = resp.json()
+    assert not any(r["corner_name"] == "Take Out" for r in rows)
+
+
+def test_corner_analysis_sorts_green_meat_last_regardless_of_headcount(client, db_session):
+    from app.services.aggregation import aggregate_daily_stats
+
+    _ingest_weekly_menu(client)
+    _ingest_meal_log(client, "E1", "맛남", corner_name="한식")
+    for i in range(5):
+        _ingest_meal_log(client, f"G{i}", "맛남", corner_name="그린미트")
+    aggregate_daily_stats(db_session, MONDAY)
+
+    resp = client.get(
+        "/api/analysis/corners",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    rows = resp.json()
+    # 그린미트가 식수는 제일 많아도(5건 vs 1건) 항상 마지막이어야 한다
+    assert rows[-1]["corner_name"] == "그린미트"
+    assert rows[-1]["headcount_total"] == 5
+
+
+def test_corner_analysis_trend_groups_by_period_and_corner(client, db_session):
+    from app.services.aggregation import aggregate_daily_stats
+
+    _ingest_weekly_menu(client)
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY)
+    _ingest_meal_log(client, "E2", "맛남", eaten_date=MONDAY + dt.timedelta(days=7))
+    aggregate_daily_stats(db_session, MONDAY)
+    aggregate_daily_stats(db_session, MONDAY + dt.timedelta(days=7))
+
+    resp = client.get(
+        "/api/analysis/corners/trend",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=7)).isoformat(),
+            "granularity": "weekly",
+        },
+    )
+    assert resp.status_code == 200
+    rows = resp.json()
+    hansik_rows = [r for r in rows if r["corner_name"] == "한식"]
+    assert len(hansik_rows) == 2  # 서로 다른 주 2개
+    assert {r["headcount"] for r in hansik_rows} == {1, 1}
+
+
 def test_daily_stats_recompute_backfills_range_for_corner_and_home_views(client):
     # 과거 기간(예: 6개월치)을 한꺼번에 적재했을 때, 매일 새벽 스케줄러가 "어제"
     # 하루치만 계산하는 것과 달리 이 엔드포인트는 기간 전체를 한 번에 채워야 한다.

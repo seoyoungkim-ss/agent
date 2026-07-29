@@ -306,9 +306,10 @@ export function HomePage() {
               { key: "corner", label: "코너" },
               { key: "headcount", label: "식수", align: "right" },
             ]}
-            rows={[...cornerSummary.data]
-              .sort((a, b) => b.headcount_total - a.headcount_total)
-              .map((c) => ({ corner: c.corner_name, headcount: c.headcount_total.toLocaleString() }))}
+            rows={cornerSummary.data.map((c) => ({
+              corner: c.corner_name,
+              headcount: c.headcount_total.toLocaleString(),
+            }))}
             rowKey={(r) => r.corner as string}
           />
         )}

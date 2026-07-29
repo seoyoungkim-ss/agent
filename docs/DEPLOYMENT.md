@@ -229,9 +229,33 @@ python cli.py meal-log "C:\취식로그\mealdata.xlsx"
 배치는 새벽에 자동으로 돌지만, 데이터를 막 넣은 직후 바로 확인하려면 수동으로
 한 번 트리거할 수 있다:
 ```bash
+curl -X POST "http://<서버 IP>:8000/api/analysis/daily-stats/recompute?period_start=2026-01-01&period_end=2026-07-27"
 curl -X POST "http://<서버 IP>:8000/api/analysis/menu-performance/recompute?period_start=2026-01-01&period_end=2026-07-27"
 curl -X POST "http://<서버 IP>:8000/api/analysis/users/taste-profile/recompute"
 ```
+(홈/분석 화면에도 "최근 180일 배치 집계 재계산" 버튼으로 `daily-stats/recompute`를
+그대로 호출할 수 있다.)
+
+---
+
+## 7-1. Take Out 코너명 병합 (코드 업데이트 후 1회만)
+
+취식기록의 코너명이 `Take Out R`/`Take Out M`/`Take Out L`처럼 나뉘어 들어오는
+경우, 이 저장소는 이제 하나의 "Take Out" 코너로 자동 병합한다(`docs/
+CALCULATION_LOGIC.md` 23절). 단, **이 정규화는 새로 들어오는 데이터에만
+적용**되므로, 이 변경을 반영하기 전에 이미 적재된 데이터가 있다면 아래 순서로
+1회만 병합해야 한다:
+
+```bash
+git pull
+cd backend && source .venv/bin/activate
+python -m app.maintenance.merge_take_out_corners   # 기존 Take Out R/M/L을 하나로 병합
+```
+그다음 프론트엔드를 재빌드(4단계)하고 백엔드를 재시작한 뒤, 홈/분석 화면에서
+"최근 180일 배치 집계 재계산" 버튼을 눌러 `daily_corner_stats`를 병합된 코너
+기준으로 다시 계산한다(또는 위 curl 명령의 `daily-stats/recompute` 사용).
+이미 병합된 상태라면 스크립트가 조용히 종료하므로(idempotent) 여러 번
+실행해도 안전하다.
 
 ---
 

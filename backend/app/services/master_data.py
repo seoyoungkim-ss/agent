@@ -9,9 +9,19 @@ from app.services.food_vector_tagging import tag_food_vector_from_name
 
 _GREEN_MEAT_NAMES = {"그린미트"}
 
+TAKE_OUT_CORNER_NAME = "Take Out"
+# 취식기록 "코너" 컬럼 원문 — 같은 Take Out을 R/M/L 세 단말기로 나눠 찍는다(2026-07
+# 실사용 확인). 세 이름 모두 하나의 코너로 합친다.
+TAKE_OUT_ALIASES = {"Take Out R", "Take Out M", "Take Out L"}
+
+
+def _normalize_corner_name(corner_name: str) -> str:
+    return TAKE_OUT_CORNER_NAME if corner_name in TAKE_OUT_ALIASES else corner_name
+
 
 def get_or_create_corner(db: Session, corner_name: str) -> tuple[CornerMaster, bool]:
     """returns (corner, is_new)."""
+    corner_name = _normalize_corner_name(corner_name)
     corner = db.query(CornerMaster).filter_by(corner_name=corner_name).one_or_none()
     if corner is None:
         corner = CornerMaster(corner_name=corner_name, is_diet_corner=corner_name in _GREEN_MEAT_NAMES)

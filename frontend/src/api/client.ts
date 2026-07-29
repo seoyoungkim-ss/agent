@@ -78,6 +78,16 @@ export interface CornerAnalysisRow {
   avg_peak_throughput_per_min: number | null;
 }
 
+export interface CornerTrendRow {
+  period: string;
+  corner_id: number;
+  corner_name: string;
+  is_diet_corner: boolean;
+  headcount: number;
+  avg_taste_score: number | null;
+  avg_peak_throughput_per_min: number | null;
+}
+
 export interface MenuPerformanceRow {
   menu_id: number;
   menu_name: string;
@@ -203,8 +213,20 @@ export const api = {
   voeByCategory: (period: string) =>
     request<VoeByCategoryResponse>(`/dashboard/voe-by-category${qs({ period })}`),
 
-  cornerAnalysis: (params: { period_start: string; period_end: string; classification?: Classification }) =>
-    request<CornerAnalysisRow[]>(`/analysis/corners${qs(params)}`),
+  cornerAnalysis: (params: {
+    period_start: string;
+    period_end: string;
+    classification?: Classification;
+    exclude_take_out?: boolean;
+  }) => request<CornerAnalysisRow[]>(`/analysis/corners${qs(params)}`),
+
+  cornerAnalysisTrend: (params: {
+    period_start: string;
+    period_end: string;
+    granularity: "weekly" | "monthly";
+    classification?: Classification;
+    exclude_take_out?: boolean;
+  }) => request<CornerTrendRow[]>(`/analysis/corners/trend${qs(params)}`),
 
   divisionAnalysis: (params: {
     period_start: string;

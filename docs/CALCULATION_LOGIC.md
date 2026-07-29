@@ -896,3 +896,75 @@ test_daily_stats_recompute_backfills_range_for_corner_and_home_views`(기간
 내 여러 날짜를 한 번에 채우고 corners/divisions 양쪽에서 값이 맞는지),
 `::test_daily_stats_recompute_rejects_inverted_range`(period_end <
 period_start면 400).
+
+## 23. Take Out 코너명 정규화, 그린미트 정렬, 코너별 점유율/추이 (2026-07)
+
+실사용 코너별 분석 화면을 검토하며 나온 네 가지 개선을 한 번에 반영했다.
+
+**Take Out 코너 통합**: 취식기록의 "코너" 컬럼 원문이 `Take Out R`/`Take Out
+M`/`Take Out L`(단말기별로 나뉨, 사용자 확인)로 세 가지가 들어온다. 정규화 없이
+그대로 `get_or_create_corner()`에 넘기면 서로 다른 코너 3개가 생긴다.
+`app/services/master_data.py`의 `_normalize_corner_name()`이 이 세 이름을
+`TAKE_OUT_CORNER_NAME = "Take Out"`로 합친다 —
+`company_classification.classify_division()`과 같은 이유로(원문 데이터를 가진
+백엔드에만 매핑을 두면, ingestion-tool을 재배포하지 않고도 규칙을 바꿀 수
+있다) 정규화는 백엔드 전용이다. **이미 적재된 데이터는 이 코드 변경으로
+자동으로 합쳐지지 않는다** — 배포 전에 이미 별도 코너 3개로 나뉘어 쌓인
+`meal_log`/`weekly_menu_plan`/`daily_corner_stats`가 있다면, 1회성 스크립트
+`python -m app.maintenance.merge_take_out_corners`(`backend/app/maintenance/
+merge_take_out_corners.py`)로 병합해야 한다. 이 스크립트는:
+1. 별칭 코너(`TAKE_OUT_ALIASES`에 해당)를 찾아 정식 "Take Out" 코너로
+   `meal_log.corner_id`/`weekly_menu_plan.corner_id`를 재배정
+2. 별칭 코너에 쌓인 `daily_corner_stats`는 지움(정식 코너 기준으로 다시 계산
+   해야 하므로)
+3. 별칭 `corner_master` 행 삭제
+
+실행 후 `POST /analysis/daily-stats/recompute`(21절)로 `daily_corner_stats`를
+다시 계산해야 코너별 분석에 정확한 값이 뜬다. 이미 병합됐으면 조용히
+종료하므로(idempotent) 여러 번 실행해도 안전하다.
+
+**Take Out 제외 범위**: 착석 취식이 아니라 가져가는 형태라 "혼잡도/만족도"
+류의 분석과는 안 맞는다는 게 사용자 판단이다. `GET /analysis/corners`(6절)에
+`exclude_take_out` 쿼리 파라미터를 추가해 — 홈 화면("코너별 식수")은 생략
+(기본 `false`, Take Out 포함), 분석 탭(코너별 분석 표·차트, 코어층 동반선택
+비교)은 `true`로 호출해 제외한다. 같은 엔드포인트를 공유하므로 필터 로직도
+한 곳뿐이다.
+
+**그린미트 항상 마지막 정렬**: 그린미트(다이어트식)는 매니아층만 이용하는
+코너라, 식수만으로 다른 코너와 나란히 순위 매기면 화면 맨 위/중간에 끼어들어
+어색하다(실측에서 식수 2위인데도 항상 맨 아래여야 함). `GET /analysis/corners`
+응답을 `sorted(key=lambda r: (is_diet_corner, -headcount_total))`로 정렬해
+그린미트를 항상 마지막 행으로 보낸다. 이 엔드포인트 하나를 홈/분석 탭이
+공유하므로 정렬도 자동으로 양쪽에 적용된다(`HomePage.tsx`의 코너별 식수
+표에 있던 클라이언트 쪽 `.sort()`는 제거 — 백엔드 정렬을 신뢰).
+
+**코너별 점유율 (신규)**: 기존엔 없던 기능. `AnalysisPage.tsx`의
+`CornerAnalysisTab`이 이미 받아온 `query.data`(Take Out은 이미 제외됨)에서
+`is_diet_corner`와 `corner_name === "미캠회관(전골)"`(니치 코너라 일반 코너
+경쟁 비교에서 제외 — 사용자 확인)를 한 번 더 걸러 파이/도넛 차트로 그린다.
+새 백엔드 로직 없이 프론트에서 이미 있는 데이터로 계산(`headcount_total`
+비율).
+
+**코너별 만족도/피크타임 서브 추이 (신규)**: `GET /analysis/corners/trend`
+(`corner_analysis_trend`)를 신설했다. 기존 `/analysis/corners`는 코너당 1행
+(전체 기간 집계, 막대그래프·표·점유율 파이차트용)이라 응답 모양이 다르므로
+합치지 않고 별도 엔드포인트로 뒀다 — `division_analysis`(6.1절)처럼 항상
+`period`가 있는 모양으로 통일하려면 기존 소비자(홈 화면)가 깨진다.
+`period_bucket()`(6.1절, 기존 재사용)으로 주간/월간 버킷을 만들고
+`(period, corner_id)`별로 만족도/피크타임을 집계한다. 응답:
+`{period, corner_id, corner_name, is_diet_corner, headcount,
+avg_taste_score, avg_peak_throughput_per_min}[]`. 프론트는 코너별
+꺾은선그래프 2개(만족도, 피크타임 서브)를 그리며, **색은 코너 인기 순위가
+아니라 `corner_id` 기준으로 고정**한다(dataviz 스킬: "색은 개체를 따라가야
+하고 순위를 따라가면 안 된다" — 기간에 따라 어느 코너가 몇 등이든 같은 코너는
+항상 같은 색). 코너 최대 8개까지 대응하려고 `index.css`의 categorical
+팔레트를 `--series-4`~`-8`까지 확장했다(dataviz 스킬 참조 팔레트 그대로,
+`validate_palette.js`로 라이트/다크 둘 다 통과 확인).
+
+**테스트**: `backend/tests/test_master_data.py`(Take Out 별칭 3개가 같은
+코너로 합쳐지는지), `backend/tests/test_maintenance_merge_corners.py`(백필
+스크립트가 기존에 갈라진 코너를 병합·재배정하고 idempotent한지),
+`test_api_ingest_and_analysis.py::test_corner_analysis_merges_take_out_
+aliases_and_excludes_on_request`, `::test_corner_analysis_sorts_green_meat_
+last_regardless_of_headcount`, `::test_corner_analysis_trend_groups_by_
+period_and_corner`.
