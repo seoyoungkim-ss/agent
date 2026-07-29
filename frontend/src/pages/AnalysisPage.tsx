@@ -36,7 +36,10 @@ const PERIOD_END = isoDaysAgo(0);
 const PERIOD_START = isoDaysAgo(180); // PRD: 취식 데이터 6개월 누적 기준
 
 // 본사/계열사/기타를 항상 이 순서·색으로 그린다 (팔레트 categorical 순서 고정 원칙).
+// 데이터 키(division 필드값)는 그대로 "본사"를 쓰되, 본사=삼성전자뿐이라 화면
+// 표시만 "삼성전자"로 바꾼다(사용자 확인, 2026-07).
 const DIVISION_ORDER = ["본사", "계열사", "기타"];
+const DIVISION_LABELS: Record<string, string> = { 본사: "삼성전자", 계열사: "계열사", 기타: "기타" };
 const DIVISION_SERIES_VAR = ["var(--series-1)", "var(--series-2)", "var(--series-3)"];
 
 function DivisionAnalysisSection() {
@@ -86,7 +89,7 @@ function DivisionAnalysisSection() {
       splitLine: { lineStyle: { color: chartTheme.grid } },
     },
     series: divisions.map((division) => ({
-      name: division,
+      name: DIVISION_LABELS[division] ?? division,
       type: "bar",
       barMaxWidth: 22,
       itemStyle: {
@@ -98,7 +101,7 @@ function DivisionAnalysisSection() {
   };
 
   return (
-    <Card title="본사/계열사/기타 식수 (PRD 6.1)">
+    <Card title="삼성전자/계열사/기타 식수 (PRD 6.1)">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <SegmentedControl
           value={granularity}
@@ -139,7 +142,7 @@ function DivisionAnalysisSection() {
           <Table
             columns={[
               { key: "period", label: "기간" },
-              ...divisions.map((d) => ({ key: d, label: d, align: "right" as const })),
+              ...divisions.map((d) => ({ key: d, label: DIVISION_LABELS[d] ?? d, align: "right" as const })),
             ]}
             rows={periods.map((p) => ({
               period: p,
@@ -352,6 +355,14 @@ function CornerAnalysisTab() {
   );
 
   const [trendGranularity, setTrendGranularity] = useState<"weekly" | "monthly">("weekly");
+  // 기본은 하나만 크게 보여주고(가독성), 필요하면 둘 다 켜서 동시에 볼 수 있게 한다 —
+  // 만족도(0~5점)와 서브속도는 단위가 달라 한 차트에 두 축으로 겹치지 않는다.
+  const [visibleTrendMetrics, setVisibleTrendMetrics] = useState({ satisfaction: true, throughput: false });
+  const toggleTrendMetric = (key: "satisfaction" | "throughput") =>
+    setVisibleTrendMetrics((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      return next.satisfaction || next.throughput ? next : prev; // 최소 하나는 켜져 있어야 함
+    });
   const trendQuery = useQuery({
     queryKey: ["corner-analysis-trend", classification, trendGranularity],
     queryFn: () =>
@@ -586,22 +597,40 @@ function CornerAnalysisTab() {
                   onChange={setTrendGranularity}
                 />
               </div>
+              <div className="mb-4 flex gap-2">
+                <Button
+                  variant={visibleTrendMetrics.satisfaction ? "primary" : "secondary"}
+                  onClick={() => toggleTrendMetric("satisfaction")}
+                >
+                  평균 만족도
+                </Button>
+                <Button
+                  variant={visibleTrendMetrics.throughput ? "primary" : "secondary"}
+                  onClick={() => toggleTrendMetric("throughput")}
+                >
+                  피크타임 서브
+                </Button>
+              </div>
               {trendQuery.isLoading && <LoadingState />}
               {trendQuery.isError && <ErrorState error={trendQuery.error} />}
               {trendQuery.data && trendPeriods.length > 0 && (
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div>
-                    <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                      평균 만족도 추이
-                    </p>
-                    <ReactECharts option={satisfactionTrendOption} style={{ height: 260 }} />
-                  </div>
-                  <div>
-                    <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                      피크타임 분당 서브 추이
-                    </p>
-                    <ReactECharts option={throughputTrendOption} style={{ height: 260 }} />
-                  </div>
+                <div className="space-y-4">
+                  {visibleTrendMetrics.satisfaction && (
+                    <div>
+                      <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                        평균 만족도 추이
+                      </p>
+                      <ReactECharts option={satisfactionTrendOption} style={{ height: 380 }} />
+                    </div>
+                  )}
+                  {visibleTrendMetrics.throughput && (
+                    <div>
+                      <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                        피크타임 분당 서브 추이
+                      </p>
+                      <ReactECharts option={throughputTrendOption} style={{ height: 380 }} />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -613,14 +642,18 @@ function CornerAnalysisTab() {
   );
 }
 
+const ALL_MENUS_TAB = "전체";
+
 function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; corner_name: string }[] }) {
-  const [cornerId, setCornerId] = useState<number | null>(null);
+  const [selection, setSelection] = useState<string>(ALL_MENUS_TAB);
   const [minVisitCount, setMinVisitCount] = useState(3);
   const [minShare, setMinShare] = useState(30);
+  const [minCoCount, setMinCoCount] = useState(3);
 
-  const effectiveCornerId = cornerId ?? corners[0]?.corner_id ?? null;
+  const isAll = selection === ALL_MENUS_TAB;
+  const effectiveCornerId = isAll ? null : Number(selection);
 
-  const query = useQuery({
+  const cornerQuery = useQuery({
     queryKey: ["corner-core-layer-menu-pairs", effectiveCornerId, minVisitCount, minShare],
     queryFn: () =>
       api.cornerCoreLayerMenuPairs(effectiveCornerId as number, {
@@ -629,7 +662,14 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
         min_visit_count: minVisitCount,
         min_share: minShare / 100,
       }),
-    enabled: effectiveCornerId != null,
+    enabled: !isAll && effectiveCornerId != null,
+  });
+
+  const allQuery = useQuery({
+    queryKey: ["top-menu-pairs", minCoCount],
+    queryFn: () =>
+      api.topMenuPairs({ period_start: PERIOD_START, period_end: PERIOD_END, min_co_count: minCoCount }),
+    enabled: isAll,
   });
 
   const pairColumns = [
@@ -645,76 +685,114 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
   return (
     <Card title="코너 코어층 × 메뉴 동반 선택 쌍 비교">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-        선택한 코너를 반복적으로 이용하는 "코어층"과 나머지 인원이 가장 흔하게 함께 고르는 메뉴 쌍을
-        나란히 비교합니다. lift는 각 그룹 내부 기준이라 두 그룹 간 직접 비교는 동반 인원 수로 합니다.
+        "전체"는 코너 구분 없이 전체 인원 기준 가장 흔한 메뉴 쌍을 보여줍니다. 코너를 선택하면 그 코너를
+        반복적으로 이용하는 "코어층"과 나머지 인원이 각각 가장 흔하게 함께 고르는 메뉴 쌍을 나란히
+        비교합니다(lift는 각 그룹 내부 기준이라 두 그룹 간 직접 비교는 동반 인원 수로 합니다).
       </p>
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <SegmentedControl
-          value={String(effectiveCornerId)}
-          options={corners.map((c) => ({ label: c.corner_name, value: String(c.corner_id) }))}
-          onChange={(v) => setCornerId(Number(v))}
+          value={selection}
+          options={[
+            { label: ALL_MENUS_TAB, value: ALL_MENUS_TAB },
+            ...corners.map((c) => ({ label: c.corner_name, value: String(c.corner_id) })),
+          ]}
+          onChange={setSelection}
         />
-        <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-          최소 방문횟수
-          <input
-            type="number"
-            min={1}
-            className="w-14 rounded-md border px-2 py-1 text-[13px]"
-            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-            value={minVisitCount}
-            onChange={(e) => setMinVisitCount(Number(e.target.value))}
-          />
-        </label>
-        <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-          최소 비중(%)
-          <input
-            type="number"
-            min={0}
-            max={100}
-            className="w-14 rounded-md border px-2 py-1 text-[13px]"
-            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-            value={minShare}
-            onChange={(e) => setMinShare(Number(e.target.value))}
-          />
-        </label>
+        {isAll ? (
+          <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+            최소 동반 인원
+            <input
+              type="number"
+              min={1}
+              className="w-14 rounded-md border px-2 py-1 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              value={minCoCount}
+              onChange={(e) => setMinCoCount(Number(e.target.value))}
+            />
+          </label>
+        ) : (
+          <>
+            <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              최소 방문횟수
+              <input
+                type="number"
+                min={1}
+                className="w-14 rounded-md border px-2 py-1 text-[13px]"
+                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                value={minVisitCount}
+                onChange={(e) => setMinVisitCount(Number(e.target.value))}
+              />
+            </label>
+            <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              최소 비중(%)
+              <input
+                type="number"
+                min={0}
+                max={100}
+                className="w-14 rounded-md border px-2 py-1 text-[13px]"
+                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                value={minShare}
+                onChange={(e) => setMinShare(Number(e.target.value))}
+              />
+            </label>
+          </>
+        )}
       </div>
-      {query.isLoading && <LoadingState />}
-      {query.isError && <ErrorState error={query.error} />}
-      {query.data && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div>
-            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-              코어층 ({query.data.core_layer.employee_count}명)
+
+      {isAll ? (
+        <>
+          {allQuery.isLoading && <LoadingState />}
+          {allQuery.isError && <ErrorState error={allQuery.error} />}
+          {allQuery.data && allQuery.data.length === 0 && (
+            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+              표본 부족
             </p>
-            {query.data.core_layer.top_pairs.length === 0 ? (
-              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                표본 부족
-              </p>
-            ) : (
-              <Table
-                columns={pairColumns}
-                rows={pairRows(query.data.core_layer.top_pairs)}
-                rowKey={(r) => r.pair as string}
-              />
-            )}
-          </div>
-          <div>
-            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-              나머지 ({query.data.non_core.employee_count}명)
-            </p>
-            {query.data.non_core.top_pairs.length === 0 ? (
-              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                표본 부족
-              </p>
-            ) : (
-              <Table
-                columns={pairColumns}
-                rows={pairRows(query.data.non_core.top_pairs)}
-                rowKey={(r) => r.pair as string}
-              />
-            )}
-          </div>
-        </div>
+          )}
+          {allQuery.data && allQuery.data.length > 0 && (
+            <Table columns={pairColumns} rows={pairRows(allQuery.data)} rowKey={(r) => r.pair as string} />
+          )}
+        </>
+      ) : (
+        <>
+          {cornerQuery.isLoading && <LoadingState />}
+          {cornerQuery.isError && <ErrorState error={cornerQuery.error} />}
+          {cornerQuery.data && (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  코어층 ({cornerQuery.data.core_layer.employee_count}명)
+                </p>
+                {cornerQuery.data.core_layer.top_pairs.length === 0 ? (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    표본 부족
+                  </p>
+                ) : (
+                  <Table
+                    columns={pairColumns}
+                    rows={pairRows(cornerQuery.data.core_layer.top_pairs)}
+                    rowKey={(r) => r.pair as string}
+                  />
+                )}
+              </div>
+              <div>
+                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  나머지 ({cornerQuery.data.non_core.employee_count}명)
+                </p>
+                {cornerQuery.data.non_core.top_pairs.length === 0 ? (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    표본 부족
+                  </p>
+                ) : (
+                  <Table
+                    columns={pairColumns}
+                    rows={pairRows(cornerQuery.data.non_core.top_pairs)}
+                    rowKey={(r) => r.pair as string}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </Card>
   );

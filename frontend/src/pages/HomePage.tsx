@@ -79,6 +79,17 @@ export function HomePage() {
     queryFn: () => api.cornerAnalysis({ period_start: selectedMonday, period_end: sundayOfSelected }),
   });
 
+  const cornerTrend = useQuery({
+    queryKey: ["corner-weekly-trend", selectedMonday, sundayOfSelected, classification],
+    queryFn: () =>
+      api.cornerAnalysisTrend({
+        period_start: selectedMonday,
+        period_end: sundayOfSelected,
+        granularity: "daily",
+        classification: classification === "전체" ? undefined : classification,
+      }),
+  });
+
   const recomputeDailyStats = useMutation({
     mutationFn: () =>
       api.recomputeDailyStats({ period_start: RECOMPUTE_PERIOD_START, period_end: RECOMPUTE_PERIOD_END }),
@@ -124,6 +135,50 @@ export function HomePage() {
         data: weekly.data?.map((d) => d.headcount) ?? [],
       },
     ],
+  };
+
+  // 색은 코너 인기 순위가 아니라 corner_id 기준으로 고정한다(dataviz 스킬: 색은
+  // 개체를 따라가야 하고 순위를 따라가면 안 된다) — cornerSummary.data는 이미
+  // 백엔드에서 그린미트 항상 마지막 정렬로 온다(analysis.py::corner_analysis).
+  const stableHomeCorners = [...(cornerSummary.data ?? [])].sort((a, b) => a.corner_id - b.corner_id);
+  const homeCornerColor = new Map(stableHomeCorners.map((c, i) => [c.corner_id, `var(--series-${(i % 8) + 1})`]));
+  const cornerTrendDays = weekly.data?.map((d) => d.date) ?? [];
+  const trendByCornerHome = new Map<string, Map<string, number>>();
+  for (const row of cornerTrend.data ?? []) {
+    if (!trendByCornerHome.has(row.corner_name)) trendByCornerHome.set(row.corner_name, new Map());
+    trendByCornerHome.get(row.corner_name)!.set(row.period, row.headcount);
+  }
+  const trendCornersHome = (cornerSummary.data ?? []).filter((c) => trendByCornerHome.has(c.corner_name));
+
+  const cornerTrendOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 16, top: 32, bottom: 28 },
+    tooltip: { trigger: "axis" },
+    legend: { top: 0, textStyle: { color: chartTheme.text }, data: trendCornersHome.map((c) => c.corner_name) },
+    xAxis: {
+      type: "category",
+      data: cornerTrendDays.map((d) => d.slice(5)),
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      name: "식수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: trendCornersHome.map((c) => ({
+      name: c.corner_name,
+      type: "bar" as const,
+      stack: "total",
+      itemStyle: {
+        borderColor: resolveColor("var(--surface)"),
+        borderWidth: 1,
+        color: resolveColor(homeCornerColor.get(c.corner_id) ?? "var(--series-1)"),
+      },
+      data: cornerTrendDays.map((d) => trendByCornerHome.get(c.corner_name)?.get(d) ?? 0),
+    })),
   };
 
   const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${selectedMonday}${
@@ -204,20 +259,15 @@ export function HomePage() {
         )}
         {weekly.data && <ReactECharts option={chartOption} style={{ height: 280 }} />}
         {weekly.data && weekly.data.length > 0 && (
-          <div className="mt-4 overflow-x-auto">
-            <Table
-              columns={[
-                { key: "date", label: "날짜" },
-                { key: "classification", label: "구분" },
-                { key: "headcount", label: "식수", align: "right" },
-              ]}
-              rows={weekly.data.map((d) => ({
-                date: d.date,
-                classification: d.classification,
-                headcount: d.headcount.toLocaleString(),
-              }))}
-              rowKey={(r) => r.date as string}
-            />
+          <div className="mt-4">
+            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              코너별 주간 식수 추이
+            </p>
+            {cornerTrend.isLoading && <LoadingState />}
+            {cornerTrend.isError && <ErrorState error={cornerTrend.error} />}
+            {cornerTrend.data && trendCornersHome.length > 0 && (
+              <ReactECharts option={cornerTrendOption} style={{ height: 280 }} />
+            )}
           </div>
         )}
       </Card>

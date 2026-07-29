@@ -1,5 +1,7 @@
 """ingestion-tool이 이름만 보내는 코너/메뉴/사번을 마스터 테이블과 매칭·생성한다."""
 
+import re
+
 from sqlalchemy.orm import Session
 
 from app.models.enums import FoodVectorSource
@@ -10,9 +12,21 @@ from app.services.food_vector_tagging import tag_food_vector_from_name
 _GREEN_MEAT_NAMES = {"그린미트"}
 
 TAKE_OUT_CORNER_NAME = "Take Out"
-# 취식기록 "코너" 컬럼 원문 — 같은 Take Out을 R/M/L 세 단말기로 나눠 찍는다(2026-07
-# 실사용 확인). 세 이름 모두 하나의 코너로 합친다.
-TAKE_OUT_ALIASES = {"Take Out R", "Take Out M", "Take Out L"}
+# 취식기록 "코너" 컬럼 원문 — 같은 Take Out을 R/M/L 단말기 + "선택형 Take Out"으로
+# 나눠 찍는다(2026-07 실사용 확인). 전부 하나의 코너로 합친다.
+TAKE_OUT_ALIASES = {"Take Out R", "Take Out M", "Take Out L", "선택형 Take Out"}
+
+_TRAILING_DOT_ZERO = re.compile(r"^(\d+)\.0$")
+
+
+def normalize_employee_id(employee_id: str) -> str:
+    """엑셀이 숫자만 있는 사번을 "12345678.0"으로 자동변환하는 경우를 되돌린다.
+
+    ingestion-tool 쪽에서 이미 막아뒀지만(2026-07 수정), 다른 경로로 들어오는
+    값까지 방어하려고 이 신뢰 경계(백엔드 저장 직전)에도 한 번 더 둔다.
+    """
+    match = _TRAILING_DOT_ZERO.match(employee_id)
+    return match.group(1) if match else employee_id
 
 
 def _normalize_corner_name(corner_name: str) -> str:
@@ -63,6 +77,7 @@ def get_or_create_employee(
     매핑(COMPANY_DIVISION_MAP)이 나중에 바뀌어도 다음 배치 인입 때 자동 반영되게
     하려는 의도.
     """
+    employee_id = normalize_employee_id(employee_id)
     employee = db.query(EmployeeMaster).filter_by(employee_id=employee_id).one_or_none()
     division = classify_division(company_name)
     if employee is None:

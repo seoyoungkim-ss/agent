@@ -130,12 +130,13 @@ def corner_analysis(
 def corner_analysis_trend(
     period_start: dt.date,
     period_end: dt.date,
-    granularity: Literal["weekly", "monthly"] = "weekly",
+    granularity: Literal["daily", "weekly", "monthly"] = "weekly",
     classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
     exclude_take_out: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
-    """PRD 6.2 확장: 코너별 만족도/피크타임 서브속도의 기간별(주간·월간) 추이."""
+    """PRD 6.2 확장: 코너별 만족도/피크타임 서브속도(및 식수)의 기간별(일간·주간·월간)
+    추이. 홈 화면의 "코너별 주간 식수 추이"는 이 엔드포인트를 daily로 호출한다."""
     rows, corners = _load_corner_stats(db, period_start, period_end, classification)
 
     buckets: dict[tuple[str, int], list[DailyCornerStats]] = {}
@@ -433,3 +434,22 @@ def menu_affinity(
             status_code=404, detail=f"'{menu_name}' 메뉴의 취식 기록이 이 기간에 없습니다."
         )
     return [{"menu_name": r.menu_name, "co_count": r.co_count, "lift": r.lift} for r in results]
+
+
+@router.get("/menu-pairs/top")
+def top_menu_pairs(
+    period_start: dt.date,
+    period_end: dt.date,
+    min_co_count: int = 3,
+    top_n: int = 10,
+    db: Session = Depends(get_db),
+):
+    """PRD 6.2 확장: 코너 구분 없이 전체 인원 기준 가장 흔한 메뉴 동반 선택 쌍.
+
+    코너별 코어층 비교(`/corners/{corner_id}/core-layer-menu-pairs`)는 특정
+    코너의 반복 이용자로 범위를 좁히지만, 이건 전체 인원·전체 메뉴를 대상으로
+    구한다 — 같은 `compute_top_menu_pairs`를 코너로 나누지 않고 그대로 호출한다.
+    """
+    employee_menus = build_employee_menu_sets(db, period_start, period_end)
+    pairs = compute_top_menu_pairs(employee_menus, min_co_count=min_co_count, top_n=top_n)
+    return [{"menu_a": p.menu_a, "menu_b": p.menu_b, "co_count": p.co_count, "lift": p.lift} for p in pairs]

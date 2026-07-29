@@ -223,7 +223,7 @@ export const api = {
   cornerAnalysisTrend: (params: {
     period_start: string;
     period_end: string;
-    granularity: "weekly" | "monthly";
+    granularity: "daily" | "weekly" | "monthly";
     classification?: Classification;
     exclude_take_out?: boolean;
   }) => request<CornerTrendRow[]>(`/analysis/corners/trend${qs(params)}`),
@@ -285,6 +285,9 @@ export const api = {
     request<CornerCoreLayerMenuPairsResponse>(
       `/analysis/corners/${cornerId}/core-layer-menu-pairs${qs(params)}`,
     ),
+
+  topMenuPairs: (params: { period_start: string; period_end: string; min_co_count?: number; top_n?: number }) =>
+    request<MenuPairRow[]>(`/analysis/menu-pairs/top${qs(params)}`),
 
   menuFoodVectors: (params: { untagged_only?: boolean } = {}) =>
     request<MenuFoodVectorRow[]>(`/analysis/menus/food-vectors${qs(params)}`),

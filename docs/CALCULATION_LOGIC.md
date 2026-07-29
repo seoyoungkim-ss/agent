@@ -968,3 +968,52 @@ avg_taste_score, avg_peak_throughput_per_min}[]`. 프론트는 코너별
 aliases_and_excludes_on_request`, `::test_corner_analysis_sorts_green_meat_
 last_regardless_of_headcount`, `::test_corner_analysis_trend_groups_by_
 period_and_corner`.
+
+## 24. Take Out 4번째 별칭, 사번 ".0" 정규화, 전체 메뉴 동반선택, 홈 코너별 추이 (2026-07)
+
+**Take Out 4번째 별칭 — "선택형 Take Out"**: 23절에서 다룬 R/M/L 외에 "선택형
+Take Out"이라는 코너명도 같은 Take Out을 가리킨다는 게 추가로 확인됐다.
+`TAKE_OUT_ALIASES`(`app/services/master_data.py`)에 추가만 하면 되도록
+설계해뒀으므로 이 항목만 넣었다 — 정규화(`_normalize_corner_name`)와 백필
+스크립트(`merge_take_out_corners.py`)는 모두 이 집합을 그대로 참조해 자동
+반영된다.
+
+**사번 ".0" 표기 — 백엔드 신뢰 경계에도 정규화 추가**: ingestion-tool의
+파서 쪽 `_clean()`(엑셀 숫자 자동변환 방지)은 이미 고쳐뒀지만, 그 수정 이전에
+이미 적재된 데이터나 다른 경로로 들어오는 값까지 막으려고 백엔드 저장
+직전(`get_or_create_employee`, `app/services/master_data.py`)에도
+`normalize_employee_id()`로 한 번 더 정규화한다("12345678.0" → "12345678",
+숫자가 아닌 값은 그대로 둠). 이미 적재된 데이터를 정리하려면
+`python -m app.maintenance.normalize_employee_ids`(신규, `merge_take_out_
+corners.py`와 같은 컨벤션 — idempotent, meal_log/employee_taste_profile
+재배정 후 안내 메시지 출력)를 1회 실행한다.
+
+**코너 구분 없는 전체 메뉴 동반선택 비교**: `build_employee_menu_sets()`/
+`compute_top_menu_pairs()`(`menu_affinity.py`)는 원래도 코너에 종속되지 않는
+순수 함수였다(코어층 비교에서만 코어/비코어로 미리 나눠서 넘겼을 뿐) — 이걸
+그대로 재사용해 `GET /analysis/menu-pairs/top`을 추가했다. 프론트
+(`AnalysisPage.tsx`의 `CornerCoreLayerSection`)에 코너 탭들 앞에 "전체" 탭을
+추가해 이 엔드포인트를 호출한다 — 코어/비코어 구분 없이 표 하나만 보여준다.
+
+**코너별 만족도/피크타임 서브 추이 — 하나의 큰 그래프 + 토글**: 처음엔
+막대그래프 옆에 항상 2개를 나란히 작게 보여줬는데 가독성이 떨어진다는 피드백
+(2026-07)으로, "평균 만족도"/"피크타임 서브" 토글 버튼 2개(`Button` 컴포넌트
+재사용, `variant`로 활성 표시)로 바꿨다. 최소 하나는 항상 켜져 있어야 하고
+(둘 다 끄는 건 막음), 켠 것만 전체 폭(377px 높이)으로 크게 그린다 — 만족도
+(0~5점)와 서브속도는 단위가 달라 여전히 한 차트에 두 축으로 합치지 않는다
+(anti dual-axis 원칙 유지).
+
+**홈 화면 "코너별 주간 식수 추이"**: 기존엔 "주간 식수 추이" 막대그래프 아래
+날짜·구분·식수만 있는 단순 표였는데, 이를 코너별 스택 막대그래프로 교체했다
+(`HomePage.tsx`). `GET /analysis/corners/trend`에 `granularity="daily"`를
+새로 허용해(기존엔 weekly/monthly만) 선택한 주의 7일치를 코너별로 가져온다.
+Take Out은 제외하지 않는다(홈 화면은 "취식 수 추이" 맥락이라 21절 규칙대로
+유지). 색은 `cornerSummary.data`(이미 백엔드에서 그린미트 항상 마지막 정렬로
+옴)의 corner_id 기준으로 고정해, `AnalysisPage.tsx`의 코너별 파이/추이
+차트와 같은 색 안정성 원칙을 따른다.
+
+**테스트**: `test_master_data.py`에 "선택형 Take Out" 별칭 케이스와
+`normalize_employee_id`/`get_or_create_employee` 정규화 테스트 추가,
+`test_maintenance_normalize_employee_ids.py`(신규, 병합·idempotent 검증),
+`test_api_ingest_and_analysis.py::test_top_menu_pairs_ignores_corner_and_
+covers_whole_population`.

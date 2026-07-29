@@ -257,6 +257,21 @@ python -m app.maintenance.merge_take_out_corners   # 기존 Take Out R/M/L을 �
 이미 병합된 상태라면 스크립트가 조용히 종료하므로(idempotent) 여러 번
 실행해도 안전하다.
 
+## 7-2. 사번 ".0" 표기 정리 (코드 업데이트 후 1회만)
+
+엑셀이 숫자만 있는 사번을 "12345678.0"으로 자동변환하는 문제를 ingestion-tool
+파서와 백엔드 저장 직전(`docs/CALCULATION_LOGIC.md` 24절) 양쪽에서 막아뒀다.
+단, 이 수정 이전에 이미 "12345678.0" 형태로 적재된 데이터가 있다면 아래
+스크립트로 1회 정리해야 한다(7-1과 같은 방식, idempotent):
+
+```bash
+cd backend && source .venv/bin/activate
+python -m app.maintenance.normalize_employee_ids
+```
+실행 후 "최근 180일 배치 집계 재계산" 버튼과
+`POST /api/analysis/users/taste-profile/recompute`를 호출해 관련 집계를
+다시 계산한다.
+
 ---
 
 ## 8. 완전히 처음부터 다시 시작하고 싶을 때 (초기화)

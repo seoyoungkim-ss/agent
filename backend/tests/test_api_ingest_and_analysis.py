@@ -597,6 +597,42 @@ def test_menu_affinity_unknown_menu_returns_404(client):
     assert resp.status_code == 404
 
 
+def test_top_menu_pairs_ignores_corner_and_covers_whole_population(client):
+    # 코너가 서로 다른(한식/양식) 두 사람이 같은 메뉴 쌍(떡볶이+짜장면)을 먹어도
+    # 코너 구분 없이 하나의 쌍으로 잡혀야 한다.
+    def eat(employee_id, corner_name, menu_name, minute):
+        client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(11, minute)).isoformat(),
+                        "employee_id": employee_id,
+                        "meal_type": "중식",
+                        "corner_name": corner_name,
+                        "menu_name": menu_name,
+                        "taste_score": "맛남",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    eat("A1", "한식", "떡볶이", 0)
+    eat("A1", "양식", "짜장면", 10)
+    eat("A2", "양식", "떡볶이", 20)
+    eat("A2", "한식", "짜장면", 30)
+
+    resp = client.get(
+        "/api/analysis/menu-pairs/top",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "min_co_count": 1},
+    )
+    assert resp.status_code == 200
+    rows = resp.json()
+    pair = next(r for r in rows if {r["menu_a"], r["menu_b"]} == {"떡볶이", "짜장면"})
+    assert pair["co_count"] == 2
+
+
 def test_corner_core_layer_menu_pairs_splits_core_and_non_core(client, db_session):
     # 코어층(E1~E3): 한식 코너를 4번씩 방문(전체 방문도 4번, share=1.0)하며 떡볶이/짜장면을 번갈아 먹음
     for emp in ["E1", "E2", "E3"]:
