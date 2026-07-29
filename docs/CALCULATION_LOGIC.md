@@ -1295,3 +1295,43 @@ def _corner_id_by_menu_from_meal_log(
 **테스트**: 30·31절의 관련 테스트를 `meal_log` 기준 동작에 맞게 갱신
 (`test_list_menu_food_vectors_endpoint`가 "코너에서 실제로 취식된 메뉴만
 그 코너로 잡히고, 취식 기록이 없는 메뉴는 미배정으로 남는지" 확인).
+
+---
+
+## 33. 메뉴 동반 선택 쌍에서도 테이크아웃 플레이스홀더 메뉴 제외 (2026-07)
+
+27절에서 "선택형 Take out"/"(포장)메디쏠라"를 **메뉴 4분면**(`aggregate_menu_performance`)
+에서만 제외했는데, "코너별 분석"의 코어층 × 메뉴 동반 선택 쌍(18절)과 메뉴
+동반 선택 경향성(16.2절)에는 그 제외가 안 걸려 있어서 "코너별 분석에서 메뉴
+쌍에 선택형 Take out이 계속 나온다"는 후속 피드백을 받았다 — 원인은 두 기능이
+같은 소스 함수를 안 쓰고 있었다는 것.
+
+**원인 상세**: 코어층 메뉴 쌍(`corner_core_layer_menu_pairs`), 전체 메뉴 쌍
+(`top_menu_pairs`), 메뉴 동반 선택 검색(`menu_affinity`) 셋 다
+`menu_affinity.py::build_employee_menu_sets`(사번별 "먹어본 메뉴명 집합")를
+공유하는데, 이 함수는 `EXCLUDED_QUADRANT_MENU_NAMES`(당시 `aggregation.py`에만
+있던 상수)를 몰랐다.
+
+**수정**:
+1. 제외 목록을 `aggregation.py`에서 `master_data.py`로 옮기고
+   `PLACEHOLDER_MENU_NAMES`로 이름을 바꿨다(더 이상 "4분면 전용"이 아니라
+   메뉴 단위 통계 전반에서 재사용하는 상수이므로) — Take Out 별칭 상수
+   (`TAKE_OUT_ALIASES`)와 같은 파일에 둔 것도 "테이크아웃 관련 정규화/제외
+   규칙은 다 여기 모여있다"는 일관성을 위해서다.
+2. `build_employee_menu_sets`가 사번-메뉴 집합을 만들 때 `PLACEHOLDER_MENU_NAMES`에
+   속한 메뉴명은 애초에 집합에 안 넣도록 필터를 추가했다 — 이 함수 하나만
+   고치면 이걸 호출하는 3개 API(코어층 쌍/전체 쌍/동반 선택 검색)에 전부
+   자동으로 반영된다.
+
+**파일**: `backend/app/services/master_data.py`(`PLACEHOLDER_MENU_NAMES` 정의),
+`backend/app/services/aggregation.py`(`EXCLUDED_QUADRANT_MENU_NAMES` 대신
+`PLACEHOLDER_MENU_NAMES` import), `backend/app/services/menu_affinity.py`
+(`build_employee_menu_sets` 필터 추가).
+
+**테스트**: `test_top_menu_pairs_excludes_take_out_placeholder_menus`,
+`test_corner_core_layer_menu_pairs_excludes_take_out_placeholder_menus`
+(둘 다 `backend/tests/test_api_ingest_and_analysis.py`).
+
+**⚠️ 새 플레이스홀더 메뉴명이 또 발견되면**: 이제 `master_data.py`의
+`PLACEHOLDER_MENU_NAMES` 집합 한 곳만 추가하면 4분면 + 메뉴 동반 선택 쌍
+전부에 자동 반영된다(예전처럼 여러 파일을 따로 고칠 필요 없음).

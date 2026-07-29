@@ -17,6 +17,13 @@ TAKE_OUT_CORNER_NAME = "Take Out"
 # 코너로 합친다.
 TAKE_OUT_ALIASES = {"Take Out R", "Take Out M", "Take Out L", "선택형 Take out"}
 
+# 테이크아웃 특성상(세부 메뉴를 정확히 못 남김) 개별 메뉴 단위 분석에 안 맞는
+# 플레이스홀더성 메뉴명 — 4분면 집계, 메뉴 동반 선택 쌍(코어층 포함) 등 메뉴 단위
+# 통계 전반에서 제외한다(2026-07 실사용 확인: "코너별 분석"의 메뉴 쌍에서도 계속
+# 나온다는 후속 피드백으로, 4분면(aggregation.py)에만 있던 제외 목록을 여기로
+# 옮겨 메뉴 동반선택(menu_affinity.py)과 공유).
+PLACEHOLDER_MENU_NAMES = {"선택형 Take out", "(포장)메디쏠라"}
+
 _TRAILING_DOT_ZERO = re.compile(r"^(\d+)\.0$")
 
 

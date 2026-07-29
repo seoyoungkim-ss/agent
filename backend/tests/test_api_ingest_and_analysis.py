@@ -711,6 +711,40 @@ def test_top_menu_pairs_ignores_corner_and_covers_whole_population(client):
     assert pair["co_count"] == 2
 
 
+def test_top_menu_pairs_excludes_take_out_placeholder_menus(client):
+    def eat(employee_id, corner_name, menu_name, minute):
+        client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(11, minute)).isoformat(),
+                        "employee_id": employee_id,
+                        "meal_type": "중식",
+                        "corner_name": corner_name,
+                        "menu_name": menu_name,
+                        "taste_score": "맛남",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    eat("A1", "한식", "떡볶이", 0)
+    eat("A1", "Take Out", "선택형 Take out", 10)
+    eat("A2", "한식", "떡볶이", 20)
+    eat("A2", "Take Out", "선택형 Take out", 30)
+
+    resp = client.get(
+        "/api/analysis/menu-pairs/top",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "min_co_count": 1},
+    )
+    assert resp.status_code == 200
+    rows = resp.json()
+    menu_names = {name for r in rows for name in (r["menu_a"], r["menu_b"])}
+    assert "선택형 Take out" not in menu_names
+
+
 def test_corner_core_layer_menu_pairs_splits_core_and_non_core(client, db_session):
     # 코어층(E1~E3): 한식 코너를 4번씩 방문(전체 방문도 4번, share=1.0)하며 떡볶이/짜장면을 번갈아 먹음
     for emp in ["E1", "E2", "E3"]:
@@ -759,6 +793,42 @@ def test_corner_core_layer_menu_pairs_splits_core_and_non_core(client, db_sessio
 
     non_core_pairs = {frozenset((p["menu_a"], p["menu_b"])) for p in body["non_core"]["top_pairs"]}
     assert frozenset({"스테이크", "파스타"}) in non_core_pairs
+
+
+def test_corner_core_layer_menu_pairs_excludes_take_out_placeholder_menus(client, db_session):
+    # 코너별 분석의 메뉴 쌍에서 "선택형 Take out" 같은 플레이스홀더 메뉴가
+    # 계속 나오던 문제 — build_employee_menu_sets에서 걸러야 한다.
+    for emp in ["E1", "E2", "E3"]:
+        for day_offset, menu in enumerate(["떡볶이", "짜장면", "떡볶이", "짜장면"]):
+            _ingest_meal_log(
+                client,
+                emp,
+                "맛남",
+                eaten_date=MONDAY + dt.timedelta(days=day_offset),
+                menu_name=menu,
+                corner_name="한식",
+            )
+        _ingest_meal_log(
+            client, emp, "맛남", eaten_date=MONDAY, menu_name="선택형 Take out", corner_name="한식"
+        )
+
+    from app.models.master import CornerMaster
+
+    corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    resp = client.get(
+        f"/api/analysis/corners/{corner.corner_id}/core-layer-menu-pairs",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=10)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    pair_menu_names = {
+        name for pair in body["core_layer"]["top_pairs"] for name in (pair["menu_a"], pair["menu_b"])
+    }
+    assert "선택형 Take out" not in pair_menu_names
 
 
 def test_corner_core_layer_menu_pairs_unknown_corner_returns_404(client):

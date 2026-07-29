@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.models.logs import MealLog
 from app.models.master import MenuMaster
+from app.services.master_data import PLACEHOLDER_MENU_NAMES
 
 
 @dataclass(frozen=True)
@@ -115,7 +116,13 @@ def compute_top_menu_pairs(
 def build_employee_menu_sets(
     db: Session, period_start: dt.date, period_end: dt.date
 ) -> dict[str, set[str]]:
-    """meal_log에서 기간 내 사번별로 먹어본 메뉴명 집합을 만든다(빈도는 무시, 존재 여부만)."""
+    """meal_log에서 기간 내 사번별로 먹어본 메뉴명 집합을 만든다(빈도는 무시, 존재 여부만).
+
+    테이크아웃 플레이스홀더 메뉴(`PLACEHOLDER_MENU_NAMES`)는 세부 메뉴를 정확히
+    못 남겨 "동반 선택" 의미가 없으므로 제외한다 — 4분면 집계(aggregation.py)와
+    같은 목록을 공유한다(2026-07: 이 제외가 빠져있어 코너별 분석의 메뉴 쌍에
+    "선택형 Take out"이 계속 나오던 문제를 여기서 잡음).
+    """
     period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
     period_start_dt = dt.datetime.combine(period_start, dt.time())
 
@@ -133,6 +140,6 @@ def build_employee_menu_sets(
     employee_menus: dict[str, set[str]] = defaultdict(set)
     for employee_id, menu_id in rows:
         name = menu_names.get(menu_id)
-        if name:
+        if name and name not in PLACEHOLDER_MENU_NAMES:
             employee_menus[employee_id].add(name)
     return dict(employee_menus)

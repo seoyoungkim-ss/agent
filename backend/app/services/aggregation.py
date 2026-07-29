@@ -17,6 +17,7 @@ from app.models.logs import MealLog
 from app.models.master import EmployeeMaster, MenuMaster
 from app.models.stats import DailyCornerStats, DailyDivisionStats, MenuPerformanceStats
 from app.services.holidays import HolidayService
+from app.services.master_data import PLACEHOLDER_MENU_NAMES
 from app.services.menu_performance import (
     DeclineDiagnosis,
     TrendDirection,
@@ -28,11 +29,6 @@ from app.services.menu_performance import (
 )
 
 _FLAT_TOLERANCE = 0.05  # ±5% 이내 변화는 "유지"로 취급
-
-# 테이크아웃 특성상(세부 메뉴를 정확히 못 남김) 4분면 비교에 안 맞는 플레이스홀더성
-# 메뉴명 — 다른 메뉴들의 수요/만족도 중앙값(4분면 임계값)이 왜곡되지 않도록 집계
-# 자체에서 제외한다(2026-07 실사용 확인).
-EXCLUDED_QUADRANT_MENU_NAMES = {"선택형 Take out", "(포장)메디쏠라"}
 
 
 def _parse_time(value: str) -> dt.time:
@@ -118,7 +114,7 @@ def aggregate_menu_performance(
     excluded_menu_ids = {
         menu_id
         for (menu_id,) in db.query(MenuMaster.menu_id).filter(
-            MenuMaster.menu_name.in_(EXCLUDED_QUADRANT_MENU_NAMES)
+            MenuMaster.menu_name.in_(PLACEHOLDER_MENU_NAMES)
         )
     }
 
