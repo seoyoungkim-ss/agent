@@ -1,9 +1,13 @@
 """PRD 8: 사내 LLM API 연동 클라이언트.
 
-실제 엔드포인트/스펙이 아직 확정되지 않았으므로(PRD 10 Open Questions), OpenAI
-호환 chat-completions 스트리밍 형식을 기본 가정으로 구현하고, 엔드포인트가
-설정되지 않은 경우(로컬 개발/데모)에는 명확히 표시된 모의(mock) 응답으로
-대체한다. 실제 사내 LLM 스펙이 확정되면 이 클라이언트만 교체하면 된다.
+사내 LLM 게이트웨이 확인 결과(2026-07): OpenAI 호환 chat-completions **응답
+형식**(`data["choices"][0]["message"]["content"]`)은 맞지만, 스트리밍(SSE)은
+지원하지 않고 `requests.post()`로 한 번에 전체 응답을 받는 방식이다. 그래서
+`chat_stream()`은 실제로는 스트리밍 요청을 보내지 않고 **한 번에 응답을 받은
+뒤, 호출부(Agent 채팅 SSE 등)와의 호환을 위해 단어 단위로 잘라서 순차
+`yield`**한다(엔드포인트가 설정되지 않은 경우의 모의 응답과 같은 방식).
+엔드포인트가 설정되지 않은 경우(로컬 개발/데모)에는 명확히 표시된 모의(mock)
+응답으로 대체한다.
 """
 
 from collections.abc import AsyncIterator
@@ -32,18 +36,14 @@ class InternalLLMClient:
         body = {
             "model": self._settings.internal_llm_chat_model,
             "messages": messages,
-            "stream": True,
         }
         async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[len("data:") :].strip()
-                    if data == "[DONE]":
-                        break
-                    yield data
+            resp = await client.post(url, headers=headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        for word in content.split(" "):
+            yield word + " "
 
     async def chat_complete(self, messages: list[dict[str, str]]) -> str:
         """스트리밍이 필요 없는 짧은 호출(예: VOE 클러스터 라벨링)용 헬퍼."""

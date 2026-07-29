@@ -1144,3 +1144,31 @@ py`와 같은 컨벤션):
 급상승/급하락 감지, top_n 제한, 신메뉴 평가 0건 처리), `test_api_ingest_and_
 analysis.py::test_menu_highlights_detects_rising_menu_and_new_menu_reaction`
 (엔드투엔드).
+
+## 29. 사내 LLM 게이트웨이 확인 — 논스트리밍, OpenAI 호환 응답 (2026-07)
+
+`llm_client.py`는 원래 실제 스펙이 확정 안 된 상태라 OpenAI 호환
+chat-completions **스트리밍(SSE)** 형식을 가정하고 구현돼 있었다. 실사용
+중 사내 LLM 게이트웨이의 실제 호출 코드를 확인한 결과:
+- Base URL이 `.../v1`로 끝나고, 응답 바디가 `data["choices"][0]["message"]`
+  형태 — **응답 형식은 OpenAI 호환**이 맞다.
+- 단, `requests.post()`로 **한 번에 전체 응답**을 받는 방식이라 **스트리밍은
+  지원하지 않는다**(`stream: true`를 보내면 게이트웨이가 이를 해석 못 하거나
+  무시할 가능성).
+
+그래서 `chat_stream()`을 스트리밍 요청 대신 **일반 POST 한 번 + 전체 응답
+파싱**으로 바꾸고, 응답 텍스트(`message.content`)를 단어 단위로 잘라 순차
+`yield`한다 — 호출부(`app/api/chat.py`의 Agent 채팅 SSE, `chat_complete()`를
+쓰는 `voe_clustering.py`/`food_vector_tagging.py`/`voe_category_llm.py`)는
+전부 이 async generator 인터페이스만 보고 동작하므로 **아무 데도 안 고쳐도
+된다** — 미설정 시 모의(mock) 응답이 이미 단어 단위로 yield하던 것과 같은
+패턴을 실제 호출에도 그대로 적용한 것뿐이다.
+
+`embed()`(임베딩, `voe_clustering.py`의 K-means에서만 씀)는 아직 사내
+게이트웨이에서 확인 안 됨 — 필요해지면 같은 방식으로 확인 후 고치면 된다.
+
+**테스트**: `test_llm_client.py`(신규) — `httpx.MockTransport`로 실제 HTTP
+호출 없이 검증: 요청 바디에 `stream` 필드가 없는지, URL이
+`{base_url}/chat/completions`인지, 인증 헤더가 `Bearer {api_key}`인지,
+응답의 `message.content`가 단어 단위로 쪼개져 yield되는지, `chat_complete()`가
+그 조각들을 다시 합쳐 원문을 복원하는지.
