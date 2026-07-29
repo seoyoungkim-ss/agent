@@ -109,3 +109,11 @@ def test_12_hour_am_pm_datetime_parsed():
 def test_12_hour_am_datetime_parsed():
     rows = parse_meal_transaction_grid(_grid(_row(일시="2026-03-31 7:04:43 AM")))
     assert rows[0].eaten_at == dt.datetime(2026, 3, 31, 7, 4, 43)
+
+
+def test_excel_serial_date_number_parsed():
+    # CSV를 Excel로 열면 날짜로 자동 인식되지 않은 셀이 일련번호(float)로 그대로
+    # 넘어오는 실제 사례 — 46112.79494212963 == 2026-03-31 19:04:43 (위 AM/PM
+    # 테스트와 동일 시각, 표현 방식만 다름).
+    rows = parse_meal_transaction_grid(_grid(_row(일시=46112.79494212963)))
+    assert rows[0].eaten_at == dt.datetime(2026, 3, 31, 19, 4, 43)

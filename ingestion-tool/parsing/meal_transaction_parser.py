@@ -59,11 +59,20 @@ def _match_header(header_row: Sequence[Any]) -> dict[str, int]:
     return column_index
 
 
+_EXCEL_1900_EPOCH = dt.datetime(1899, 12, 30)  # 엑셀의 날짜 일련번호(serial date) 기준일
+
+
 def _parse_datetime(value: Any) -> dt.datetime:
     if isinstance(value, dt.datetime):
         return value
     if isinstance(value, dt.date):
         return dt.datetime.combine(value, dt.time())
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # CSV를 Excel로 열면 일부 셀이 날짜로 자동 인식되지 않고 엑셀 날짜
+        # 일련번호(1899-12-30 기준 경과일수, 소수부는 하루 중 시각)로 그대로
+        # 넘어오는 경우가 있다 — 예: 46112.79494... = 2026-03-31 19:04:43.
+        total_seconds = round(value * 86400)
+        return _EXCEL_1900_EPOCH + dt.timedelta(seconds=total_seconds)
     text = _clean(value)
     for fmt in (
         "%Y-%m-%d %H:%M:%S",
