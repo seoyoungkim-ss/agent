@@ -29,6 +29,12 @@ function isoDaysAgo(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+function addDays(iso: string, days: number): string {
+  const d = new Date(iso);
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 const CLASSIFICATION_OPTIONS: { label: string; value: Classification | "전체" }[] = [
   { label: "전체", value: "전체" },
   { label: "평일", value: "평일" },
@@ -41,13 +47,13 @@ export function HomePage() {
   const [searchedMenu, setSearchedMenu] = useState<string | null>(null);
   const [exportStart, setExportStart] = useState(isoDaysAgo(30));
   const [exportEnd, setExportEnd] = useState(isoDaysAgo(0));
-  const startDate = mondayOf(new Date());
+  const [selectedMonday, setSelectedMonday] = useState(mondayOf(new Date()));
 
   const weekly = useQuery({
-    queryKey: ["weekly-summary", startDate, classification],
+    queryKey: ["weekly-summary", selectedMonday, classification],
     queryFn: () =>
       api.weeklySummary({
-        start_date: startDate,
+        start_date: selectedMonday,
         classification: classification === "전체" ? undefined : classification,
       }),
   });
@@ -59,8 +65,8 @@ export function HomePage() {
   });
 
   const voe = useQuery({
-    queryKey: ["voe-clusters", startDate.slice(0, 7)],
-    queryFn: () => api.voeClusters(`${startDate.slice(0, 7)}-01`),
+    queryKey: ["voe-clusters", selectedMonday.slice(0, 7)],
+    queryFn: () => api.voeClusters(`${selectedMonday.slice(0, 7)}-01`),
   });
 
   const totalHeadcount = weekly.data?.reduce((sum, d) => sum + d.headcount, 0) ?? 0;
@@ -101,17 +107,39 @@ export function HomePage() {
     ],
   };
 
-  const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${startDate}${
+  const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${selectedMonday}${
     classification !== "전체" ? `&classification=${encodeURIComponent(classification)}` : ""
   }`;
 
   const mealLogExportUrl = `/api/dashboard/meal-log/export?period_start=${exportStart}&period_end=${exportEnd}`;
 
+  const sundayOfSelected = addDays(selectedMonday, 6);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-lg font-semibold">이번 주 카페테리아 현황</h1>
-        <div className="flex items-center gap-3">
+        <div>
+          <h1 className="text-lg font-semibold">카페테리아 현황</h1>
+          <p className="mt-0.5 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            {selectedMonday} ~ {sundayOfSelected}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <Button variant="secondary" onClick={() => setSelectedMonday((d) => addDays(d, -7))}>
+              ◀ 이전 주
+            </Button>
+            <input
+              type="date"
+              className="rounded-md border px-3 py-2 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              value={selectedMonday}
+              onChange={(e) => e.target.value && setSelectedMonday(mondayOf(new Date(e.target.value)))}
+            />
+            <Button variant="secondary" onClick={() => setSelectedMonday((d) => addDays(d, 7))}>
+              다음 주 ▶
+            </Button>
+          </div>
           <SegmentedControl value={classification} options={CLASSIFICATION_OPTIONS} onChange={setClassification} />
           <a href={exportUrl} download>
             <Button variant="secondary">엑셀 다운로드</Button>
@@ -120,13 +148,13 @@ export function HomePage() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <StatTile label="이번 주 누적 식수" value={totalHeadcount.toLocaleString()} />
+        <StatTile label="선택한 주 누적 식수" value={totalHeadcount.toLocaleString()} />
         <StatTile
           label="집계 대상 일수"
           value={weekly.data?.length ?? 0}
           sub={classification === "전체" ? "평일 + 주말+공휴일" : classification}
         />
-        <StatTile label="이번 달 VOE 클러스터 수" value={voe.data?.length ?? 0} />
+        <StatTile label="선택한 달 VOE 클러스터 수" value={voe.data?.length ?? 0} />
       </div>
 
       <Card title="주간 식수 추이">
