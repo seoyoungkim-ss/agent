@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_db
 from app.models.enums import FoodVectorSource
+from app.models.logs import WeeklyMenuPlan
 from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import (
     DailyCornerStats,
@@ -226,17 +227,34 @@ def corner_core_layer_menu_pairs(
 
 @router.get("/menu-performance")
 def menu_performance(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
-    """PRD 6.3: 메뉴별 성과 (4분면 라벨 포함). 사전에 recompute가 호출돼 있어야 한다."""
+    """PRD 6.3: 메뉴별 성과 (4분면 라벨 포함). 사전에 recompute가 호출돼 있어야 한다.
+
+    corner_name은 weekly_menu_plan에서 그 메뉴의 기간 내 가장 최근 배치 코너를
+    붙인 것 — 프론트에서 메뉴가 너무 많을 때 코너별로 묶어 보여주는 용도다.
+    """
     rows = (
         db.query(MenuPerformanceStats)
         .filter_by(period_start=period_start, period_end=period_end)
         .all()
     )
     menus = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
+    corners = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+
+    corner_id_by_menu: dict[int, int] = {}
+    plan_rows = (
+        db.query(WeeklyMenuPlan.menu_id, WeeklyMenuPlan.corner_id)
+        .filter(WeeklyMenuPlan.plan_date.between(period_start, period_end))
+        .order_by(WeeklyMenuPlan.plan_date.desc())
+        .all()
+    )
+    for menu_id, corner_id in plan_rows:
+        corner_id_by_menu.setdefault(menu_id, corner_id)  # plan_date 내림차순이라 최신 배치가 먼저 잡힘
+
     return [
         {
             "menu_id": r.menu_id,
             "menu_name": menus.get(r.menu_id),
+            "corner_name": corners.get(corner_id_by_menu.get(r.menu_id)),
             "appearance_count": r.appearance_count,
             "total_headcount": r.total_headcount,
             "evaluation_count": r.evaluation_count,

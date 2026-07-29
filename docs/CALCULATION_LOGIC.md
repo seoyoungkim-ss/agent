@@ -1183,3 +1183,22 @@ API)를 쓰는 경우 `api_key`가 비어있다는 이유만으로 계속 모의
 **테스트 추가**: `test_is_configured_does_not_require_api_key`,
 `test_is_configured_false_without_base_url`,
 `test_chat_stream_omits_auth_header_when_api_key_not_set`.
+
+## 30. 메뉴 4분면 — 코너별 클릭-확장 보드로 재구성 (2026-07)
+
+메뉴 수가 많아지면서 "메뉴 4분면" 탭의 표 하나에 모든 메뉴를 나열하면 훑어보기
+어려워졌다(실사용 피드백). `GET /analysis/menu-performance` 응답에
+`corner_name`을 추가했다 — `menu_performance_stats`엔 코너 정보가 없으므로,
+`weekly_menu_plan`에서 그 메뉴의 (조회 기간 내) **가장 최근 배치 코너**를
+찾아 붙인다(plan_date 내림차순으로 먼저 나오는 코너_id를 그 메뉴의 코너로
+확정 — `menu_id`당 한 번만 `setdefault`). 기간 내 weekly_menu_plan에 아예 없는
+메뉴는 `corner_name: null`(프론트에서 "코너 미배정"으로 묶임).
+
+**프론트**(`MenuQuadrantTab`): 기존 하나의 큰 `<Table>`을 코너별로 묶어
+(`Map<corner_name, rows>`, 메뉴 개수 내림차순 정렬) 클릭하면 펼쳐지는 아코디언
+보드로 바꿨다 — `HomePage.tsx`의 VOE 카테고리 타일과 같은 클릭-확장 컨벤션.
+산점도 차트는 그대로 전체 메뉴를 한 번에 보여준다(차트는 표만큼 "너무 많아
+못 보는" 문제가 없어서 그대로 둠).
+
+**테스트**: `test_menu_performance_recompute_and_read`에 `corner_name` 확인
+추가("제육볶음"이 `weekly_menu_plan` 배치대로 "한식"으로 나오는지).

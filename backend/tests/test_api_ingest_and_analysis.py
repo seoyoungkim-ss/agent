@@ -187,6 +187,7 @@ def test_menu_performance_recompute_and_read(client):
     jeyuk = next(r for r in rows if r["menu_name"] == "제육볶음")
     assert jeyuk["evaluation_count"] == 3
     assert jeyuk["quadrant"] is not None
+    assert jeyuk["corner_name"] == "한식"  # weekly_menu_plan 배치 기준
 
 
 def test_menu_performance_recompute_excludes_take_out_placeholder_menus(client):

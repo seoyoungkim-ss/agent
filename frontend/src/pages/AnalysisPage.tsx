@@ -798,8 +798,11 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
   );
 }
 
+const UNASSIGNED_CORNER = "코너 미배정";
+
 function MenuQuadrantTab() {
   const chartTheme = useChartTheme();
+  const [expandedCorner, setExpandedCorner] = useState<string | null>(null);
   const query = useQuery({
     queryKey: ["menu-performance", PERIOD_START, PERIOD_END],
     queryFn: () => api.menuPerformance({ period_start: PERIOD_START, period_end: PERIOD_END }),
@@ -809,6 +812,15 @@ function MenuQuadrantTab() {
   const rows = query.data ?? [];
   const demandThreshold = median(rows.map((r) => r.total_headcount / Math.max(r.appearance_count, 1)));
   const scoreThreshold = median(rows.map((r) => r.adjusted_score ?? 0));
+
+  // 메뉴가 너무 많아 표 하나로 보기 어려우므로 코너별로 묶어 클릭하면 펼쳐지는 방식으로 표시한다.
+  const byCorner = new Map<string, MenuPerformanceRow[]>();
+  for (const r of rows) {
+    const key = r.corner_name ?? UNASSIGNED_CORNER;
+    if (!byCorner.has(key)) byCorner.set(key, []);
+    byCorner.get(key)!.push(r);
+  }
+  const cornerGroups = [...byCorner.entries()].sort((a, b) => b[1].length - a[1].length);
 
   const scatterData = rows.map((r) => ({
     name: r.menu_name,
@@ -884,24 +896,39 @@ function MenuQuadrantTab() {
       )}
       {rows.length > 0 && <ReactECharts option={option} style={{ height: 340 }} />}
       {rows.length > 0 && (
-        <div className="mt-4">
-          <Table
-            columns={[
-              { key: "menu", label: "메뉴" },
-              { key: "appearance", label: "등장횟수", align: "right" },
-              { key: "count", label: "평가건수", align: "right" },
-              { key: "score", label: "만족도", align: "right" },
-              { key: "quadrant", label: "4분면" },
-            ]}
-            rows={rows.map((r: MenuPerformanceRow) => ({
-              menu: r.menu_name,
-              appearance: r.appearance_count,
-              count: r.evaluation_count,
-              score: r.adjusted_score?.toFixed(2) ?? "-",
-              quadrant: <QuadrantBadge label={r.quadrant} />,
-            }))}
-            rowKey={(r) => r.menu as string}
-          />
+        <div className="mt-4 space-y-2">
+          {cornerGroups.map(([cornerName, menuRows]) => (
+            <div key={cornerName} className="rounded-md border" style={{ borderColor: "var(--border)" }}>
+              <button
+                onClick={() => setExpandedCorner((cur) => (cur === cornerName ? null : cornerName))}
+                className="flex w-full items-center justify-between px-3 py-2 text-left text-[13px]"
+              >
+                <span className="font-medium">{cornerName}</span>
+                <span style={{ color: "var(--ink-muted)" }}>{menuRows.length}개 메뉴</span>
+              </button>
+              {expandedCorner === cornerName && (
+                <div className="border-t p-3" style={{ borderColor: "var(--border)" }}>
+                  <Table
+                    columns={[
+                      { key: "menu", label: "메뉴" },
+                      { key: "appearance", label: "등장횟수", align: "right" },
+                      { key: "count", label: "평가건수", align: "right" },
+                      { key: "score", label: "만족도", align: "right" },
+                      { key: "quadrant", label: "4분면" },
+                    ]}
+                    rows={menuRows.map((r: MenuPerformanceRow) => ({
+                      menu: r.menu_name,
+                      appearance: r.appearance_count,
+                      count: r.evaluation_count,
+                      score: r.adjusted_score?.toFixed(2) ?? "-",
+                      quadrant: <QuadrantBadge label={r.quadrant} />,
+                    }))}
+                    rowKey={(r) => r.menu as string}
+                  />
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       )}
     </Card>

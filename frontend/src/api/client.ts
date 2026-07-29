@@ -115,6 +115,7 @@ export interface CornerTrendRow {
 export interface MenuPerformanceRow {
   menu_id: number;
   menu_name: string;
+  corner_name: string | null;
   appearance_count: number;
   total_headcount: number;
   evaluation_count: number;
