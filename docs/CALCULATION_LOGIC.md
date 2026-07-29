@@ -401,6 +401,21 @@ def employee_key(transaction_employee_id: str, mapping: dict[str, str] | None = 
 3. ⚠️ **아직 미확인**: 식사구분 어휘가 다르다 — 취식기록 "중식", 맛평가 "점심".
    `models.py`의 `MEAL_TYPE_ALIASES` 딕셔너리에서 정규화하므로, 다른 표기(예: "런치")가
    또 나오면 여기에 한 줄만 추가하면 된다.
+4. ✅ **확인 및 수정됨 (2026-07-29, 실사용 중 발견)**: 매핑 파일을 정상 로드해도
+   맛평가 매칭률이 0%였던 문제 — 원인은 `meal_transaction_parser.py`/
+   `taste_eval_parser.py`의 `_clean()`이 엑셀의 숫자 자동인식을 처리 안 해서였다.
+   사원번호/Knox ID처럼 순수 숫자 값을 엑셀이 자동으로 숫자로 인식하면 셀 값이
+   `"12345678"`이 아니라 `12345678.0`(float)로 넘어오는데, 그대로 문자열화하면
+   `"12345678.0"`이 돼서 텍스트로 저장된 다른 쪽 파일의 `"12345678"`과 달라져
+   조인 키가 영구히 안 맞았다(화면상으로는 둘 다 "12345678"로 보여서 육안으로는
+   못 잡음). `employee_mapping.py`의 `_clean_cell()`(같은 문제를 매핑 파일 쪽에서
+   먼저 발견해 고쳤던 것)과 동일하게, 정수값 float이면 `str(int(value))`로
+   변환하도록 두 파서의 `_clean()`을 고쳤다. **사원번호/Knox ID뿐 아니라 `_clean()`을
+   거치는 모든 필드에 적용**되므로 비슷한 숫자형 컬럼이 또 있어도 안전하다.
+   테스트: `test_meal_transaction_parser.py::
+   test_numeric_employee_id_from_excel_autoformat_not_left_with_decimal`,
+   `test_taste_eval_parser.py::
+   test_numeric_knox_id_from_excel_autoformat_not_left_with_decimal`.
 
 **status 필터**: `merge_transactions_with_taste(..., only_normal_status=True)` 기본값이
 `구분 != "정상"`인 행을 제외한다. "정상" 외에 어떤 값들이 있는지(취소/환불 등) 아직

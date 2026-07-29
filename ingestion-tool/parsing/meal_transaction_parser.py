@@ -41,6 +41,11 @@ class MealTransactionParseError(ValueError):
 def _clean(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, float) and value.is_integer():
+        # 엑셀이 사원번호처럼 숫자로만 된 값을 자동으로 숫자로 인식해 12345678.0
+        # 형태로 넘기는 경우가 있다 — 그대로 두면 다른 파일(텍스트로 저장된 쪽)의
+        # "12345678"과 문자열이 달라져 매칭이 100% 실패한다.
+        return str(int(value))
     return str(value).strip()
 
 

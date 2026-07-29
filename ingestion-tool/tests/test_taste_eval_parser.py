@@ -46,3 +46,12 @@ def test_blank_knox_id_skipped():
 def test_missing_header_raises():
     with pytest.raises(TasteEvalParseError):
         parse_taste_eval_grid([TITLE_ROW, ["N0", "날짜", "코너"]])
+
+
+def test_numeric_knox_id_from_excel_autoformat_not_left_with_decimal():
+    # 엑셀이 순수 숫자로 된 Knox ID를 12345678.0(float)로 자동 변환해 넘기는
+    # 실제 사례 — 그대로 두면 취식정보 쪽 "12345678"과 문자열이 달라져 매칭이
+    # 100% 실패한다.
+    row = [1, "2026-06-25", 12345678.0, "점심", "맛남", "해물잡탕밥", "", "", "", ""]
+    rows = parse_taste_eval_grid(_grid(row))
+    assert rows[0].knox_id == "12345678"

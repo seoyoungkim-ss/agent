@@ -117,3 +117,11 @@ def test_excel_serial_date_number_parsed():
     # 테스트와 동일 시각, 표현 방식만 다름).
     rows = parse_meal_transaction_grid(_grid(_row(일시=46112.79494212963)))
     assert rows[0].eaten_at == dt.datetime(2026, 3, 31, 19, 4, 43)
+
+
+def test_numeric_employee_id_from_excel_autoformat_not_left_with_decimal():
+    # 엑셀이 순수 숫자로 된 사원번호를 14131244.0(float)로 자동 변환해 넘기는
+    # 실제 사례 — 그대로 두면 맛평가 쪽 매핑 결과 "14131244"와 문자열이 달라져
+    # 매칭이 100% 실패한다.
+    rows = parse_meal_transaction_grid(_grid(_row(사원번호=14131244.0)))
+    assert rows[0].employee_id == "14131244"
