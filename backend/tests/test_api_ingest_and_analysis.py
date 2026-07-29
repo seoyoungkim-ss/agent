@@ -112,9 +112,14 @@ def test_list_menu_food_vectors_endpoint(client):
 
     resp = client.get("/api/analysis/menus/food-vectors")
     assert resp.status_code == 200
-    names = {row["menu_name"] for row in resp.json()}
+    rows = resp.json()
+    names = {row["menu_name"] for row in rows}
     assert "제육볶음" in names
     assert "모듬과일" in names
+    jeyuk = next(r for r in rows if r["menu_name"] == "제육볶음")
+    assert jeyuk["corner_name"] == "한식"  # weekly_menu_plan 배치 기준
+    moduem = next(r for r in rows if r["menu_name"] == "모듬과일")
+    assert moduem["corner_name"] is None  # weekly_menu_plan에 없는 메뉴 — 코너 미배정
 
     resp_untagged = client.get("/api/analysis/menus/food-vectors", params={"untagged_only": True})
     untagged_names = {row["menu_name"] for row in resp_untagged.json()}

@@ -186,6 +186,7 @@ export type FoodVectorSource = "규칙기반" | "LLM추정" | "관리자수동";
 export interface MenuFoodVectorRow {
   menu_id: number;
   menu_name: string;
+  corner_name: string | null;
   food_vector: number[] | null;
   dimensions: string[];
   source: FoodVectorSource | null;

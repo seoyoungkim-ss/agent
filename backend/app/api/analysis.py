@@ -372,15 +372,31 @@ def recompute_taste_clusters(k: int = 5, db: Session = Depends(get_db)):
 
 @router.get("/menus/food-vectors")
 def list_menu_food_vectors(untagged_only: bool = False, db: Session = Depends(get_db)):
-    """PRD 6.1: 관리자용 메뉴 food_vector 현황 — 수동 조정 화면에서 목록으로 쓴다."""
+    """PRD 6.1: 관리자용 메뉴 food_vector 현황 — 수동 조정 화면에서 목록으로 쓴다.
+
+    corner_name은 menu-performance와 같은 방식으로 weekly_menu_plan에서 그
+    메뉴의 (기간 제한 없이 전체에서) 가장 최근 배치 코너를 붙인 것 — 프론트가
+    메뉴 목록을 코너별로 묶어 보여주는 용도다.
+    """
     query = db.query(MenuMaster)
     if untagged_only:
         query = query.filter(MenuMaster.food_vector.is_(None))
     menus = query.order_by(MenuMaster.menu_name).all()
+
+    corners = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+    corner_id_by_menu: dict[int, int] = {}
+    for menu_id, corner_id in (
+        db.query(WeeklyMenuPlan.menu_id, WeeklyMenuPlan.corner_id)
+        .order_by(WeeklyMenuPlan.plan_date.desc())
+        .all()
+    ):
+        corner_id_by_menu.setdefault(menu_id, corner_id)
+
     return [
         {
             "menu_id": m.menu_id,
             "menu_name": m.menu_name,
+            "corner_name": corners.get(corner_id_by_menu.get(m.menu_id)),
             "food_vector": [float(x) for x in m.food_vector] if m.food_vector is not None else None,
             "dimensions": FOOD_VECTOR_DIMENSIONS,
             "source": m.food_vector_source.value if m.food_vector_source else None,

@@ -800,6 +800,48 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
 
 const UNASSIGNED_CORNER = "코너 미배정";
 
+// 메뉴가 너무 많아 표 하나로는 훑어보기 어려우므로, 코너별로 묶어 카드 그리드로
+// 보여주고 클릭한 코너의 상세만 펼치는 패턴을 여러 섹션(메뉴 4분면, 음식벡터
+// 관리)에서 공유한다 — HomePage.tsx의 VOE 분류 타일과 같은 클릭-확장 컨벤션.
+function groupByCorner<T extends { corner_name: string | null }>(rows: T[]): [string, T[]][] {
+  const byCorner = new Map<string, T[]>();
+  for (const r of rows) {
+    const key = r.corner_name ?? UNASSIGNED_CORNER;
+    if (!byCorner.has(key)) byCorner.set(key, []);
+    byCorner.get(key)!.push(r);
+  }
+  return [...byCorner.entries()].sort((a, b) => b[1].length - a[1].length);
+}
+
+function CornerCardGrid({
+  groups,
+  selected,
+  onSelect,
+}: {
+  groups: [string, unknown[]][];
+  selected: string | null;
+  onSelect: (cornerName: string) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+      {groups.map(([cornerName, items]) => (
+        <button
+          key={cornerName}
+          onClick={() => onSelect(cornerName)}
+          className="rounded-md border p-3 text-left transition-colors"
+          style={{
+            borderColor: selected === cornerName ? "var(--accent)" : "var(--border)",
+            background: selected === cornerName ? "var(--surface-2)" : "var(--surface)",
+          }}
+        >
+          <div className="text-[13px] font-medium">{cornerName}</div>
+          <div className="mt-1 text-lg font-semibold">{items.length}개 메뉴</div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function MenuQuadrantTab() {
   const chartTheme = useChartTheme();
   const [expandedCorner, setExpandedCorner] = useState<string | null>(null);
@@ -812,15 +854,7 @@ function MenuQuadrantTab() {
   const rows = query.data ?? [];
   const demandThreshold = median(rows.map((r) => r.total_headcount / Math.max(r.appearance_count, 1)));
   const scoreThreshold = median(rows.map((r) => r.adjusted_score ?? 0));
-
-  // 메뉴가 너무 많아 표 하나로 보기 어려우므로 코너별로 묶어 클릭하면 펼쳐지는 방식으로 표시한다.
-  const byCorner = new Map<string, MenuPerformanceRow[]>();
-  for (const r of rows) {
-    const key = r.corner_name ?? UNASSIGNED_CORNER;
-    if (!byCorner.has(key)) byCorner.set(key, []);
-    byCorner.get(key)!.push(r);
-  }
-  const cornerGroups = [...byCorner.entries()].sort((a, b) => b[1].length - a[1].length);
+  const cornerGroups = groupByCorner(rows);
 
   const scatterData = rows.map((r) => ({
     name: r.menu_name,
@@ -896,39 +930,35 @@ function MenuQuadrantTab() {
       )}
       {rows.length > 0 && <ReactECharts option={option} style={{ height: 340 }} />}
       {rows.length > 0 && (
-        <div className="mt-4 space-y-2">
-          {cornerGroups.map(([cornerName, menuRows]) => (
-            <div key={cornerName} className="rounded-md border" style={{ borderColor: "var(--border)" }}>
-              <button
-                onClick={() => setExpandedCorner((cur) => (cur === cornerName ? null : cornerName))}
-                className="flex w-full items-center justify-between px-3 py-2 text-left text-[13px]"
-              >
-                <span className="font-medium">{cornerName}</span>
-                <span style={{ color: "var(--ink-muted)" }}>{menuRows.length}개 메뉴</span>
-              </button>
-              {expandedCorner === cornerName && (
-                <div className="border-t p-3" style={{ borderColor: "var(--border)" }}>
-                  <Table
-                    columns={[
-                      { key: "menu", label: "메뉴" },
-                      { key: "appearance", label: "등장횟수", align: "right" },
-                      { key: "count", label: "평가건수", align: "right" },
-                      { key: "score", label: "만족도", align: "right" },
-                      { key: "quadrant", label: "4분면" },
-                    ]}
-                    rows={menuRows.map((r: MenuPerformanceRow) => ({
-                      menu: r.menu_name,
-                      appearance: r.appearance_count,
-                      count: r.evaluation_count,
-                      score: r.adjusted_score?.toFixed(2) ?? "-",
-                      quadrant: <QuadrantBadge label={r.quadrant} />,
-                    }))}
-                    rowKey={(r) => r.menu as string}
-                  />
-                </div>
-              )}
+        <div className="mt-4">
+          <CornerCardGrid
+            groups={cornerGroups}
+            selected={expandedCorner}
+            onSelect={(c) => setExpandedCorner((cur) => (cur === c ? null : c))}
+          />
+          {expandedCorner && (
+            <div className="mt-4">
+              <Table
+                columns={[
+                  { key: "menu", label: "메뉴" },
+                  { key: "appearance", label: "등장횟수", align: "right" },
+                  { key: "count", label: "평가건수", align: "right" },
+                  { key: "score", label: "만족도", align: "right" },
+                  { key: "quadrant", label: "4분면" },
+                ]}
+                rows={(cornerGroups.find(([c]) => c === expandedCorner)?.[1] ?? []).map(
+                  (r: MenuPerformanceRow) => ({
+                    menu: r.menu_name,
+                    appearance: r.appearance_count,
+                    count: r.evaluation_count,
+                    score: r.adjusted_score?.toFixed(2) ?? "-",
+                    quadrant: <QuadrantBadge label={r.quadrant} />,
+                  }),
+                )}
+                rowKey={(r) => r.menu as string}
+              />
             </div>
-          ))}
+          )}
         </div>
       )}
     </Card>
@@ -1052,6 +1082,7 @@ function MenuFoodVectorEditor({ row, onSaved }: { row: MenuFoodVectorRow; onSave
 
 function MenuFoodVectorAdminSection() {
   const [untaggedOnly, setUntaggedOnly] = useState(false);
+  const [expandedCorner, setExpandedCorner] = useState<string | null>(null);
   const query = useQuery({
     queryKey: ["menu-food-vectors", untaggedOnly],
     queryFn: () => api.menuFoodVectors({ untagged_only: untaggedOnly }),
@@ -1062,6 +1093,7 @@ function MenuFoodVectorAdminSection() {
   });
 
   const rows = query.data ?? [];
+  const cornerGroups = groupByCorner(rows);
 
   return (
     <Card title="메뉴 음식벡터 관리 (개인 취향 벡터 계산의 기초 데이터)">
@@ -1095,11 +1127,22 @@ function MenuFoodVectorAdminSection() {
           {untaggedOnly ? "미태깅 메뉴가 없습니다." : "메뉴 데이터가 없습니다."}
         </p>
       )}
-      <div className="space-y-2">
-        {rows.map((row) => (
-          <MenuFoodVectorEditor key={row.menu_id} row={row} onSaved={() => query.refetch()} />
-        ))}
-      </div>
+      {rows.length > 0 && (
+        <>
+          <CornerCardGrid
+            groups={cornerGroups}
+            selected={expandedCorner}
+            onSelect={(c) => setExpandedCorner((cur) => (cur === c ? null : c))}
+          />
+          {expandedCorner && (
+            <div className="mt-4 space-y-2">
+              {(cornerGroups.find(([c]) => c === expandedCorner)?.[1] ?? []).map((row) => (
+                <MenuFoodVectorEditor key={row.menu_id} row={row} onSaved={() => query.refetch()} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </Card>
   );
 }

@@ -1202,3 +1202,41 @@ API)를 쓰는 경우 `api_key`가 비어있다는 이유만으로 계속 모의
 
 **테스트**: `test_menu_performance_recompute_and_read`에 `corner_name` 확인
 추가("제육볶음"이 `weekly_menu_plan` 배치대로 "한식"으로 나오는지).
+
+---
+
+## 31. 코너별 카드 보드로 재구성 — 메뉴 4분면 + 음식벡터 관리 (2026-07)
+
+30절에서 "메뉴 4분면"을 코너별로 묶긴 했지만 여전히 **세로로 쌓인 전체 폭
+아코디언 목록**이라, 코너가 여러 개면 한눈에 훑어보기 어렵다는 후속 피드백이
+있었다. 또 "메뉴 음식벡터 관리" 섹션은 아직 전혀 코너별로 안 묶여 모든 메뉴가
+구분 없이 나열돼 있어 메뉴가 늘수록 페이지 스크롤이 계속 길어졌다.
+
+**백엔드**: `GET /analysis/menus/food-vectors`(`list_menu_food_vectors`,
+`app/api/analysis.py`)에 `corner_name`을 추가했다. 이 엔드포인트엔 기간
+파라미터가 없으므로, 30절과 달리 **기간 필터 없이 전체 `weekly_menu_plan`에서
+그 메뉴의 가장 최근 배치 코너**(plan_date 내림차순 `setdefault`)를 붙인다.
+
+**프론트**(`AnalysisPage.tsx`): 두 섹션이 "코너별로 묶기 → 목록/카드 →
+클릭 확장"을 반복하므로 공용 헬퍼로 정리했다.
+```tsx
+function groupByCorner<T extends { corner_name: string | null }>(rows: T[]): [string, T[]][]
+// corner_name ?? "코너 미배정" 기준으로 묶고, 그룹 크기 내림차순 정렬
+function CornerCardGrid({ groups, selected, onSelect }): JSX.Element
+// HomePage.tsx의 VOE 카테고리 타일과 같은 카드 스타일(테두리 박스, 굵은 코너명
+// + 개수, 선택 시 강조 테두리/배경) — grid-cols-2 sm:grid-cols-5
+```
+- **`MenuQuadrantTab`**: 세로 아코디언 목록을 `CornerCardGrid` + 그 아래 단일
+  펼침 테이블로 교체(상태는 기존 `expandedCorner` 재사용, 렌더링만 변경).
+- **`MenuFoodVectorAdminSection`**: `expandedCorner` 상태를 새로 추가하고
+  `groupByCorner`로 묶어 `CornerCardGrid`를 렌더링, 선택된 코너의
+  `MenuFoodVectorEditor` 목록만 그 아래에 보여준다("미태깅 메뉴만 보기"
+  체크박스는 카드 그리드 위에 그대로 두고, 필터링은 그룹핑 **전에** 적용).
+  코너를 선택 안 하면 메뉴 목록이 아예 안 보여 스크롤이 짧아진다.
+
+두 섹션 모두 카드 그리드 자체는 완전히 독립적인 컴포넌트 상태를 가지므로
+("메뉴 4분면"에서 "한식" 카드를 펼쳐도 "음식벡터 관리"의 "한식" 카드는
+안 펼쳐짐), 같은 코너명이 페이지에 두 번 나와도 서로 간섭하지 않는다.
+
+**테스트**: `test_list_menu_food_vectors_endpoint`에 `corner_name` 확인 추가
+(제육볶음 → "한식", 모듬과일 → `null`).
