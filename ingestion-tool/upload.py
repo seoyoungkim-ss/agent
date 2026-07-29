@@ -54,27 +54,43 @@ def _meal_log_row_to_dict(row: ParsedMealLogRow) -> dict:
         "employee_id": row.employee_id,
         "meal_type": row.meal_type.value,
         "corner_name": row.corner_name,
+        "menu_name": row.menu_name,
+        "company_name": row.company_name,
         "taste_score": row.taste_score.value if row.taste_score else None,
         "comment": row.comment,
     }
 
 
 def upload_weekly_menu(
-    rows: list[ParsedMenuRow], *, backend_base_url: str, api_token: str, timeout: float = 30.0
+    rows: list[ParsedMenuRow],
+    *,
+    backend_base_url: str,
+    api_token: str,
+    timeout: float = 30.0,
+    verify_ssl: bool = True,
 ) -> int:
-    return _upload(rows, _menu_row_to_dict, f"{backend_base_url}/ingest/weekly-menu", api_token, timeout)
+    return _upload(
+        rows, _menu_row_to_dict, f"{backend_base_url}/ingest/weekly-menu", api_token, timeout, verify_ssl
+    )
 
 
 def upload_meal_log(
-    rows: list[ParsedMealLogRow], *, backend_base_url: str, api_token: str, timeout: float = 30.0
+    rows: list[ParsedMealLogRow],
+    *,
+    backend_base_url: str,
+    api_token: str,
+    timeout: float = 30.0,
+    verify_ssl: bool = True,
 ) -> int:
-    return _upload(rows, _meal_log_row_to_dict, f"{backend_base_url}/ingest/meal-log", api_token, timeout)
+    return _upload(
+        rows, _meal_log_row_to_dict, f"{backend_base_url}/ingest/meal-log", api_token, timeout, verify_ssl
+    )
 
 
-def _upload(rows: list, to_dict, url: str, api_token: str, timeout: float) -> int:
+def _upload(rows: list, to_dict, url: str, api_token: str, timeout: float, verify_ssl: bool = True) -> int:
     sent = 0
     headers = {"Authorization": f"Bearer {api_token}"}
-    with httpx.Client(headers=headers, timeout=timeout) as client:
+    with httpx.Client(headers=headers, timeout=timeout, verify=verify_ssl) as client:
         for batch in _chunks(rows, _BATCH_SIZE):
             payload = {"rows": [to_dict(r) for r in batch]}
             _post_with_retry(client, url, payload)

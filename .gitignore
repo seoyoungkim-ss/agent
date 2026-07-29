@@ -13,6 +13,7 @@ ingestion-tool/config.json
 ingestion-tool/dist/
 ingestion-tool/build/
 ingestion-tool/*.spec
+ingestion-tool/employee_mapping.csv
 
 # --- frontend ---
 frontend/node_modules/

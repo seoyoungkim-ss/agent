@@ -5,7 +5,7 @@ from sqlalchemy import Boolean, Date, Enum as SAEnum, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.models.enums import Division, HolidayType
+from app.models.enums import Division, FoodVectorSource, HolidayType
 from app.services.food_vector import FOOD_VECTOR_DIM
 
 
@@ -18,6 +18,10 @@ class EmployeeMaster(Base):
     division: Mapped[Division] = mapped_column(
         SAEnum(Division, values_callable=lambda e: [x.value for x in e], native_enum=False)
     )
+    # 취식기록 "회사" 컬럼 원문 (예: 삼성전자/삼성SDI/지리산). division은 이 값을
+    # app/services/company_classification.py로 분류한 결과이고, 계열사/기타라도
+    # 실제 회사명은 이 필드로 그대로 노출한다.
+    company_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     department: Mapped[str | None] = mapped_column(String(128), nullable=True)
     join_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
 
@@ -42,6 +46,11 @@ class MenuMaster(Base):
     menu_name: Mapped[str] = mapped_column(String(128), unique=True)
     category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     food_vector: Mapped[list[float] | None] = mapped_column(Vector(FOOD_VECTOR_DIM), nullable=True)
+    # 규칙기반/LLM추정/관리자수동 — MANUAL은 이후 자동 재태깅 대상에서 제외된다.
+    food_vector_source: Mapped[FoodVectorSource | None] = mapped_column(
+        SAEnum(FoodVectorSource, values_callable=lambda e: [x.value for x in e], native_enum=False),
+        nullable=True,
+    )
 
 
 class HolidayCalendar(Base):

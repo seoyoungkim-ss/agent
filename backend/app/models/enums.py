@@ -42,6 +42,18 @@ class HolidayType(str, enum.Enum):
     COMPANY_OFF = "회사자체휴무"
 
 
+class FoodVectorSource(str, enum.Enum):
+    """PRD 6.1: menu_master.food_vector가 어떻게 채워졌는지 구분한다.
+
+    MANUAL로 표시된 메뉴는 이후 규칙/LLM 재태깅 배치가 건드리지 않는다
+    (app/services/food_vector_tagging.py 참고).
+    """
+
+    RULE = "규칙기반"
+    LLM = "LLM추정"
+    MANUAL = "관리자수동"
+
+
 class MenuQuadrant(str, enum.Enum):
     """PRD 6.3.4: 인기메뉴/숨은강자/개선시급/퇴출후보."""
 

@@ -1,10 +1,81 @@
 @import "tailwindcss";
 
+/* 디자인 토큰 — light/dark 모두 여기서만 정의하고, 컴포넌트는 var(--role)로만 참조한다.
+   접근성 검증된 참조 팔레트 값을 그대로 사용 (dataviz 스킬 references/palette.md). */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f1f0ec;
+  --border: rgba(11, 11, 11, 0.1);
+  --border-strong: #e1e0d9;
+
+  --ink: #0b0b0b;
+  --ink-secondary: #52514e;
+  --ink-muted: #898781;
+
+  --accent: #2a78d6;
+  --accent-ink: #ffffff;
+
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+
+  --series-1: #2a78d6; /* blue */
+  --series-2: #eb6834; /* orange */
+  --series-3: #1baf7a; /* aqua */
+
+  --success-text: #006300;
+
+  /* 차트 전용 (dataviz 스킬 palette.md "Chart chrome & ink") — Canvas는 CSS var()를
+     해석하지 못하므로, ECharts 옵션 쪽에서는 이 값을 resolveColor()로 직접 읽어 쓴다. */
+  --chart-gridline: #e1e0d9;
+  --chart-axis: #c3c2b7;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232320;
+    --border: rgba(255, 255, 255, 0.1);
+    --border-strong: #2c2c2a;
+
+    --ink: #ffffff;
+    --ink-secondary: #c3c2b7;
+    --ink-muted: #898781;
+
+    --accent: #3987e5;
+    --accent-ink: #ffffff;
+
+    --good: #0ca30c;
+    --warning: #fab219;
+    --serious: #ec835a;
+    --critical: #e66767;
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+
+    --success-text: #0ca30c;
+
+    --chart-gridline: #2c2c2a;
+    --chart-axis: #383835;
+  }
 }
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+  background: var(--page);
+  color: var(--ink);
+  font-size: 14px;
+}
+
+* {
+  box-sizing: border-box;
 }

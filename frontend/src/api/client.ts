@@ -74,11 +74,69 @@ export interface MenuPerformanceRow {
   quadrant: Quadrant | null;
 }
 
+export type Granularity = "daily" | "weekly" | "monthly";
+
+export interface DivisionRow {
+  period: string;
+  division: string; // 본사 | 계열사 | 기타
+  headcount: number;
+}
+
 export interface TasteProfile {
   employee_id: string;
   profile_vector: number[];
   dimensions: string[];
   sample_size: number;
+  cluster_label: string | null;
+}
+
+export interface TasteCluster {
+  id: number;
+  label: string;
+  size: number;
+  centroid_vector: number[];
+  dimensions: string[];
+  avg_satisfaction: number | null;
+  top_menus: string[];
+  dominant_corner: string | null;
+}
+
+export interface MenuAffinityRow {
+  menu_name: string;
+  co_count: number;
+  lift: number;
+}
+
+export interface MenuPairRow {
+  menu_a: string;
+  menu_b: string;
+  co_count: number;
+  lift: number;
+}
+
+export interface CornerCoreLayerMenuPairsResponse {
+  corner_id: number;
+  corner_name: string;
+  core_layer: {
+    employee_count: number;
+    min_visit_count: number;
+    min_share: number;
+    top_pairs: MenuPairRow[];
+  };
+  non_core: {
+    employee_count: number;
+    top_pairs: MenuPairRow[];
+  };
+}
+
+export type FoodVectorSource = "규칙기반" | "LLM추정" | "관리자수동";
+
+export interface MenuFoodVectorRow {
+  menu_id: number;
+  menu_name: string;
+  food_vector: number[] | null;
+  dimensions: string[];
+  source: FoodVectorSource | null;
 }
 
 export interface WhatIfCornerResult {
@@ -128,6 +186,13 @@ export const api = {
   cornerAnalysis: (params: { period_start: string; period_end: string; classification?: Classification }) =>
     request<CornerAnalysisRow[]>(`/analysis/corners${qs(params)}`),
 
+  divisionAnalysis: (params: {
+    period_start: string;
+    period_end: string;
+    granularity?: Granularity;
+    classification?: Classification;
+  }) => request<DivisionRow[]>(`/analysis/divisions${qs(params)}`),
+
   menuPerformance: (params: { period_start: string; period_end: string }) =>
     request<MenuPerformanceRow[]>(`/analysis/menu-performance${qs(params)}`),
 
@@ -146,6 +211,45 @@ export const api = {
 
   userTasteProfile: (employeeId: string) =>
     request<TasteProfile>(`/analysis/users/${encodeURIComponent(employeeId)}/taste-profile`),
+
+  tasteClusters: () => request<TasteCluster[]>(`/analysis/users/taste-clusters`),
+
+  recomputeTasteClusters: (k: number) =>
+    request<{ clusters_created: number }>(`/analysis/users/taste-clusters/recompute${qs({ k })}`, {
+      method: "POST",
+    }),
+
+  menuAffinity: (
+    menuName: string,
+    params: { period_start: string; period_end: string; min_co_count?: number; top_n?: number },
+  ) => request<MenuAffinityRow[]>(`/analysis/menu-affinity/${encodeURIComponent(menuName)}${qs(params)}`),
+
+  cornerCoreLayerMenuPairs: (
+    cornerId: number,
+    params: {
+      period_start: string;
+      period_end: string;
+      min_visit_count?: number;
+      min_share?: number;
+      min_co_count?: number;
+      top_n?: number;
+    },
+  ) =>
+    request<CornerCoreLayerMenuPairsResponse>(
+      `/analysis/corners/${cornerId}/core-layer-menu-pairs${qs(params)}`,
+    ),
+
+  menuFoodVectors: (params: { untagged_only?: boolean } = {}) =>
+    request<MenuFoodVectorRow[]>(`/analysis/menus/food-vectors${qs(params)}`),
+
+  updateMenuFoodVector: (menuId: number, vector: number[]) =>
+    request<{ menu_id: number; food_vector: number[]; dimensions: string[]; source: FoodVectorSource }>(
+      `/analysis/menus/${menuId}/food-vector`,
+      { method: "PUT", body: JSON.stringify({ vector }) },
+    ),
+
+  tagMenusWithLlm: () =>
+    request<{ tagged_menus: number }>(`/analysis/menus/tag-with-llm`, { method: "POST" }),
 
   whatIf: (payload: {
     target_date: string;

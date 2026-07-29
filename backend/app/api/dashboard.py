@@ -7,7 +7,8 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models.master import MenuMaster
+from app.models.logs import MealLog
+from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import DailyDivisionStats, MenuPerformanceStats, MonthlyVoeCluster
 from app.services.holidays import DayClassification, HolidayService
 
@@ -121,6 +122,54 @@ def menu_history(menu_name: str, db: Session = Depends(get_db)):
         }
         for s in stats
     ]
+
+
+@router.get("/meal-log/export")
+def meal_log_export(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """전체 취식 데이터(원본 상세)를 기간 선택해 엑셀로 다운로드. 요약이 아닌 meal_log 개별 행 그대로 노출."""
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    period_start_inclusive = dt.datetime.combine(period_start, dt.time())
+
+    rows = (
+        db.query(MealLog, EmployeeMaster, CornerMaster, MenuMaster)
+        .join(EmployeeMaster, MealLog.employee_id == EmployeeMaster.employee_id)
+        .join(CornerMaster, MealLog.corner_id == CornerMaster.corner_id)
+        .outerjoin(MenuMaster, MealLog.menu_id == MenuMaster.menu_id)
+        .filter(MealLog.eaten_at >= period_start_inclusive, MealLog.eaten_at < period_end_exclusive)
+        .order_by(MealLog.eaten_at)
+        .all()
+    )
+
+    buffer = io.BytesIO()
+    workbook = xlsxwriter.Workbook(buffer, {"in_memory": True})
+    sheet = workbook.add_worksheet("취식 데이터")
+    header_format = workbook.add_format({"bold": True, "bg_color": "#EEF2FF"})
+    datetime_format = workbook.add_format({"num_format": "yyyy-mm-dd hh:mm:ss"})
+
+    headers = ["취식일시", "사번", "구분", "회사명", "식사구분", "코너", "메뉴", "맛평가", "의견"]
+    for col, header in enumerate(headers):
+        sheet.write(0, col, header, header_format)
+    for row_idx, (meal, employee, corner, menu) in enumerate(rows, start=1):
+        sheet.write_datetime(row_idx, 0, meal.eaten_at, datetime_format)
+        sheet.write(row_idx, 1, employee.employee_id)
+        sheet.write(row_idx, 2, employee.division.value)
+        sheet.write(row_idx, 3, employee.company_name or "")
+        sheet.write(row_idx, 4, meal.meal_type.value)
+        sheet.write(row_idx, 5, corner.corner_name)
+        sheet.write(row_idx, 6, menu.menu_name if menu else "")
+        sheet.write(row_idx, 7, meal.taste_score.value if meal.taste_score else "")
+        sheet.write(row_idx, 8, meal.comment or "")
+    sheet.set_column(0, 0, 20)
+    sheet.set_column(1, 7, 14)
+    sheet.set_column(8, 8, 40)
+    workbook.close()
+
+    filename = f"meal-log-{period_start.isoformat()}_{period_end.isoformat()}.xlsx"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/voe-clusters")

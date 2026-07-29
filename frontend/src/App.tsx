@@ -17,21 +17,20 @@ function App() {
   const [tab, setTab] = useState<Tab>("home");
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-      <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
-        <div className="mx-auto flex max-w-6xl items-center gap-6 px-6 py-4">
-          <span className="text-lg font-bold">🍽️ 사내 카페테리아 운영 관리</span>
-          <nav className="flex gap-1">
+    <div className="min-h-screen" style={{ background: "var(--page)", color: "var(--ink)" }}>
+      <header className="border-b" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
+        <div className="mx-auto flex max-w-6xl items-center gap-8 px-6">
+          <span className="py-4 text-[15px] font-semibold tracking-tight">카페테리아 운영 관리</span>
+          <nav className="flex gap-6">
             {TABS.map((t) => (
               <button
                 key={t.value}
                 onClick={() => setTab(t.value)}
-                className={
-                  "rounded-lg px-3 py-1.5 text-sm font-medium transition-colors " +
-                  (tab === t.value
-                    ? "bg-indigo-600 text-white"
-                    : "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800")
-                }
+                className="border-b-2 py-4 text-[13px] font-medium transition-colors"
+                style={{
+                  borderColor: tab === t.value ? "var(--accent)" : "transparent",
+                  color: tab === t.value ? "var(--ink)" : "var(--ink-secondary)",
+                }}
               >
                 {t.label}
               </button>

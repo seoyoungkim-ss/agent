@@ -1,4 +1,6 @@
 {
   "backend_base_url": "https://cafeteria.internal.company.com/api",
-  "api_token": "REPLACE_WITH_INGEST_API_TOKEN"
+  "api_token": "REPLACE_WITH_INGEST_API_TOKEN",
+  "employee_mapping_path": "",
+  "verify_ssl": true
 }

@@ -1,10 +1,29 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
-import { api, type Classification, type MenuPerformanceRow } from "../api/client";
-import { Button, Card, ErrorState, LoadingState, QuadrantBadge, SegmentedControl } from "../components/ui";
+import {
+  api,
+  type Classification,
+  type Granularity,
+  type MenuFoodVectorRow,
+  type MenuPairRow,
+  type MenuPerformanceRow,
+} from "../api/client";
+import {
+  Button,
+  Card,
+  ErrorState,
+  Legend,
+  LoadingState,
+  QuadrantBadge,
+  resolveColor,
+  SegmentedControl,
+  Table,
+  quadrantColor,
+  useChartTheme,
+} from "../components/ui";
 
-type SubTab = "users" | "corners" | "menus";
+type SubTab = "menus" | "corners" | "users";
 
 function isoDaysAgo(days: number): string {
   const d = new Date();
@@ -15,83 +34,76 @@ function isoDaysAgo(days: number): string {
 const PERIOD_END = isoDaysAgo(0);
 const PERIOD_START = isoDaysAgo(180); // PRD: 취식 데이터 6개월 누적 기준
 
-function UserAnalysisTab() {
-  const [employeeId, setEmployeeId] = useState("");
-  const [searched, setSearched] = useState<string | null>(null);
-  const profile = useQuery({
-    queryKey: ["taste-profile", searched],
-    queryFn: () => api.userTasteProfile(searched as string),
-    enabled: !!searched,
-    retry: false,
-  });
+// 본사/계열사/기타를 항상 이 순서·색으로 그린다 (팔레트 categorical 순서 고정 원칙).
+const DIVISION_ORDER = ["본사", "계열사", "기타"];
+const DIVISION_SERIES_VAR = ["var(--series-1)", "var(--series-2)", "var(--series-3)"];
 
-  return (
-    <Card title="사용자 입맛 분석 — 사번별 취향 벡터 (PRD 6.1)">
-      <div className="mb-4 flex gap-2">
-        <input
-          className="w-48 rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
-          placeholder="사번 (예: E12345)"
-          value={employeeId}
-          onChange={(e) => setEmployeeId(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && setSearched(employeeId)}
-        />
-        <Button onClick={() => setSearched(employeeId)}>조회</Button>
-      </div>
-      {profile.isLoading && <LoadingState />}
-      {profile.isError && <ErrorState error={profile.error} />}
-      {profile.data && (
-        <div>
-          <p className="mb-2 text-sm text-slate-500">
-            표본 {profile.data.sample_size}건 기반 취향 벡터 (메뉴 food_vector와 동일 차원)
-          </p>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-            {profile.data.dimensions.map((dim, i) => (
-              <div key={dim} className="rounded-lg border border-slate-100 p-2 text-center dark:border-slate-800">
-                <div className="text-xs text-slate-400">{dim}</div>
-                <div className="font-mono text-sm">{profile.data!.profile_vector[i]?.toFixed(2)}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </Card>
-  );
-}
-
-function CornerAnalysisTab() {
+function DivisionAnalysisSection() {
+  const [granularity, setGranularity] = useState<Granularity>("weekly");
   const [classification, setClassification] = useState<Classification | "전체">("전체");
+  const chartTheme = useChartTheme();
+
   const query = useQuery({
-    queryKey: ["corner-analysis", classification],
+    queryKey: ["division-analysis", granularity, classification],
     queryFn: () =>
-      api.cornerAnalysis({
+      api.divisionAnalysis({
         period_start: PERIOD_START,
         period_end: PERIOD_END,
+        granularity,
         classification: classification === "전체" ? undefined : classification,
       }),
   });
 
+  const rows = query.data ?? [];
+  const periods = [...new Set(rows.map((r) => r.period))].sort();
+  const byDivision: Record<string, Map<string, number>> = {};
+  for (const r of rows) {
+    (byDivision[r.division] ??= new Map()).set(r.period, r.headcount);
+  }
+  const divisions = DIVISION_ORDER.filter((d) => byDivision[d]);
+
   const option = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 16, top: 32, bottom: 28 },
     tooltip: { trigger: "axis" },
-    legend: { data: ["누적 식수", "평균 만족도(5점)"] },
-    xAxis: { type: "category", data: query.data?.map((c) => c.corner_name) ?? [] },
-    yAxis: [
-      { type: "value", name: "식수" },
-      { type: "value", name: "만족도", min: 0, max: 5 },
-    ],
-    series: [
-      { name: "누적 식수", type: "bar", data: query.data?.map((c) => c.headcount_total) ?? [] },
-      {
-        name: "평균 만족도(5점)",
-        type: "line",
-        yAxisIndex: 1,
-        data: query.data?.map((c) => c.avg_taste_score) ?? [],
+    legend: { top: 0, textStyle: { color: chartTheme.text } },
+    xAxis: {
+      type: "category",
+      data: periods,
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      name: "식수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: divisions.map((division) => ({
+      name: division,
+      type: "bar",
+      barMaxWidth: 22,
+      itemStyle: {
+        borderRadius: [4, 4, 0, 0],
+        color: resolveColor(DIVISION_SERIES_VAR[DIVISION_ORDER.indexOf(division)]),
       },
-    ],
+      data: periods.map((p) => byDivision[division].get(p) ?? 0),
+    })),
   };
 
   return (
-    <Card title="코너별 분석 — 이용자 수 / 만족도 / 피크타임 서브속도 (PRD 6.2)">
-      <div className="mb-3">
+    <Card title="본사/계열사/기타 식수 (PRD 6.1)">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <SegmentedControl
+          value={granularity}
+          options={[
+            { label: "일간", value: "daily" },
+            { label: "주간", value: "weekly" },
+            { label: "월간", value: "monthly" },
+          ]}
+          onChange={setGranularity}
+        />
         <SegmentedControl
           value={classification}
           options={[
@@ -104,41 +116,439 @@ function CornerAnalysisTab() {
       </div>
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
-      {query.data && query.data.length === 0 && (
-        <p className="text-sm text-slate-400">데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다.</p>
+      {rows.length === 0 && !query.isLoading && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          데이터가 없습니다. 배치 집계(daily_division_stats)가 먼저 필요합니다.
+        </p>
       )}
-      {query.data && query.data.length > 0 && (
-        <>
-          <ReactECharts option={option} style={{ height: 300 }} />
-          <table className="mt-4 w-full text-left text-sm">
-            <thead className="text-slate-400">
-              <tr>
-                <th className="py-1 pr-4">코너</th>
-                <th className="py-1 pr-4">그린미트</th>
-                <th className="py-1 pr-4">누적 식수</th>
-                <th className="py-1 pr-4">평균 만족도</th>
-                <th className="py-1 pr-4">피크타임 분당 서브</th>
-              </tr>
-            </thead>
-            <tbody>
-              {query.data.map((c) => (
-                <tr key={c.corner_id} className="border-t border-slate-100 dark:border-slate-800">
-                  <td className="py-1.5 pr-4">{c.corner_name}</td>
-                  <td className="py-1.5 pr-4">{c.is_diet_corner ? "예" : "-"}</td>
-                  <td className="py-1.5 pr-4">{c.headcount_total.toLocaleString()}</td>
-                  <td className="py-1.5 pr-4">{c.avg_taste_score?.toFixed(2) ?? "-"}</td>
-                  <td className="py-1.5 pr-4">{c.avg_peak_throughput_per_min?.toFixed(1) ?? "-"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
+      {rows.length > 0 && <ReactECharts option={option} style={{ height: 280 }} />}
+      {rows.length > 0 && (
+        <div className="mt-4">
+          <Table
+            columns={[
+              { key: "period", label: "기간" },
+              ...divisions.map((d) => ({ key: d, label: d, align: "right" as const })),
+            ]}
+            rows={periods.map((p) => ({
+              period: p,
+              ...Object.fromEntries(divisions.map((d) => [d, (byDivision[d].get(p) ?? 0).toLocaleString()])),
+            }))}
+            rowKey={(r) => r.period as string}
+          />
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// 히트맵 값(0~1)이 낮음→높음으로 진해지는 단일 색상(blue) 시퀀셜 램프.
+const SEQUENTIAL_BLUE_RAMP = ["#cde2fb", "#5598e7", "#0d366b"];
+
+function TasteClusterSection() {
+  const chartTheme = useChartTheme();
+  const query = useQuery({
+    queryKey: ["taste-clusters"],
+    queryFn: () => api.tasteClusters(),
+  });
+  const recompute = useMutation({
+    mutationFn: () => api.recomputeTasteClusters(5),
+    onSuccess: () => query.refetch(),
+  });
+
+  const clusters = query.data ?? [];
+  const dimensions = clusters[0]?.dimensions ?? [];
+
+  const heatmapOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 150, right: 90, top: 16, bottom: 70 },
+    tooltip: {
+      formatter: (p: { value: [number, number, number] }) =>
+        `${clusters[p.value[1]].label}<br/>${dimensions[p.value[0]]}: ${p.value[2]}`,
+    },
+    xAxis: {
+      type: "category",
+      data: dimensions,
+      axisLabel: { color: chartTheme.text, rotate: 40 },
+      splitArea: { show: true },
+    },
+    yAxis: {
+      type: "category",
+      data: clusters.map((c) => `${c.label} (${c.size}명)`),
+      axisLabel: { color: chartTheme.text },
+      splitArea: { show: true },
+    },
+    visualMap: {
+      min: 0,
+      max: 1,
+      calculable: true,
+      orient: "vertical" as const,
+      right: 0,
+      top: "middle" as const,
+      itemHeight: 120,
+      inRange: { color: SEQUENTIAL_BLUE_RAMP },
+      textStyle: { color: chartTheme.text },
+    },
+    series: [
+      {
+        type: "heatmap",
+        data: clusters.flatMap((c, ci) =>
+          c.centroid_vector.map((v, di) => [di, ci, Number(v.toFixed(2))]),
+        ),
+        label: { show: false },
+      },
+    ],
+  };
+
+  return (
+    <Card title="취향 군집 요약 — 사번 검색 없이 전체 경향 보기">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          전체 취향 벡터를 K-means로 묶어 몇 개의 취향 그룹으로 요약합니다.
+        </p>
+        <Button variant="secondary" onClick={() => recompute.mutate()} disabled={recompute.isPending}>
+          재계산
+        </Button>
+      </div>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {recompute.isError && <ErrorState error={recompute.error} />}
+      {clusters.length === 0 && !query.isLoading && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          군집 결과가 없습니다. 먼저 취향 프로필이 충분히 쌓인 뒤(사용자 분석 아래 "조회" 전 recompute 필요) "재계산"을
+          눌러보세요 — 군집 5개를 만들려면 최소 10명의 취향 프로필이 필요합니다.
+        </p>
+      )}
+      {clusters.length > 0 && (
+        <ReactECharts option={heatmapOption} style={{ height: 100 + clusters.length * 40 }} />
+      )}
+      {clusters.length > 0 && (
+        <div className="mt-4">
+          <Table
+            columns={[
+              { key: "label", label: "그룹" },
+              { key: "size", label: "인원수", align: "right" },
+              { key: "satisfaction", label: "평균 만족도", align: "right" },
+              { key: "corner", label: "주 이용 코너" },
+              { key: "menus", label: "대표 메뉴" },
+            ]}
+            rows={clusters.map((c) => ({
+              label: c.label,
+              size: c.size,
+              satisfaction: c.avg_satisfaction?.toFixed(2) ?? "-",
+              corner: c.dominant_corner ?? "-",
+              menus: c.top_menus.join(", ") || "-",
+            }))}
+            rowKey={(r) => r.label as string}
+          />
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function TasteProfileSection() {
+  const [employeeId, setEmployeeId] = useState("");
+  const [searched, setSearched] = useState<string | null>(null);
+  const profile = useQuery({
+    queryKey: ["taste-profile", searched],
+    queryFn: () => api.userTasteProfile(searched as string),
+    enabled: !!searched,
+    retry: false,
+  });
+
+  return (
+    <Card title="사용자 입맛 분석 — 사번별 취향 벡터">
+      <div className="mb-4 flex gap-2">
+        <input
+          className="w-48 rounded-md border px-3 py-2 text-[13px]"
+          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+          placeholder="사번 (예: E12345)"
+          value={employeeId}
+          onChange={(e) => setEmployeeId(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && setSearched(employeeId)}
+        />
+        <Button onClick={() => setSearched(employeeId)}>조회</Button>
+      </div>
+      {profile.isLoading && <LoadingState />}
+      {profile.isError && <ErrorState error={profile.error} />}
+      {profile.data && (
+        <div>
+          <p className="mb-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            표본 {profile.data.sample_size}건 기반 취향 벡터 (메뉴 food_vector와 동일 차원)
+            {profile.data.cluster_label && (
+              <>
+                {" "}
+                ·{" "}
+                <span className="rounded px-1.5 py-0.5" style={{ background: "var(--surface-2)" }}>
+                  {profile.data.cluster_label}
+                </span>
+              </>
+            )}
+          </p>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            {profile.data.dimensions.map((dim, i) => (
+              <div key={dim} className="rounded-md border p-2 text-center" style={{ borderColor: "var(--border)" }}>
+                <div className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                  {dim}
+                </div>
+                <div className="text-[13px] font-medium">{profile.data!.profile_vector[i]?.toFixed(2)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function UserAnalysisTab() {
+  return (
+    <div className="space-y-4">
+      <DivisionAnalysisSection />
+      <TasteClusterSection />
+      <TasteProfileSection />
+    </div>
+  );
+}
+
+function CornerAnalysisTab() {
+  const [classification, setClassification] = useState<Classification | "전체">("전체");
+  const chartTheme = useChartTheme();
+  const query = useQuery({
+    queryKey: ["corner-analysis", classification],
+    queryFn: () =>
+      api.cornerAnalysis({
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+        classification: classification === "전체" ? undefined : classification,
+      }),
+  });
+
+  const axisStyle = {
+    axisLine: { lineStyle: { color: chartTheme.axis } },
+    axisLabel: { color: chartTheme.text },
+    axisTick: { show: false },
+  };
+
+  const headcountOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 16, top: 16, bottom: 28 },
+    tooltip: { trigger: "axis" },
+    xAxis: { type: "category", data: query.data?.map((c) => c.corner_name) ?? [], ...axisStyle },
+    yAxis: {
+      type: "value",
+      name: "식수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: [
+      {
+        type: "bar",
+        barMaxWidth: 32,
+        itemStyle: { borderRadius: [4, 4, 0, 0], color: resolveColor("var(--series-1)") },
+        data: query.data?.map((c) => c.headcount_total) ?? [],
+      },
+    ],
+  };
+
+  const satisfactionOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 40, right: 16, top: 16, bottom: 28 },
+    tooltip: { trigger: "axis" },
+    xAxis: { type: "category", data: query.data?.map((c) => c.corner_name) ?? [], ...axisStyle },
+    yAxis: {
+      type: "value",
+      name: "만족도",
+      min: 0,
+      max: 5,
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: [
+      {
+        type: "bar",
+        barMaxWidth: 32,
+        itemStyle: { borderRadius: [4, 4, 0, 0], color: resolveColor("var(--series-3)") },
+        data: query.data?.map((c) => c.avg_taste_score) ?? [],
+      },
+    ],
+  };
+
+  return (
+    <div className="space-y-4">
+      <Card title="코너별 분석 — 이용자 수 / 만족도 / 피크타임 서브속도">
+        <div className="mb-4">
+          <SegmentedControl
+            value={classification}
+            options={[
+              { label: "전체", value: "전체" },
+              { label: "평일", value: "평일" },
+              { label: "주말+공휴일", value: "주말+공휴일" },
+            ]}
+            onChange={setClassification}
+          />
+        </div>
+        {query.isLoading && <LoadingState />}
+        {query.isError && <ErrorState error={query.error} />}
+        {query.data && query.data.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다.
+          </p>
+        )}
+        {query.data && query.data.length > 0 && (
+          <>
+            {/* 식수(건수)와 만족도(0~5점)는 단위가 달라 하나의 차트에 두 축으로 겹쳐 그리지 않고
+                별도 차트 두 개로 분리한다 — 이중축 차트는 임의의 상관관계를 만들어 보여준다. */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  누적 식수
+                </p>
+                <ReactECharts option={headcountOption} style={{ height: 240 }} />
+              </div>
+              <div>
+                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  평균 만족도 (5점 만점)
+                </p>
+                <ReactECharts option={satisfactionOption} style={{ height: 240 }} />
+              </div>
+            </div>
+            <div className="mt-4">
+              <Table
+                columns={[
+                  { key: "corner", label: "코너" },
+                  { key: "diet", label: "그린미트" },
+                  { key: "headcount", label: "누적 식수", align: "right" },
+                  { key: "score", label: "평균 만족도", align: "right" },
+                  { key: "throughput", label: "피크타임 분당 서브", align: "right" },
+                ]}
+                rows={query.data.map((c) => ({
+                  corner: c.corner_name,
+                  diet: c.is_diet_corner ? "예" : "-",
+                  headcount: c.headcount_total.toLocaleString(),
+                  score: c.avg_taste_score?.toFixed(2) ?? "-",
+                  throughput: c.avg_peak_throughput_per_min?.toFixed(1) ?? "-",
+                }))}
+                rowKey={(r) => r.corner as string}
+              />
+            </div>
+          </>
+        )}
+      </Card>
+      <CornerCoreLayerSection corners={query.data ?? []} />
+    </div>
+  );
+}
+
+function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; corner_name: string }[] }) {
+  const [cornerId, setCornerId] = useState<number | null>(null);
+  const [minVisitCount, setMinVisitCount] = useState(3);
+  const [minShare, setMinShare] = useState(30);
+
+  const effectiveCornerId = cornerId ?? corners[0]?.corner_id ?? null;
+
+  const query = useQuery({
+    queryKey: ["corner-core-layer-menu-pairs", effectiveCornerId, minVisitCount, minShare],
+    queryFn: () =>
+      api.cornerCoreLayerMenuPairs(effectiveCornerId as number, {
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+        min_visit_count: minVisitCount,
+        min_share: minShare / 100,
+      }),
+    enabled: effectiveCornerId != null,
+  });
+
+  const pairColumns = [
+    { key: "pair", label: "메뉴 쌍" },
+    { key: "co_count", label: "동반 인원", align: "right" as const },
+    { key: "lift", label: "연관도(lift, 그룹 내부 기준)", align: "right" as const },
+  ];
+  const pairRows = (rows: MenuPairRow[]) =>
+    rows.map((r) => ({ pair: `${r.menu_a} + ${r.menu_b}`, co_count: r.co_count, lift: r.lift.toFixed(2) }));
+
+  if (corners.length === 0) return null;
+
+  return (
+    <Card title="코너 코어층 × 메뉴 동반 선택 쌍 비교">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+        선택한 코너를 반복적으로 이용하는 "코어층"과 나머지 인원이 가장 흔하게 함께 고르는 메뉴 쌍을
+        나란히 비교합니다. lift는 각 그룹 내부 기준이라 두 그룹 간 직접 비교는 동반 인원 수로 합니다.
+      </p>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <SegmentedControl
+          value={String(effectiveCornerId)}
+          options={corners.map((c) => ({ label: c.corner_name, value: String(c.corner_id) }))}
+          onChange={(v) => setCornerId(Number(v))}
+        />
+        <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+          최소 방문횟수
+          <input
+            type="number"
+            min={1}
+            className="w-14 rounded-md border px-2 py-1 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={minVisitCount}
+            onChange={(e) => setMinVisitCount(Number(e.target.value))}
+          />
+        </label>
+        <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+          최소 비중(%)
+          <input
+            type="number"
+            min={0}
+            max={100}
+            className="w-14 rounded-md border px-2 py-1 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={minShare}
+            onChange={(e) => setMinShare(Number(e.target.value))}
+          />
+        </label>
+      </div>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {query.data && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              코어층 ({query.data.core_layer.employee_count}명)
+            </p>
+            {query.data.core_layer.top_pairs.length === 0 ? (
+              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                표본 부족
+              </p>
+            ) : (
+              <Table
+                columns={pairColumns}
+                rows={pairRows(query.data.core_layer.top_pairs)}
+                rowKey={(r) => r.pair as string}
+              />
+            )}
+          </div>
+          <div>
+            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              나머지 ({query.data.non_core.employee_count}명)
+            </p>
+            {query.data.non_core.top_pairs.length === 0 ? (
+              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                표본 부족
+              </p>
+            ) : (
+              <Table
+                columns={pairColumns}
+                rows={pairRows(query.data.non_core.top_pairs)}
+                rowKey={(r) => r.pair as string}
+              />
+            )}
+          </div>
+        </div>
       )}
     </Card>
   );
 }
 
 function MenuQuadrantTab() {
+  const chartTheme = useChartTheme();
   const query = useQuery({
     queryKey: ["menu-performance", PERIOD_START, PERIOD_END],
     queryFn: () => api.menuPerformance({ period_start: PERIOD_START, period_end: PERIOD_END }),
@@ -152,24 +562,40 @@ function MenuQuadrantTab() {
   const scatterData = rows.map((r) => ({
     name: r.menu_name,
     value: [r.total_headcount / Math.max(r.appearance_count, 1), r.adjusted_score ?? 0],
-    itemStyle: { color: quadrantColor(r.quadrant) },
+    itemStyle: { color: resolveColor(quadrantColor(r.quadrant)) },
   }));
 
   const option = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 24, top: 16, bottom: 40 },
     tooltip: {
       formatter: (p: { data: { name: string; value: number[] } }) =>
         `${p.data.name}<br/>1회 제공당 식수: ${p.data.value[0].toFixed(1)}<br/>만족도: ${p.data.value[1].toFixed(2)}`,
     },
-    xAxis: { type: "value", name: "수요 (1회 제공당 평균 식수)" },
-    yAxis: { type: "value", name: "만족도(표본보정, 5점)", min: 0, max: 5 },
+    xAxis: {
+      type: "value",
+      name: "수요 (1회 제공당 평균 식수)",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    yAxis: {
+      type: "value",
+      name: "만족도(표본보정, 5점)",
+      min: 0,
+      max: 5,
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
     series: [
       {
         type: "scatter",
-        symbolSize: 14,
+        symbolSize: 12,
         data: scatterData,
         markLine: {
           silent: true,
-          lineStyle: { type: "dashed", color: "#94a3b8" },
+          symbol: "none",
+          lineStyle: { type: "dashed", color: chartTheme.axis, width: 1 },
+          label: { show: false },
           data: [{ xAxis: demandThreshold }, { yAxis: scoreThreshold }],
         },
       },
@@ -177,15 +603,17 @@ function MenuQuadrantTab() {
   };
 
   return (
-    <Card title="메뉴 4분면 — 인기메뉴 / 숨은강자 / 개선시급 / 퇴출후보 (PRD 6.3.4)">
+    <Card title="메뉴 4분면 — 인기메뉴 / 숨은강자 / 개선시급 / 퇴출후보">
       <div className="mb-3 flex items-center justify-between">
-        <div className="flex gap-3 text-xs text-slate-400">
-          <span>🟢 인기메뉴</span>
-          <span>🔵 숨은강자</span>
-          <span>🟠 개선시급</span>
-          <span>🔴 퇴출후보</span>
-          <span>⚪ 표본부족</span>
-        </div>
+        <Legend
+          items={[
+            { label: "인기메뉴", color: "var(--good)" },
+            { label: "숨은강자", color: "var(--series-1)" },
+            { label: "개선시급", color: "var(--warning)" },
+            { label: "퇴출후보", color: "var(--critical)" },
+            { label: "표본부족", color: "var(--ink-muted)" },
+          ]}
+        />
         <Button
           variant="secondary"
           onClick={async () => {
@@ -199,37 +627,201 @@ function MenuQuadrantTab() {
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
       {rows.length === 0 && !query.isLoading && (
-        <p className="text-sm text-slate-400">
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
           데이터가 없습니다. 먼저 "재계산" 버튼으로 menu_performance_stats를 생성하세요.
         </p>
       )}
-      {rows.length > 0 && <ReactECharts option={option} style={{ height: 380 }} />}
+      {rows.length > 0 && <ReactECharts option={option} style={{ height: 340 }} />}
       {rows.length > 0 && (
-        <table className="mt-4 w-full text-left text-sm">
-          <thead className="text-slate-400">
-            <tr>
-              <th className="py-1 pr-4">메뉴</th>
-              <th className="py-1 pr-4">등장횟수</th>
-              <th className="py-1 pr-4">평가건수</th>
-              <th className="py-1 pr-4">만족도</th>
-              <th className="py-1 pr-4">4분면</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r: MenuPerformanceRow) => (
-              <tr key={r.menu_id} className="border-t border-slate-100 dark:border-slate-800">
-                <td className="py-1.5 pr-4">{r.menu_name}</td>
-                <td className="py-1.5 pr-4">{r.appearance_count}</td>
-                <td className="py-1.5 pr-4">{r.evaluation_count}</td>
-                <td className="py-1.5 pr-4">{r.adjusted_score?.toFixed(2) ?? "-"}</td>
-                <td className="py-1.5 pr-4">
-                  <QuadrantBadge label={r.quadrant} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="mt-4">
+          <Table
+            columns={[
+              { key: "menu", label: "메뉴" },
+              { key: "appearance", label: "등장횟수", align: "right" },
+              { key: "count", label: "평가건수", align: "right" },
+              { key: "score", label: "만족도", align: "right" },
+              { key: "quadrant", label: "4분면" },
+            ]}
+            rows={rows.map((r: MenuPerformanceRow) => ({
+              menu: r.menu_name,
+              appearance: r.appearance_count,
+              count: r.evaluation_count,
+              score: r.adjusted_score?.toFixed(2) ?? "-",
+              quadrant: <QuadrantBadge label={r.quadrant} />,
+            }))}
+            rowKey={(r) => r.menu as string}
+          />
+        </div>
       )}
+    </Card>
+  );
+}
+
+function MenuAffinitySection() {
+  const [menuName, setMenuName] = useState("");
+  const [searched, setSearched] = useState<string | null>(null);
+  const query = useQuery({
+    queryKey: ["menu-affinity", searched],
+    queryFn: () =>
+      api.menuAffinity(searched as string, { period_start: PERIOD_START, period_end: PERIOD_END }),
+    enabled: !!searched,
+    retry: false,
+  });
+
+  return (
+    <Card title="메뉴 동반 선택 경향성 — 같이/대신 자주 고르는 메뉴">
+      <div className="mb-3 flex gap-2">
+        <input
+          className="w-48 rounded-md border px-3 py-2 text-[13px]"
+          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+          placeholder="메뉴명 (예: 떡볶이)"
+          value={menuName}
+          onChange={(e) => setMenuName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && setSearched(menuName)}
+        />
+        <Button onClick={() => setSearched(menuName)}>조회</Button>
+      </div>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {query.data && query.data.length === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          유의미한 동반 선택 메뉴가 없습니다 (표본이 너무 적거나 연관성이 낮음).
+        </p>
+      )}
+      {query.data && query.data.length > 0 && (
+        <Table
+          columns={[
+            { key: "menu", label: "메뉴" },
+            { key: "co_count", label: "동반 인원", align: "right" },
+            { key: "lift", label: "연관도(lift)", align: "right" },
+          ]}
+          rows={query.data.map((r) => ({
+            menu: r.menu_name,
+            co_count: r.co_count,
+            lift: r.lift.toFixed(2),
+          }))}
+          rowKey={(r) => r.menu as string}
+        />
+      )}
+      <p className="mt-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+        lift가 1보다 크면 우연히 같이 나오는 것보다 더 자주 동반 선택된다는 뜻입니다.
+      </p>
+    </Card>
+  );
+}
+
+function MenuFoodVectorEditor({ row, onSaved }: { row: MenuFoodVectorRow; onSaved: () => void }) {
+  const dims = row.dimensions;
+  const [expanded, setExpanded] = useState(false);
+  const [values, setValues] = useState<number[]>(row.food_vector ?? dims.map(() => 0.2));
+  const save = useMutation({
+    mutationFn: () => api.updateMenuFoodVector(row.menu_id, values),
+    onSuccess: () => {
+      onSaved();
+      setExpanded(false);
+    },
+  });
+
+  return (
+    <div className="rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
+      <div className="flex items-center justify-between">
+        <div>
+          <span className="text-[13px] font-medium">{row.menu_name}</span>
+          <span className="ml-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+            {row.source ?? "미태깅"}
+          </span>
+        </div>
+        <Button variant="secondary" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? "닫기" : "조정"}
+        </Button>
+      </div>
+      {expanded && (
+        <div className="mt-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            {dims.map((dim, i) => (
+              <label
+                key={dim}
+                className="flex flex-col gap-1 text-center text-xs"
+                style={{ color: "var(--ink-muted)" }}
+              >
+                {dim}
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  className="rounded-md border px-2 py-1 text-center text-[13px]"
+                  style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                  value={values[i]}
+                  onChange={(e) =>
+                    setValues((v) => v.map((x, j) => (j === i ? Number(e.target.value) : x)))
+                  }
+                />
+              </label>
+            ))}
+          </div>
+          {save.isError && <ErrorState error={save.error} />}
+          <div className="mt-3 flex justify-end">
+            <Button onClick={() => save.mutate()} disabled={save.isPending}>
+              저장 (관리자수동으로 잠김)
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuFoodVectorAdminSection() {
+  const [untaggedOnly, setUntaggedOnly] = useState(false);
+  const query = useQuery({
+    queryKey: ["menu-food-vectors", untaggedOnly],
+    queryFn: () => api.menuFoodVectors({ untagged_only: untaggedOnly }),
+  });
+  const tagWithLlm = useMutation({
+    mutationFn: () => api.tagMenusWithLlm(),
+    onSuccess: () => query.refetch(),
+  });
+
+  const rows = query.data ?? [];
+
+  return (
+    <Card title="메뉴 음식벡터 관리 (개인 취향 벡터 계산의 기초 데이터)">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+        신메뉴는 이름 키워드 규칙으로 1차 자동 태깅되고, 규칙이 못 잡은 메뉴는 아래 버튼으로 사내 LLM에 보강
+        요청할 수 있습니다. 값을 직접 조정하면 "관리자수동"으로 표시되어 이후 자동 재태깅 대상에서 제외됩니다.
+      </p>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          <input
+            type="checkbox"
+            checked={untaggedOnly}
+            onChange={(e) => setUntaggedOnly(e.target.checked)}
+          />
+          미태깅 메뉴만 보기
+        </label>
+        <Button variant="secondary" onClick={() => tagWithLlm.mutate()} disabled={tagWithLlm.isPending}>
+          LLM으로 미태깅 메뉴 보강
+        </Button>
+      </div>
+      {tagWithLlm.data && (
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          {tagWithLlm.data.tagged_menus}건 태깅됨
+        </p>
+      )}
+      {tagWithLlm.isError && <ErrorState error={tagWithLlm.error} />}
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {rows.length === 0 && !query.isLoading && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          {untaggedOnly ? "미태깅 메뉴가 없습니다." : "메뉴 데이터가 없습니다."}
+        </p>
+      )}
+      <div className="space-y-2">
+        {rows.map((row) => (
+          <MenuFoodVectorEditor key={row.menu_id} row={row} onSaved={() => query.refetch()} />
+        ))}
+      </div>
     </Card>
   );
 }
@@ -241,48 +833,37 @@ function median(values: number[]): number {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-function quadrantColor(label: string | null): string {
-  switch (label) {
-    case "인기메뉴":
-      return "#10b981";
-    case "숨은강자":
-      return "#0ea5e9";
-    case "개선시급":
-      return "#f59e0b";
-    case "퇴출후보":
-      return "#f43f5e";
-    default:
-      return "#94a3b8";
-  }
-}
-
 export function AnalysisPage() {
   const [tab, setTab] = useState<SubTab>("menus");
+  const tabs: { value: SubTab; label: string }[] = [
+    { value: "menus", label: "메뉴 4분면" },
+    { value: "corners", label: "코너별 분석" },
+    { value: "users", label: "사용자 분석" },
+  ];
   return (
     <div className="space-y-4">
-      <div className="flex gap-2">
-        {(
-          [
-            ["menus", "메뉴 4분면"],
-            ["corners", "코너별 분석"],
-            ["users", "사용자 분석"],
-          ] as [SubTab, string][]
-        ).map(([value, label]) => (
+      <div className="flex gap-5 border-b" style={{ borderColor: "var(--border)" }}>
+        {tabs.map((t) => (
           <button
-            key={value}
-            onClick={() => setTab(value)}
-            className={
-              "rounded-lg px-3 py-1.5 text-sm font-medium " +
-              (tab === value
-                ? "bg-indigo-600 text-white"
-                : "border border-slate-200 text-slate-500 dark:border-slate-700")
-            }
+            key={t.value}
+            onClick={() => setTab(t.value)}
+            className="border-b-2 py-2 text-[13px] font-medium"
+            style={{
+              borderColor: tab === t.value ? "var(--accent)" : "transparent",
+              color: tab === t.value ? "var(--ink)" : "var(--ink-secondary)",
+            }}
           >
-            {label}
+            {t.label}
           </button>
         ))}
       </div>
-      {tab === "menus" && <MenuQuadrantTab />}
+      {tab === "menus" && (
+        <div className="space-y-4">
+          <MenuQuadrantTab />
+          <MenuAffinitySection />
+          <MenuFoodVectorAdminSection />
+        </div>
+      )}
       {tab === "corners" && <CornerAnalysisTab />}
       {tab === "users" && <UserAnalysisTab />}
     </div>

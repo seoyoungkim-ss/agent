@@ -23,6 +23,13 @@ class MealLogRowIn(BaseModel):
     employee_id: str
     meal_type: MealType
     corner_name: str
+    # ingestion-tool이 식당취식정보의 "화면표시명(한글)"을 넣어준다. 있으면 이 값으로
+    # 직접 메뉴를 연결하고(신뢰도 높음), 없으면 기존 weekly_menu_plan MAIN 매칭으로
+    # 폴백한다 (app/api/ingest.py 참고).
+    menu_name: str | None = None
+    # 식당취식정보의 "회사" 원문 (예: 삼성전자/삼성SDI/지리산). 본사/계열사/기타
+    # 분류에 쓰인다 (app/services/company_classification.py).
+    company_name: str | None = None
     taste_score: TasteScore | None = None
     comment: str | None = None
 
