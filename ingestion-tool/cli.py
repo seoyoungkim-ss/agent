@@ -30,6 +30,11 @@ def _confirm(prompt: str) -> bool:
     return answer == "y"
 
 
+def _warn_if_ssl_disabled(verify_ssl: bool) -> None:
+    if not verify_ssl:
+        print("⚠️ SSL 인증서 검증이 비활성화된 상태로 전송합니다 (config.json의 verify_ssl=false).")
+
+
 def _cmd_weekly_menu(args: argparse.Namespace) -> int:
     grid = read_used_range(args.path, sheet_name=args.sheet)
     week_start = dt.date.fromisoformat(args.week_start)
@@ -53,7 +58,13 @@ def _cmd_weekly_menu(args: argparse.Namespace) -> int:
         return 0
 
     config = load_config()
-    sent = upload_weekly_menu(rows, backend_base_url=config.backend_base_url, api_token=config.api_token)
+    _warn_if_ssl_disabled(config.verify_ssl)
+    sent = upload_weekly_menu(
+        rows,
+        backend_base_url=config.backend_base_url,
+        api_token=config.api_token,
+        verify_ssl=config.verify_ssl,
+    )
     print(f"✅ {sent}행 전송 완료")
     return 0
 
@@ -86,7 +97,13 @@ def _cmd_meal_log(args: argparse.Namespace) -> int:
         print("전송을 취소했습니다.")
         return 0
 
-    sent = upload_meal_log(rows, backend_base_url=config.backend_base_url, api_token=config.api_token)
+    _warn_if_ssl_disabled(config.verify_ssl)
+    sent = upload_meal_log(
+        rows,
+        backend_base_url=config.backend_base_url,
+        api_token=config.api_token,
+        verify_ssl=config.verify_ssl,
+    )
     print(f"✅ {sent}행 전송 완료")
     return 0
 

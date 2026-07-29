@@ -112,6 +112,27 @@ A사가 아닌 회사(계열사/기타)는 취식기록의 사번과 맛평가�
 동작한다(A사만 다루는 환경이면 필요 없음). 매핑 로직은 `parsing/
 employee_mapping.py`(로드), `parsing/merge.py`의 `employee_key()`(적용) 참고.
 
+## 사내 SSL 검사로 업로드가 막힐 때 (SSL certificate verify 에러)
+
+사내망이 프록시/보안 소프트웨어로 트래픽을 가로채면서 자체 인증서를 쓰는 경우,
+백엔드 전송 시 `SSL certificate verify` 계열 에러가 날 수 있다. **가장 안전한
+해결책은 그 사내 루트 인증서를 Windows/Python 신뢰 저장소에 설치하는 것**이다 —
+IT팀에 인증서 파일(.crt/.pem)을 요청하면 된다.
+
+그게 당장 어렵고 IT팀이 검증 비활성화를 승인한 경우에만, `config.json`에
+`"verify_ssl": false`를 추가하면 된다:
+```json
+{
+  "backend_base_url": "...",
+  "api_token": "...",
+  "verify_ssl": false
+}
+```
+(또는 환경변수 `INGEST_VERIFY_SSL=false`) 이 값이 꺼져 있으면 실행할 때마다
+"SSL 인증서 검증이 비활성화된 상태" 경고가 출력된다. **사내망 안에서만 통신하는
+`backend_base_url`에 한해서만** 이렇게 쓰는 걸 전제로 한다 — 외부 인터넷 주소에는
+이 설정을 켜둔 채로 쓰지 않는다.
+
 ## 합성 테스트 파일로 파이프라인 미리 확인하기
 
 `sample_data/`에 실제 파일과 같은 구조의(DRM 없는) 합성 xlsx 샘플과, 그걸

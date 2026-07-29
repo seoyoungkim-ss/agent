@@ -20,6 +20,19 @@ class ToolConfig:
     # 사번↔Knox ID 매핑 CSV 경로 (parsing/employee_mapping.py). 선택 항목 — 없으면
     # A사(사번==Knox ID) 외 인원은 맛평가 매칭이 안 되고 "미평가"로 남는다.
     employee_mapping_path: str | None = None
+    # 기본 True(항상 검증). 사내 SSL 검사(프록시가 자체 인증서로 가로채는 경우 등)
+    # 때문에 검증이 막힐 때만 False로 — 그 경우에도 사내망 안에서만 통신하는
+    # backend_base_url(사내 서버)에 한해 쓰는 걸 전제로 한다. 가능하면 이 값을 끄는
+    # 대신 사내 루트 인증서를 OS/Python 신뢰 저장소에 설치하는 게 더 안전하다.
+    verify_ssl: bool = True
+
+
+def _parse_bool(value: str | bool | None, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return value.strip().lower() not in ("false", "0", "no")
 
 
 def load_config() -> ToolConfig:
@@ -32,6 +45,10 @@ def load_config() -> ToolConfig:
     employee_mapping_path = os.environ.get("INGEST_EMPLOYEE_MAPPING_PATH") or file_values.get(
         "employee_mapping_path"
     )
+    verify_ssl = _parse_bool(
+        os.environ.get("INGEST_VERIFY_SSL") if "INGEST_VERIFY_SSL" in os.environ else file_values.get("verify_ssl"),
+        default=True,
+    )
 
     if not backend_base_url or not api_token:
         raise RuntimeError(
@@ -43,4 +60,5 @@ def load_config() -> ToolConfig:
         backend_base_url=backend_base_url.rstrip("/"),
         api_token=api_token,
         employee_mapping_path=employee_mapping_path,
+        verify_ssl=verify_ssl,
     )
