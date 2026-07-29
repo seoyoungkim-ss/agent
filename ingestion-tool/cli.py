@@ -19,7 +19,7 @@ from config import load_config
 from io_excel import read_used_range
 from parsing.employee_mapping import load_employee_mapping
 from parsing.meal_transaction_parser import parse_meal_transaction_grid
-from parsing.merge import merge_transactions_with_taste
+from parsing.merge import _eval_key, employee_key, merge_transactions_with_taste
 from parsing.taste_eval_parser import parse_taste_eval_grid
 from parsing.weekly_menu_parser import parse_weekly_menu_grid
 from upload import upload_meal_log, upload_weekly_menu
@@ -33,6 +33,26 @@ def _confirm(prompt: str) -> bool:
 def _warn_if_ssl_disabled(verify_ssl: bool) -> None:
     if not verify_ssl:
         print("⚠️ SSL 인증서 검증이 비활성화된 상태로 전송합니다 (config.json의 verify_ssl=false).")
+
+
+def _print_debug_sample(transactions, evaluations, employee_mapping, n: int) -> None:
+    """맛평가 매칭이 왜 안 되는지 원인을 못 찾을 때 쓰는 진단 출력.
+
+    repr()로 출력해서 공백/타입 차이처럼 육안으로 "같아 보이는데" 실제로는 다른
+    값을 그대로 드러낸다(예: "12345678" vs "12345678.0", 트레일링 공백 등).
+    """
+    print(f"\n--- 디버그: 취식기록 조인 키 샘플 (최대 {n}건) ---")
+    for tx in transactions[:n]:
+        key = _eval_key(
+            employee_key(tx.employee_id, employee_mapping), tx.eaten_at.date(), tx.meal_type, tx.menu_display_name
+        )
+        print(f"  {key!r}")
+
+    print(f"\n--- 디버그: 맛평가 조인 키 샘플 (최대 {n}건) ---")
+    for ev in evaluations[:n]:
+        key = _eval_key(ev.knox_id, ev.eaten_date, ev.meal_type, ev.menu_name)
+        print(f"  {key!r}")
+    print()
 
 
 def _cmd_weekly_menu(args: argparse.Namespace) -> int:
@@ -93,6 +113,9 @@ def _cmd_meal_log(args: argparse.Namespace) -> int:
     for row in rows[:5]:
         print(f"  {row}")
 
+    if args.debug_sample:
+        _print_debug_sample(transactions, evaluations, employee_mapping, args.debug_sample)
+
     if not args.yes and not _confirm("백엔드로 전송할까요?"):
         print("전송을 취소했습니다.")
         return 0
@@ -125,6 +148,15 @@ def main(argv: list[str] | None = None) -> int:
     p_log.add_argument("--transaction-sheet", default=None, help="취식정보 시트 이름 (생략 시 첫 시트)")
     p_log.add_argument("--taste-sheet", default=None, help="맛평가 시트 이름 (생략 시 첫 시트)")
     p_log.add_argument("--yes", action="store_true", help="미리보기 확인 없이 바로 전송")
+    p_log.add_argument(
+        "--debug-sample",
+        type=int,
+        nargs="?",
+        const=5,
+        default=0,
+        metavar="N",
+        help="매칭이 잘 안 될 때 진단용 — 조인 키(사번/Knox ID, 날짜, 식사구분, 메뉴명) 샘플 N건을 그대로 출력 (기본 5)",
+    )
     p_log.set_defaults(func=_cmd_meal_log)
 
     args = parser.parse_args(argv)
