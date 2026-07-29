@@ -1335,3 +1335,29 @@ def _corner_id_by_menu_from_meal_log(
 **⚠️ 새 플레이스홀더 메뉴명이 또 발견되면**: 이제 `master_data.py`의
 `PLACEHOLDER_MENU_NAMES` 집합 한 곳만 추가하면 4분면 + 메뉴 동반 선택 쌍
 전부에 자동 반영된다(예전처럼 여러 파일을 따로 고칠 필요 없음).
+
+---
+
+## 34. 사내 LLM 연동 — 프록시 우회 + 모델명 기본값 (2026-07)
+
+29절에서 스트리밍/인증 문제를 고쳤는데도 실사용 중 "network error"가 계속
+남아있었다. 원인은 서버 환경에 pip 설치용 `HTTP_PROXY`/`HTTPS_PROXY`가
+걸려 있었던 것 — `httpx.AsyncClient`는 기본(`trust_env=True`)으로 이
+환경변수를 읽어 **모든** 요청을 그 프록시로 보내는데, 이 프록시는 인터넷행
+트래픽용이라 인트라넷 전용인 사내 LLM 게이트웨이는 거치지 못해 연결이
+실패한다.
+
+**수정**: `backend/app/services/llm_client.py`의 `chat_stream()`/`embed()`
+두 곳 모두 `httpx.AsyncClient(timeout=60.0, trust_env=False)`로 바꿔 프록시
+환경변수를 무시하고 직접 접속하게 했다. (참고: 프론트엔드↔백엔드 사이의
+`localhost` 호출이 같은 프록시를 타서 생기는 문제는 코드가 아니라 서버
+환경변수 `NO_PROXY=localhost,127.0.0.1` 추가로 해결하는 별개 사안 —
+`docs/DEPLOYMENT.md` 3절에 기록.)
+
+**모델명 기본값**: `app/config.py`의 `internal_llm_chat_model` 기본값을
+`"internal-chat"`(플레이스홀더)에서 실사용 확인된 `"thinkingcap"`으로
+바꿨다. `.env`에 `INTERNAL_LLM_CHAT_MODEL`을 안 넣어도 이 기본값이 쓰인다.
+
+**테스트**: `test_llm_client.py`에 `test_chat_stream_bypasses_proxy_env_vars`,
+`test_embed_bypasses_proxy_env_vars` 추가 — 패치된 `AsyncClient` 생성자에
+전달된 kwargs를 캡처해 `trust_env=False`가 실제로 넘어가는지 확인.

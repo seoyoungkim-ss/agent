@@ -109,7 +109,17 @@ INTERNAL_LLM_API_KEY=
 EOF
 ```
 - `INGEST_API_TOKEN`: ingestion-tool(운영자 PC)이 API 호출 시 쓰는 토큰. 예: `openssl rand -hex 24`로 생성.
-- `INTERNAL_LLM_BASE_URL` / `INTERNAL_LLM_API_KEY`: 사내 LLM 연동 정보. 비워두면 Agent 채팅/월간 VOE 클러스터링이 모의(mock) 응답으로 동작한다.
+- `INTERNAL_LLM_BASE_URL` / `INTERNAL_LLM_API_KEY`: 사내 LLM 연동 정보. 비워두면 Agent 채팅/월간 VOE 클러스터링이 모의(mock) 응답으로 동작한다. 인증이 필요 없는 게이트웨이면 `INTERNAL_LLM_API_KEY`는 비워둬도 된다(base_url만 있으면 연동된 것으로 간주).
+- `INTERNAL_LLM_CHAT_MODEL`: 기본값 `thinkingcap`(2026-07 실사용 확인된 사내 게이트웨이 모델명). 다른 값이면 `.env`에 재정의.
+
+**⚠️ 사내망 pip 프록시(`HTTP_PROXY`/`HTTPS_PROXY`)를 쓰는 서버 주의**: 이
+환경변수가 셸에 걸려있으면 백엔드가 사내 LLM 게이트웨이 호출도 그 프록시로
+보내려다 실패한다(인터넷행 프록시라 인트라넷 전용 게이트웨이는 못 거침) —
+`app/services/llm_client.py`가 LLM 호출에는 `httpx.AsyncClient(trust_env=False)`로
+이 환경변수를 무시하도록 이미 고쳐뒀으니 **코드 수정은 필요 없다.** 다만
+프론트엔드↔백엔드 사이의 `localhost` 호출까지 이 프록시를 타서 흰 화면/연결
+실패가 나는 경우가 있었다 — 그건 `NO_PROXY=localhost,127.0.0.1`을 서버
+환경변수로 추가해서 해결한다(백엔드 재시작 필요).
 
 DB 스키마 적용 + 휴일 마스터 데이터 시딩:
 ```bash

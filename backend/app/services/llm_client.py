@@ -8,6 +8,14 @@
 `yield`**한다(엔드포인트가 설정되지 않은 경우의 모의 응답과 같은 방식).
 엔드포인트가 설정되지 않은 경우(로컬 개발/데모)에는 명확히 표시된 모의(mock)
 응답으로 대체한다.
+
+**프록시 우회(2026-07 실사용 확인)**: 사내망에는 pip 설치 등을 위해
+`HTTP_PROXY`/`HTTPS_PROXY` 환경변수가 걸려있는 경우가 있는데, httpx는 기본
+(`trust_env=True`)으로 이 환경변수를 그대로 읽어 **모든** 요청을 그 프록시로
+보낸다 — 인터넷행 트래픽용 프록시라 인트라넷 전용인 사내 LLM 게이트웨이는
+거치지 못해 연결이 실패한다(스트리밍/인증 문제를 다 고쳐도 남아있던 "network
+error"의 원인). 아래 두 호출 모두 `trust_env=False`로 이 환경변수를 무시하고
+직접 접속한다.
 """
 
 from collections.abc import AsyncIterator
@@ -44,7 +52,7 @@ class InternalLLMClient:
             "model": self._settings.internal_llm_chat_model,
             "messages": messages,
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
             resp = await client.post(url, headers=headers, json=body)
             resp.raise_for_status()
             data = resp.json()
@@ -64,7 +72,7 @@ class InternalLLMClient:
         url = f"{self._settings.internal_llm_base_url.rstrip('/')}/embeddings"
         headers = self._auth_headers()
         body = {"model": self._settings.internal_llm_embedding_model, "input": texts}
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
             resp = await client.post(url, headers=headers, json=body)
             resp.raise_for_status()
             data = resp.json()

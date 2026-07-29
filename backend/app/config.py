@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # PRD 8: 사내 LLM API 연동 정보. 실제 값은 사내 배포 시 .env로만 주입한다.
     internal_llm_base_url: str = ""
     internal_llm_api_key: str = ""
-    internal_llm_chat_model: str = "internal-chat"
+    internal_llm_chat_model: str = "thinkingcap"
     internal_llm_embedding_model: str = "internal-embedding"
 
     # PRD 6.3.1: 표본 수 보정(베이지안 축소)에 쓰는 신뢰 기준 평가건수 m

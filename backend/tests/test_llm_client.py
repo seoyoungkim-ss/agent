@@ -11,8 +11,10 @@ from app.services.llm_client import InternalLLMClient
 _RealAsyncClient = httpx.AsyncClient
 
 
-def _patch_async_client(monkeypatch, handler) -> None:
+def _patch_async_client(monkeypatch, handler, captured_kwargs: dict | None = None) -> None:
     def fake_async_client(*args, **kwargs):
+        if captured_kwargs is not None:
+            captured_kwargs.update(kwargs)
         kwargs.pop("timeout", None)
         return _RealAsyncClient(transport=httpx.MockTransport(handler), **kwargs)
 
@@ -96,3 +98,41 @@ async def test_chat_complete_joins_words_from_non_streaming_response(monkeypatch
 
     result = await client.chat_complete([{"role": "user", "content": "질문"}])
     assert result.strip() == "결과 문장"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_bypasses_proxy_env_vars(monkeypatch):
+    """사내망 pip 프록시(HTTP_PROXY/HTTPS_PROXY)가 걸려있어도 사내 LLM 게이트웨이
+    (인트라넷 전용)로는 직접 접속해야 한다 — httpx가 trust_env=True(기본값)면
+    이 환경변수를 읽어 프록시로 우회 요청을 보내다 연결 실패한다(2026-07 실사용
+    확인)."""
+    captured_kwargs: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "응답"}}]})
+
+    _patch_async_client(monkeypatch, handler, captured_kwargs)
+
+    settings = Settings(internal_llm_base_url="https://internal-llm.example.com/v1")
+    client = InternalLLMClient(settings)
+
+    [c async for c in client.chat_stream([{"role": "user", "content": "안녕"}])]
+
+    assert captured_kwargs.get("trust_env") is False
+
+
+@pytest.mark.asyncio
+async def test_embed_bypasses_proxy_env_vars(monkeypatch):
+    captured_kwargs: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
+
+    _patch_async_client(monkeypatch, handler, captured_kwargs)
+
+    settings = Settings(internal_llm_base_url="https://internal-llm.example.com/v1")
+    client = InternalLLMClient(settings)
+
+    await client.embed(["텍스트"])
+
+    assert captured_kwargs.get("trust_env") is False
