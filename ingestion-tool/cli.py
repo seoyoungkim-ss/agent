@@ -17,6 +17,7 @@ from collections import Counter
 
 from config import load_config
 from io_excel import read_used_range
+from parsing.employee_mapping import load_employee_mapping
 from parsing.meal_transaction_parser import parse_meal_transaction_grid
 from parsing.merge import merge_transactions_with_taste
 from parsing.taste_eval_parser import parse_taste_eval_grid
@@ -58,12 +59,15 @@ def _cmd_weekly_menu(args: argparse.Namespace) -> int:
 
 
 def _cmd_meal_log(args: argparse.Namespace) -> int:
+    config = load_config()
+    employee_mapping = load_employee_mapping(config.employee_mapping_path)
+
     transaction_grid = read_used_range(args.transaction_path, sheet_name=args.transaction_sheet)
     taste_grid = read_used_range(args.taste_path, sheet_name=args.taste_sheet)
 
     transactions = parse_meal_transaction_grid(transaction_grid)
     evaluations = parse_taste_eval_grid(taste_grid)
-    rows = merge_transactions_with_taste(transactions, evaluations)
+    rows = merge_transactions_with_taste(transactions, evaluations, employee_mapping=employee_mapping)
 
     if not rows:
         print("⚠️ 파싱된 행이 없습니다. 두 파일의 헤더 구조를 확인하세요.")
@@ -72,6 +76,8 @@ def _cmd_meal_log(args: argparse.Namespace) -> int:
     matched = sum(1 for r in rows if r.taste_score is not None)
     print(f"취식기록 {len(transactions)}행, 맛평가 {len(evaluations)}행 → 병합 {len(rows)}행")
     print(f"  맛평가와 매칭됨: {matched}행 ({matched / len(rows):.0%}) / 미평가: {len(rows) - matched}행")
+    if employee_mapping:
+        print(f"  사번↔Knox ID 매핑 {len(employee_mapping)}건 로드됨 ({config.employee_mapping_path})")
     print("샘플 5건:")
     for row in rows[:5]:
         print(f"  {row}")
@@ -80,7 +86,6 @@ def _cmd_meal_log(args: argparse.Namespace) -> int:
         print("전송을 취소했습니다.")
         return 0
 
-    config = load_config()
     sent = upload_meal_log(rows, backend_base_url=config.backend_base_url, api_token=config.api_token)
     print(f"✅ {sent}행 전송 완료")
     return 0

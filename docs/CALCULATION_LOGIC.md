@@ -352,16 +352,35 @@ IF 생성 날짜, IF 수정 날짜`. 파서: `ingestion-tool/parsing/taste_eval_
 없어서 조인 키에 못 쓴다.
 
 ```python
-def employee_key(transaction_employee_id: str) -> str:
-    return transaction_employee_id.strip()   # ⚠️ 아래 가정 참고
+def employee_key(transaction_employee_id: str, mapping: dict[str, str] | None = None) -> str:
+    employee_id = transaction_employee_id.strip()
+    if mapping and employee_id in mapping:
+        return mapping[employee_id]
+    return employee_id
 ```
 
 **가정 확인 현황** (merge.py 맨 위 docstring에도 적어둠):
-1. ✅ **확인됨 (사용자, 2026-07-28)**: 맛평가의 Knox ID와 취식기록의 사원번호가
-   문자열 그대로 매칭되는 건 **A사 인원뿐**이다. B/C/D사·기타 인원은 애초에 두 ID
-   체계가 다르므로, 그 인원의 취식 행이 맛평가와 매칭 안 되고 "미평가"로 남는 건
-   **버그가 아니라 현재 구조상 당연한 결과**다. A사 외 인원도 매칭하려면 별도 ID
-   매핑 수단이 확보돼야 하고, 그때 `employee_key()`에 회사구분별 분기를 추가하면 된다.
+1. ✅ **확인됨 (사용자, 2026-07-28) + 매핑 기능 추가 (2026-07-29)**: 맛평가의
+   Knox ID와 취식기록의 사원번호가 문자열 그대로 매칭되는 건 **A사 인원뿐**이다.
+   B/C/D사·기타 인원은 애초에 두 ID 체계가 다르므로, 매핑 없이는 그 인원의 취식
+   행이 맛평가와 매칭 안 되고 "미평가"로 남는다(버그 아님).
+   운영자가 실제로 사번↔Knox ID 매핑을 로컬 CSV로 관리하기로 하면서, 이를 위한
+   경로가 새로 생겼다:
+   - **파일**: `ingestion-tool/parsing/employee_mapping.py::load_employee_mapping(path)` —
+     `{사번: knox_id, ...}` CSV(헤더 `사번,knox_id`)를 읽어 dict로 반환. 나스카
+     대상이 아닌 운영자 자체 관리 파일이라 가정하고 xlwings 없이 표준 `csv` 모듈로
+     읽는다. 경로가 비었거나 파일이 없으면 빈 dict(매핑 미사용, 에러 아님).
+   - **설정**: `config.json`의 `employee_mapping_path` (또는 환경변수
+     `INGEST_EMPLOYEE_MAPPING_PATH`) — `ingestion-tool/config.py::ToolConfig`.
+   - **적용**: `cli.py`의 `_cmd_meal_log`가 `load_employee_mapping()`으로 읽은
+     dict를 `merge_transactions_with_taste(..., employee_mapping=mapping)`에
+     넘기고, `employee_key()`가 사번을 매핑에서 찾으면 knox_id로 치환해서 비교한다.
+     매핑에 없는 사번(A사 등)은 원래대로 사번 그대로 비교하므로 기존 A사 동작은
+     안 바뀐다.
+   - **테스트**: `ingestion-tool/tests/test_employee_mapping.py`(CSV 로드,
+     BOM/공백/빈값 처리), `test_merge.py`의
+     `test_employee_mapping_resolves_mismatched_ids`,
+     `test_employee_mapping_missing_entry_falls_back_to_employee_id`.
 2. ⚠️ **아직 미확인**: 메뉴명 매칭은 "화면표시명(한글)" 기준이다(코드성 메뉴명이
    아니라). 두 값이 실제로도 문자열이 정확히 같은지(공백, 표기 차이 등) 실물
    데이터로 검증 필요.

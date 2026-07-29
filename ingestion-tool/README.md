@@ -30,6 +30,8 @@ py -m venv .venv
 pip install -r requirements.txt
 copy config.example.json config.json
 # config.json을 열어 backend_base_url / api_token을 채운다
+# (사번↔Knox ID 매핑이 필요하면 employee_mapping_path도 — 아래 "사번↔Knox ID
+#  매핑" 절 참고)
 ```
 
 ## 사용법
@@ -71,14 +73,44 @@ pyinstaller --onefile --name cafeteria-ingest cli.py
 
 - 취식기록의 사원번호가 비어 있는 행(관측된 사례: 협력사 직원)은 건너뛴다 —
   개인 단위 분석에서 빠진다는 뜻이므로 실제로 맞는 정책인지 확인 필요.
-- 맛평가와의 조인 키는 `(사번/Knox ID, 취식 날짜, 식사구분, 메뉴명)`이다. Knox ID와
-  사원번호가 같은 값 체계라고 가정하고 있다 — 다르면 `parsing/merge.py`의
-  `employee_key()`에 변환 로직을 추가해야 한다.
+- 맛평가와의 조인 키는 `(사번/Knox ID, 취식 날짜, 식사구분, 메뉴명)`이다. **A사
+  인원은 사번==Knox ID**라 그대로 매칭되지만, 다른 회사는 값 체계가 달라 매핑이
+  필요하다 — 아래 "사번↔Knox ID 매핑" 절 참고.
 - 메뉴명은 취식기록의 "화면표시명(한글)" 기준으로 맞춘다(코드성 "메뉴명" 아님).
 - 식사구분 어휘 차이(취식기록 "중식" ↔ 맛평가 "점심")는 `models.py`의
   `MEAL_TYPE_ALIASES`에서 정규화한다.
 
 자세한 배경은 `docs/CALCULATION_LOGIC.md` 12번 항목 참고.
+
+## 사번↔Knox ID 매핑 (A사 외 인원 맛평가 매칭용)
+
+A사가 아닌 회사(계열사/기타)는 취식기록의 사번과 맛평가의 Knox ID가 서로 다른 값
+체계라, 매핑 없이는 그 인원의 맛평가가 전부 "미평가"로 남는다(에러는 아니고
+조용히 매칭만 안 됨).
+
+운영자가 로컬에 매핑 CSV를 직접 만들어두면 자동으로 적용된다. 파일 형식(헤더
+필수):
+```csv
+사번,knox_id
+12345678,abcd1234
+87654321,wxyz9999
+```
+
+`config.json`에 그 파일 경로를 지정한다:
+```json
+{
+  "backend_base_url": "...",
+  "api_token": "...",
+  "employee_mapping_path": "C:\\매핑\\employee_mapping.csv"
+}
+```
+(또는 환경변수 `INGEST_EMPLOYEE_MAPPING_PATH`로도 지정 가능 — `config.json`보다
+우선함)
+
+이 파일은 `.gitignore`에 등록돼 있어(`ingestion-tool/employee_mapping.csv`)
+저장소 안에 둬도 커밋되지 않는다. 파일이 없거나 경로가 비어 있으면 그냥 매핑 없이
+동작한다(A사만 다루는 환경이면 필요 없음). 매핑 로직은 `parsing/
+employee_mapping.py`(로드), `parsing/merge.py`의 `employee_key()`(적용) 참고.
 
 ## 합성 테스트 파일로 파이프라인 미리 확인하기
 

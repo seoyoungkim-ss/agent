@@ -88,3 +88,26 @@ def test_multiple_transactions_partial_match():
     matched = [m for m in merged if m.taste_score is not None]
     assert len(matched) == 1
     assert matched[0].employee_id == "E1001"
+
+
+def test_employee_mapping_resolves_mismatched_ids():
+    # B/C/D사 등은 사번과 Knox ID 체계가 달라 매핑 없이는 매칭 안 됨
+    transactions = [_tx(employee_id="88887777")]
+    evaluations = [_ev(knox_id="knoxABC")]
+    mapping = {"88887777": "knoxABC"}
+
+    unmapped = merge_transactions_with_taste(transactions, evaluations)
+    assert unmapped[0].taste_score is None  # 매핑 없으면 미평가로 남음(정상 동작)
+
+    mapped = merge_transactions_with_taste(transactions, evaluations, employee_mapping=mapping)
+    assert mapped[0].taste_score is not None
+
+
+def test_employee_mapping_missing_entry_falls_back_to_employee_id():
+    # 매핑 파일에 없는 사번(A사처럼 사번==knox_id인 경우)은 그대로 통과해야 함
+    transactions = [_tx(employee_id="E1001")]
+    evaluations = [_ev(knox_id="E1001")]
+    mapping = {"다른사번": "다른knox"}
+
+    merged = merge_transactions_with_taste(transactions, evaluations, employee_mapping=mapping)
+    assert merged[0].taste_score is not None
