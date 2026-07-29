@@ -369,18 +369,30 @@ def employee_key(transaction_employee_id: str, mapping: dict[str, str] | None = 
    운영자가 실제로 사번↔Knox ID 매핑을 로컬 CSV로 관리하기로 하면서, 이를 위한
    경로가 새로 생겼다:
    - **파일**: `ingestion-tool/parsing/employee_mapping.py::load_employee_mapping(path)` —
-     `{사번: knox_id, ...}` CSV(헤더 `사번,knox_id`)를 읽어 dict로 반환. 나스카
-     대상이 아닌 운영자 자체 관리 파일이라 가정하고 xlwings 없이 표준 `csv` 모듈로
-     읽는다. 경로가 비었거나 파일이 없으면 빈 dict(매핑 미사용, 에러 아님).
-   - **설정**: `config.json`의 `employee_mapping_path` (또는 환경변수
-     `INGEST_EMPLOYEE_MAPPING_PATH`) — `ingestion-tool/config.py::ToolConfig`.
+     `{사번: knox_id, ...}`를 반환. 확장자로 csv/엑셀을 자동 판별한다:
+     - `.csv`는 표준 `csv` 모듈로 직접 읽는다. **UTF-8과 CP949(한글 Windows
+       Excel의 CSV 저장 기본 인코딩)를 순서대로 시도**하고 — Excel에서 CSV로
+       저장하면 UTF-8이 아니라 CP949가 기본값이라 `UnicodeDecodeError`가 나기
+       쉬웠던 문제(2026-07-29 실사용 중 발견)를 이렇게 해결했다. 둘 다 실패하면
+       "xlsx로 저장해보라"는 안내와 함께 `RuntimeError`.
+     - `.xlsx`/`.xls`는 `io_excel.read_used_range()`(xlwings)로 그리드를 읽은
+       뒤 `_parse_mapping_grid()`(순수 함수, 헤더 이름으로 컬럼 찾음)로 파싱한다.
+       엑셀은 내부적으로 유니코드라 인코딩 문제 자체가 없어, CSV 인코딩이 계속
+       말썽이면 이 형식을 권장한다. 엑셀이 순수 숫자 사번/Knox ID를
+       `12345678.0`처럼 float로 자동 변환해 넘기는 경우도 `_clean_cell()`에서
+       정수 문자열로 되돌려 처리한다.
+     - 경로가 비었거나 파일이 없으면 빈 dict(매핑 미사용, 에러 아님).
+   - **설정**: `config.json`의 `employee_mapping_path` (csv/xlsx 아무 확장자,
+     또는 환경변수 `INGEST_EMPLOYEE_MAPPING_PATH`) — `ingestion-tool/
+     config.py::ToolConfig`.
    - **적용**: `cli.py`의 `_cmd_meal_log`가 `load_employee_mapping()`으로 읽은
      dict를 `merge_transactions_with_taste(..., employee_mapping=mapping)`에
      넘기고, `employee_key()`가 사번을 매핑에서 찾으면 knox_id로 치환해서 비교한다.
      매핑에 없는 사번(A사 등)은 원래대로 사번 그대로 비교하므로 기존 A사 동작은
      안 바뀐다.
-   - **테스트**: `ingestion-tool/tests/test_employee_mapping.py`(CSV 로드,
-     BOM/공백/빈값 처리), `test_merge.py`의
+   - **테스트**: `ingestion-tool/tests/test_employee_mapping.py`(CSV
+     UTF-8/CP949/BOM/공백/빈값/디코딩실패, xlsx 그리드 파싱 — 헤더 순서 무관,
+     엑셀 float 자동변환, 헤더 없음), `test_merge.py`의
      `test_employee_mapping_resolves_mismatched_ids`,
      `test_employee_mapping_missing_entry_falls_back_to_employee_id`.
 2. ⚠️ **아직 미확인**: 메뉴명 매칭은 "화면표시명(한글)" 기준이다(코드성 메뉴명이

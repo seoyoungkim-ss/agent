@@ -14,6 +14,7 @@ ingestion-tool/dist/
 ingestion-tool/build/
 ingestion-tool/*.spec
 ingestion-tool/employee_mapping.csv
+ingestion-tool/employee_mapping.xlsx
 
 # --- frontend ---
 frontend/node_modules/

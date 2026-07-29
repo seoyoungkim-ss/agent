@@ -88,20 +88,25 @@ A사가 아닌 회사(계열사/기타)는 취식기록의 사번과 맛평가�
 체계라, 매핑 없이는 그 인원의 맛평가가 전부 "미평가"로 남는다(에러는 아니고
 조용히 매칭만 안 됨).
 
-운영자가 로컬에 매핑 CSV를 직접 만들어두면 자동으로 적용된다. 파일 형식(헤더
-필수):
+운영자가 로컬에 매핑 파일을 직접 만들어두면 자동으로 적용된다. **CSV와 xlsx 둘 다
+지원**한다(확장자로 자동 판별). 헤더는 "사번"/"knox_id" 두 컬럼이 필수(순서 무관):
+
 ```csv
 사번,knox_id
 12345678,abcd1234
 87654321,wxyz9999
 ```
+CSV로 저장할 때 **한글 Windows Excel의 기본 인코딩(CP949)과 UTF-8을 둘 다
+자동으로 시도**하므로 대부분 그대로 되지만, 그래도 인코딩 에러
+(`UnicodeDecodeError`)가 나면 **xlsx로 저장해서 쓰는 게 가장 확실하다** — 엑셀
+파일은 내부적으로 유니코드라 이런 인코딩 문제 자체가 없다.
 
-`config.json`에 그 파일 경로를 지정한다:
+`config.json`에 그 파일 경로를 지정한다(csv/xlsx 아무 확장자나):
 ```json
 {
   "backend_base_url": "...",
   "api_token": "...",
-  "employee_mapping_path": "C:\\매핑\\employee_mapping.csv"
+  "employee_mapping_path": "C:\\매핑\\employee_mapping.xlsx"
 }
 ```
 (또는 환경변수 `INGEST_EMPLOYEE_MAPPING_PATH`로도 지정 가능 — `config.json`보다
@@ -110,7 +115,8 @@ A사가 아닌 회사(계열사/기타)는 취식기록의 사번과 맛평가�
 이 파일은 `.gitignore`에 등록돼 있어(`ingestion-tool/employee_mapping.csv`)
 저장소 안에 둬도 커밋되지 않는다. 파일이 없거나 경로가 비어 있으면 그냥 매핑 없이
 동작한다(A사만 다루는 환경이면 필요 없음). 매핑 로직은 `parsing/
-employee_mapping.py`(로드), `parsing/merge.py`의 `employee_key()`(적용) 참고.
+employee_mapping.py`(로드 — csv는 표준 csv 모듈, xlsx는 `io_excel.read_used_range`
+재사용), `parsing/merge.py`의 `employee_key()`(적용) 참고.
 
 ## 사내 SSL 검사로 업로드가 막힐 때 (SSL certificate verify 에러)
 
