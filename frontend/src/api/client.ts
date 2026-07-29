@@ -213,6 +213,11 @@ export const api = {
     classification?: Classification;
   }) => request<DivisionRow[]>(`/analysis/divisions${qs(params)}`),
 
+  recomputeDailyStats: (params: { period_start: string; period_end: string }) =>
+    request<{ days_processed: number }>(`/analysis/daily-stats/recompute${qs(params)}`, {
+      method: "POST",
+    }),
+
   menuPerformance: (params: { period_start: string; period_end: string }) =>
     request<MenuPerformanceRow[]>(`/analysis/menu-performance${qs(params)}`),
 

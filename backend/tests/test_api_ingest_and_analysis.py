@@ -219,6 +219,46 @@ def test_corner_analysis_requires_daily_stats(client, db_session):
     assert hansik["headcount_total"] == 1
 
 
+def test_daily_stats_recompute_backfills_range_for_corner_and_home_views(client):
+    # 과거 기간(예: 6개월치)을 한꺼번에 적재했을 때, 매일 새벽 스케줄러가 "어제"
+    # 하루치만 계산하는 것과 달리 이 엔드포인트는 기간 전체를 한 번에 채워야 한다.
+    _ingest_weekly_menu(client)
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY)
+    _ingest_meal_log(client, "E2", "맛남", eaten_date=MONDAY + dt.timedelta(days=1))
+
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=1)).isoformat()},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["days_processed"] == 2
+
+    corners_resp = client.get(
+        "/api/analysis/corners",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=1)).isoformat()},
+    )
+    hansik = next(r for r in corners_resp.json() if r["corner_name"] == "한식")
+    assert hansik["headcount_total"] == 2
+
+    divisions_resp = client.get(
+        "/api/analysis/divisions",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=1)).isoformat(),
+            "granularity": "daily",
+        },
+    )
+    assert sum(r["headcount"] for r in divisions_resp.json()) == 2
+
+
+def test_daily_stats_recompute_rejects_inverted_range(client):
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY - dt.timedelta(days=1)).isoformat()},
+    )
+    assert resp.status_code == 400
+
+
 def test_chat_stream_falls_back_to_mock_when_llm_unconfigured(client):
     resp = client.post(
         "/api/chat/stream", json={"messages": [{"role": "user", "content": "이번주 만족도 어때?"}]}

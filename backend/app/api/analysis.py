@@ -17,7 +17,7 @@ from app.models.stats import (
     MenuPerformanceStats,
     TasteCluster,
 )
-from app.services.aggregation import aggregate_menu_performance, diagnose_menu_decline
+from app.services.aggregation import aggregate_daily_stats, aggregate_menu_performance, diagnose_menu_decline
 from app.services.corner_core_layer import build_employee_corner_counts, classify_corner_core_layer
 from app.services.food_vector import FOOD_VECTOR_DIMENSIONS
 from app.services.food_vector_tagging import run_llm_food_vector_tagging
@@ -191,6 +191,26 @@ def menu_performance(period_start: dt.date, period_end: dt.date, db: Session = D
         }
         for r in rows
     ]
+
+
+@router.post("/daily-stats/recompute")
+def recompute_daily_stats(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """daily_corner_stats/daily_division_stats를 기간 전체에 대해 다시 계산한다.
+
+    평소엔 스케줄러(app/scheduler.py::run_daily_batch)가 매일 새벽 전날 하루치만
+    계산하지만, 취식 데이터를 과거 기간 한꺼번에(예: 6개월치 실사용 데이터)
+    적재했을 때는 그 기간의 배치 집계가 통째로 비어 있어 홈/분석 화면에 데이터가
+    안 보인다 — 이 엔드포인트로 날짜별로 한 번씩 다시 계산해 채운다.
+    """
+    if period_end < period_start:
+        raise HTTPException(status_code=400, detail="period_end는 period_start 이후여야 합니다.")
+    days_processed = 0
+    current = period_start
+    while current <= period_end:
+        aggregate_daily_stats(db, current)
+        days_processed += 1
+        current += dt.timedelta(days=1)
+    return {"days_processed": days_processed}
 
 
 @router.post("/menu-performance/recompute")

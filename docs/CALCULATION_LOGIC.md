@@ -854,3 +854,45 @@ ID(사번↔Knox ID 매핑 누락/포맷 차이 가능성)와 메뉴명이 주�
 `test_diagnose_match_failure_by_evaluation_*` 6개(전체 일치, ID/메뉴명 불일치
 격리, 매핑 적용, 매칭 없음, 취식기록이 훨씬 많아도 카운트가 맛평가 건수를 못
 넘는지) + `test_sample_field_mismatches_*` 5개(필드별 값 비교 샘플).
+
+## 22. 과거 기간 일괄 적재 후 홈/분석 화면에 데이터가 안 보이는 문제 — `daily-stats/recompute`
+
+**증상(2026-07 실사용)**: 취식 데이터를 6개월치 한꺼번에 적재한 뒤, 홈 화면의
+"주간 식수 추이"가 0으로 나오고 "코너별 식수"·분석 탭의 "코너별 분석"/
+"본사·계열사·기타" 섹션이 전부 "데이터가 없습니다"로 표시됐다.
+
+**원인**: `daily_corner_stats`/`daily_division_stats`는 `meal_log`에서 직접
+집계하는 게 아니라 **배치 재계산 테이블**이다(PRD 4.3). 이 재계산은
+`app/scheduler.py::run_daily_batch`가 **매일 새벽 2시에 "어제" 하루치만**
+호출한다(`aggregate_daily_stats(db, yesterday)`, 6절 참고). 즉 `meal_log`에
+과거 데이터를 한꺼번에 넣어도, 그 날짜들에 대한 배치 집계는 스케줄러가 알아서
+채워주지 않는다 — 앞으로의 매일 새벽 배치는 "그날그날의 어제"만 채우므로,
+이미 지나간 과거 구간은 영원히 비어 있는 채로 남는다.
+
+**⚠️ 함정**: 홈 화면의 "주간 식수 추이"(`GET /dashboard/weekly-summary`)는
+요청한 기간의 날짜마다 행을 만들고 집계가 없으면 `headcount: 0`을 채워
+넣으므로(20절 이전 `_compute_weekly_summary` 참고), 데이터 개수(`length`)만
+보면 "데이터가 있는 것처럼" 보인다 — 실제로는 전부 0인 빈 껍데기다. 그래서
+프론트엔드 쪽 "데이터 없음" 판정은 `weekly.data.length === 0`이 아니라
+**`totalHeadcount === 0`**으로 해야 한다(`HomePage.tsx`). 반면
+`GET /analysis/corners`/`GET /analysis/divisions`는 애초에 `daily_corner_stats`/
+`daily_division_stats`에 있는 행만 반환하므로 진짜로 빈 배열이 온다.
+
+**해결**: `POST /analysis/daily-stats/recompute?period_start&period_end`
+(`backend/app/api/analysis.py::recompute_daily_stats`) — 기존
+`aggregate_daily_stats(db, date)`(하루 단위 함수)를 기간 내 날짜마다 반복
+호출해 그 구간 전체를 한 번에 채운다. 응답은 `{"days_processed": N}`.
+프론트엔드 3곳(`HomePage.tsx`의 주간 식수 추이/코너별 식수 카드,
+`AnalysisPage.tsx`의 본사·계열사·기타 섹션과 코너별 분석 탭)에 "데이터가
+없습니다" 상태일 때 "최근 180일 배치 집계 재계산" 버튼을 노출해, 운영자가
+과거 데이터 일괄 적재 후 별도 설명 없이도 바로 이 버튼으로 채울 수 있게 했다
+(`api.recomputeDailyStats()` — `recomputeMenuPerformance()`와 같은 컨벤션).
+`menu_performance_stats`는 이미 `POST /analysis/menu-performance/recompute`가
+있었지만(기간 전체를 한 번에 계산하는 방식이라 이 문제가 없었음), 일별 통계
+쪽엔 이런 수동 재계산 경로가 없었던 게 이번에 드러난 공백이다.
+
+**테스트**: `backend/tests/test_api_ingest_and_analysis.py::
+test_daily_stats_recompute_backfills_range_for_corner_and_home_views`(기간
+내 여러 날짜를 한 번에 채우고 corners/divisions 양쪽에서 값이 맞는지),
+`::test_daily_stats_recompute_rejects_inverted_range`(period_end <
+period_start면 400).

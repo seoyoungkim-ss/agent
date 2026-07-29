@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import { api, type Classification } from "../api/client";
 import {
@@ -34,6 +34,9 @@ function addDays(iso: string, days: number): string {
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
 }
+
+const RECOMPUTE_PERIOD_START = isoDaysAgo(180); // PRD: 취식 데이터 6개월 누적 기준
+const RECOMPUTE_PERIOD_END = isoDaysAgo(0);
 
 const CLASSIFICATION_OPTIONS: { label: string; value: Classification | "전체" }[] = [
   { label: "전체", value: "전체" },
@@ -74,6 +77,15 @@ export function HomePage() {
   const cornerSummary = useQuery({
     queryKey: ["corner-summary", selectedMonday, sundayOfSelected],
     queryFn: () => api.cornerAnalysis({ period_start: selectedMonday, period_end: sundayOfSelected }),
+  });
+
+  const recomputeDailyStats = useMutation({
+    mutationFn: () =>
+      api.recomputeDailyStats({ period_start: RECOMPUTE_PERIOD_START, period_end: RECOMPUTE_PERIOD_END }),
+    onSuccess: () => {
+      weekly.refetch();
+      cornerSummary.refetch();
+    },
   });
 
   const totalHeadcount = weekly.data?.reduce((sum, d) => sum + d.headcount, 0) ?? 0;
@@ -173,6 +185,23 @@ export function HomePage() {
         </div>
         {weekly.isLoading && <LoadingState />}
         {weekly.isError && <ErrorState error={weekly.error} />}
+        {weekly.data && weekly.data.length > 0 && totalHeadcount === 0 && (
+          <div className="mb-4 space-y-2">
+            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+              선택한 주에 식수가 0으로 나옵니다. 취식 데이터를 과거 기간 한꺼번에 적재한 경우 배치 집계(daily_division_stats/daily_corner_stats)가
+              아직 안 돼 있을 수 있습니다 — 스케줄러는 매일 새벽 전날치만 계산합니다.
+            </p>
+            <Button variant="secondary" onClick={() => recomputeDailyStats.mutate()} disabled={recomputeDailyStats.isPending}>
+              {recomputeDailyStats.isPending ? "계산 중..." : "최근 180일 배치 집계 재계산"}
+            </Button>
+            {recomputeDailyStats.isError && <ErrorState error={recomputeDailyStats.error} />}
+            {recomputeDailyStats.isSuccess && (
+              <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                재계산 완료 — 그래도 0이면 이 기간에 실제로 적재된 취식 데이터가 없는 것입니다.
+              </p>
+            )}
+          </div>
+        )}
         {weekly.data && <ReactECharts option={chartOption} style={{ height: 280 }} />}
         {weekly.data && weekly.data.length > 0 && (
           <div className="mt-4 overflow-x-auto">
@@ -259,9 +288,17 @@ export function HomePage() {
         {cornerSummary.isLoading && <LoadingState />}
         {cornerSummary.isError && <ErrorState error={cornerSummary.error} />}
         {cornerSummary.data && cornerSummary.data.length === 0 && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다.
-          </p>
+          <div className="space-y-2">
+            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+              데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다 — 취식 데이터를 과거 기간
+              한꺼번에 적재한 경우, 스케줄러는 매일 새벽 전날치만 계산하므로 최근 180일치를 한 번에 다시
+              계산해야 합니다.
+            </p>
+            <Button variant="secondary" onClick={() => recomputeDailyStats.mutate()} disabled={recomputeDailyStats.isPending}>
+              {recomputeDailyStats.isPending ? "계산 중..." : "최근 180일 배치 집계 재계산"}
+            </Button>
+            {recomputeDailyStats.isError && <ErrorState error={recomputeDailyStats.error} />}
+          </div>
         )}
         {cornerSummary.data && cornerSummary.data.length > 0 && (
           <Table

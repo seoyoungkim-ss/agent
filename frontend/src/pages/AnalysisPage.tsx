@@ -53,6 +53,10 @@ function DivisionAnalysisSection() {
         classification: classification === "전체" ? undefined : classification,
       }),
   });
+  const recomputeDailyStats = useMutation({
+    mutationFn: () => api.recomputeDailyStats({ period_start: PERIOD_START, period_end: PERIOD_END }),
+    onSuccess: () => query.refetch(),
+  });
 
   const rows = query.data ?? [];
   const periods = [...new Set(rows.map((r) => r.period))].sort();
@@ -117,9 +121,16 @@ function DivisionAnalysisSection() {
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
       {rows.length === 0 && !query.isLoading && (
-        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          데이터가 없습니다. 배치 집계(daily_division_stats)가 먼저 필요합니다.
-        </p>
+        <div className="space-y-2">
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            데이터가 없습니다. 배치 집계(daily_division_stats)가 먼저 필요합니다 — 취식 데이터를 과거 기간 한꺼번에
+            적재한 경우, 스케줄러는 매일 새벽 전날치만 계산하므로 최근 180일치를 한 번에 다시 계산해야 합니다.
+          </p>
+          <Button variant="secondary" onClick={() => recomputeDailyStats.mutate()} disabled={recomputeDailyStats.isPending}>
+            {recomputeDailyStats.isPending ? "계산 중..." : "최근 180일 배치 집계 재계산"}
+          </Button>
+          {recomputeDailyStats.isError && <ErrorState error={recomputeDailyStats.error} />}
+        </div>
       )}
       {rows.length > 0 && <ReactECharts option={option} style={{ height: 280 }} />}
       {rows.length > 0 && (
@@ -323,6 +334,10 @@ function CornerAnalysisTab() {
         classification: classification === "전체" ? undefined : classification,
       }),
   });
+  const recomputeDailyStats = useMutation({
+    mutationFn: () => api.recomputeDailyStats({ period_start: PERIOD_START, period_end: PERIOD_END }),
+    onSuccess: () => query.refetch(),
+  });
 
   const axisStyle = {
     axisLine: { lineStyle: { color: chartTheme.axis } },
@@ -391,9 +406,17 @@ function CornerAnalysisTab() {
         {query.isLoading && <LoadingState />}
         {query.isError && <ErrorState error={query.error} />}
         {query.data && query.data.length === 0 && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다.
-          </p>
+          <div className="space-y-2">
+            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+              데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다 — 취식 데이터를 과거 기간
+              한꺼번에 적재한 경우, 스케줄러는 매일 새벽 전날치만 계산하므로 최근 180일치를 한 번에 다시
+              계산해야 합니다.
+            </p>
+            <Button variant="secondary" onClick={() => recomputeDailyStats.mutate()} disabled={recomputeDailyStats.isPending}>
+              {recomputeDailyStats.isPending ? "계산 중..." : "최근 180일 배치 집계 재계산"}
+            </Button>
+            {recomputeDailyStats.isError && <ErrorState error={recomputeDailyStats.error} />}
+          </div>
         )}
         {query.data && query.data.length > 0 && (
           <>
