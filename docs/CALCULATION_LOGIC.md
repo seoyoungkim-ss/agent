@@ -39,6 +39,8 @@
 | 본사/계열사/기타 분류 | `app/services/company_classification.py` (`classify_division`) | `COMPANY_DIVISION_MAP` (같은 파일) | 6.1 |
 | 배치 스케줄 주기 | `app/scheduler.py` | 같은 파일 (cron 표현식) | 9.3 |
 | 전체 취식 데이터 원본 엑셀 다운로드(기간 선택) | `app/api/dashboard.py` (`meal_log_export`) | - (순수 조회, 계산 없음) | - |
+| 월간 VOE 고정 분류(맛/간/위생/서비스) | `app/services/voe_category.py` | `_CATEGORY_KEYWORDS`(같은 파일), `VOE_CATEGORIES` | 5.2/5.3 |
+| 코너별 식수 요약(홈 화면) | `app/api/analysis.py` (`corner_analysis` 재사용) | - (신규 계산 없음) | - |
 
 ---
 
@@ -702,3 +704,72 @@ def compute_top_menu_pairs(
 test_corner_core_layer_menu_pairs_splits_core_and_non_core`(반복 방문 그룹과
 가끔 방문 그룹을 인입해 실제로 코어층/나머지가 갈리고 각자 다른 메뉴 쌍이 나오는지
 검증), `::test_corner_core_layer_menu_pairs_unknown_corner_returns_404`.
+
+## 19. 월간 VOE 고정 분류 (맛/간/위생/서비스) — 홈 현황 화면용 (PRD 5.2/5.3)
+
+리더 보고용으로 홈 화면을 개편하면서, 매달 라벨이 바뀌는 기존 K-means VOE
+클러스터(10절 참고, 코드는 그대로 살아있음) 대신 **고정된 분류**로 훑어볼 수
+있는 뷰를 추가했다.
+
+**파일**: `backend/app/services/voe_category.py`
+
+```python
+VOE_CATEGORIES = ["맛", "간", "위생", "서비스"]
+OTHER_CATEGORY = "기타"
+
+_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "맛": ("맛있", "맛없", "맛나", "노맛", "존맛", "밍밍", "느끼"),
+    "간": ("짜요", "짜네", "짜서", "너무짜", "싱거워", "싱겁", "간이"),
+    "위생": ("위생", "청결", "머리카락", "이물질", "벌레", "곰팡이", "상했", "냄새나"),
+    "서비스": ("불친절", "친절", "서비스", "응대", "대기시간", "줄이길", "직원"),
+}
+
+def classify_voe_categories(comment: str) -> list[str]:
+    ...  # 부분일치, 다중 라벨(한 코멘트가 여러 분류에 동시에 속할 수 있음)
+```
+
+- `food_vector_tagging.py`(15절)와 같은 키워드-규칙 컨벤션이다 — 짧은 문자열
+  부분일치로 태깅. 차이는 메뉴명(단일 개념, 짧음)이 아니라 자유 문장(여러 주제를
+  동시에 언급 가능)을 다루므로 **단일 벡터가 아니라 다중 라벨 리스트**를 반환한다.
+- 어떤 분류에도 안 걸리면 호출부(`voe_by_category` 엔드포인트)가 "기타"로
+  집계한다.
+- **⚠️ 키워드셋은 초기 초안이다.** 실제 코멘트 데이터를 보면서
+  `_CATEGORY_KEYWORDS` 딕셔너리만 계속 보강하면 된다 — 다른 코드 안 건드려도 됨.
+
+**API**: `GET /api/dashboard/voe-by-category?period=YYYY-MM-DD`
+(`backend/app/api/dashboard.py::voe_by_category`) — `period`는 해당 월의 아무
+날짜(월초로 정규화, `voe_clusters`와 동일 관례). 그 달 `meal_log.comment`
+전체를 분류해 **고정 순서**(맛→간→위생→서비스→기타)로 반환한다 — count로
+정렬하지 않는 이유는 매달 카드 위치가 안 바뀌어야 리더가 매번 다시 안 훑어봐도
+되기 때문. 응답에 `total_comments`(집계 대상 전체 코멘트 수, 다중 라벨이라
+카테고리별 count 합계보다 작을 수 있음)와 각 분류의 원본 코멘트 목록(취식일시·
+코너명 포함)이 그대로 담긴다.
+
+**프론트**: `HomePage.tsx`의 VOE 분류 카드 — 5개 타일(맛/간/위생/서비스/기타)
+클릭하면 그 아래 해당 분류 코멘트 표가 펼쳐지는 클릭-확장 패턴
+(`AnalysisPage.tsx`의 `MenuFoodVectorEditor`와 동일한 UI 컨벤션).
+
+**⚠️ 기존 K-means VOE 클러스터 기능은 삭제되지 않았다.** `voe_clustering.py`,
+스케줄러의 `run_monthly_voe_clustering`, `monthly_voe_cluster` 테이블,
+`GET /dashboard/voe-clusters` 엔드포인트 전부 그대로 남아있고 매달 계속
+계산된다 — **다만 홈 화면(HomePage.tsx)에서 노출만 빠졌다.** 나중에 "이 달엔
+무슨 새로운 주제가 나왔나" 같은 탐색용으로 다른 화면에 다시 노출시키고 싶으면
+`api.voeClusters()`(이미 `client.ts`에 있음)를 그대로 쓰면 된다.
+
+**튜닝 지점**: `_CATEGORY_KEYWORDS`만 고치면 분류 정확도를 조정할 수 있다.
+분류 자체를 5개보다 늘리거나 줄이려면 `VOE_CATEGORIES` 리스트만 바꾸면 됨(응답
+순서도 이 리스트 순서를 그대로 따름).
+
+**테스트**: `backend/tests/test_voe_category.py`(6개, 순수 함수 — 단일/다중
+라벨 매칭, 매칭 없음, 전체 카테고리가 키워드 규칙에 다 있는지). API
+엔드투엔드는 `test_api_ingest_and_analysis.py::
+test_voe_by_category_groups_comments_into_fixed_categories`,
+`::test_voe_by_category_multi_label_comment_counted_in_both_categories`.
+
+## 20. 코너별 식수 요약 — 홈 현황 화면 (신규 계산 없음)
+
+홈 화면에 새로 추가한 "코너별 식수 (선택한 주)" 카드는 새 계산 로직이 아니라
+기존 `GET /api/analysis/corners?period_start&period_end`(6절)를 **선택된 주
+(월~일) 범위로 좁혀서** 재사용한 것이다. 만족도·피크타임 서브속도 등은
+"분석" 탭에만 남기고, 홈 화면에는 코너명/식수 2개 컬럼만 간략히 표시한다
+(`HomePage.tsx`).

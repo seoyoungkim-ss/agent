@@ -1,3 +1,4 @@
+import calendar
 import datetime as dt
 import io
 
@@ -11,6 +12,7 @@ from app.models.logs import MealLog
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import DailyDivisionStats, MenuPerformanceStats, MonthlyVoeCluster
 from app.services.holidays import DayClassification, HolidayService
+from app.services.voe_category import OTHER_CATEGORY, VOE_CATEGORIES, classify_voe_categories
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -191,3 +193,46 @@ def voe_clusters(period: dt.date, db: Session = Depends(get_db)):
         }
         for r in rows
     ]
+
+
+@router.get("/voe-by-category")
+def voe_by_category(period: dt.date, db: Session = Depends(get_db)):
+    """PRD 5.2/5.3: 월간 VOE를 맛/간/위생/서비스 고정 분류로 집계 — 리더 보고용.
+
+    voe_clusters(K-means 자유형 클러스터)와 달리 카테고리가 매달 고정돼 있어
+    한 달씩 비교하기 쉽다. period는 해당 월의 아무 날짜(YYYY-MM-01 권장).
+    """
+    month_start = period.replace(day=1)
+    last_day = calendar.monthrange(month_start.year, month_start.month)[1]
+    month_end_exclusive = dt.datetime.combine(month_start.replace(day=last_day) + dt.timedelta(days=1), dt.time())
+    month_start_dt = dt.datetime.combine(month_start, dt.time())
+
+    rows = (
+        db.query(MealLog.comment, MealLog.eaten_at, CornerMaster.corner_name)
+        .join(CornerMaster, MealLog.corner_id == CornerMaster.corner_id)
+        .filter(
+            MealLog.eaten_at >= month_start_dt,
+            MealLog.eaten_at < month_end_exclusive,
+            MealLog.comment.isnot(None),
+        )
+        .all()
+    )
+
+    buckets: dict[str, list[dict]] = {c: [] for c in [*VOE_CATEGORIES, OTHER_CATEGORY]}
+    total_comments = 0
+    for comment, eaten_at, corner_name in rows:
+        if not comment or not comment.strip():
+            continue
+        total_comments += 1
+        entry = {"eaten_at": eaten_at.isoformat(), "corner_name": corner_name, "comment": comment}
+        matched = classify_voe_categories(comment)
+        for category in matched or [OTHER_CATEGORY]:
+            buckets[category].append(entry)
+
+    return {
+        "total_comments": total_comments,
+        "categories": [
+            {"category": category, "count": len(buckets[category]), "comments": buckets[category]}
+            for category in [*VOE_CATEGORIES, OTHER_CATEGORY]
+        ],
+    }

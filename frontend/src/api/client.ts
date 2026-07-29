@@ -52,6 +52,23 @@ export interface VoeCluster {
   keywords: string[];
 }
 
+export interface VoeCategoryComment {
+  eaten_at: string;
+  corner_name: string | null;
+  comment: string;
+}
+
+export interface VoeCategoryRow {
+  category: string;
+  count: number;
+  comments: VoeCategoryComment[];
+}
+
+export interface VoeByCategoryResponse {
+  total_comments: number;
+  categories: VoeCategoryRow[];
+}
+
 export interface CornerAnalysisRow {
   corner_id: number;
   corner_name: string;
@@ -182,6 +199,9 @@ export const api = {
     request<MenuHistoryEntry[]>(`/dashboard/menu-history/${encodeURIComponent(menuName)}`),
 
   voeClusters: (period: string) => request<VoeCluster[]>(`/dashboard/voe-clusters${qs({ period })}`),
+
+  voeByCategory: (period: string) =>
+    request<VoeByCategoryResponse>(`/dashboard/voe-by-category${qs({ period })}`),
 
   cornerAnalysis: (params: { period_start: string; period_end: string; classification?: Classification }) =>
     request<CornerAnalysisRow[]>(`/analysis/corners${qs(params)}`),

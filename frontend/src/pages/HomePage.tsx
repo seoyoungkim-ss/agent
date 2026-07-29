@@ -48,6 +48,8 @@ export function HomePage() {
   const [exportStart, setExportStart] = useState(isoDaysAgo(30));
   const [exportEnd, setExportEnd] = useState(isoDaysAgo(0));
   const [selectedMonday, setSelectedMonday] = useState(mondayOf(new Date()));
+  const [selectedVoeCategory, setSelectedVoeCategory] = useState<string | null>(null);
+  const sundayOfSelected = addDays(selectedMonday, 6);
 
   const weekly = useQuery({
     queryKey: ["weekly-summary", selectedMonday, classification],
@@ -64,9 +66,14 @@ export function HomePage() {
     enabled: !!searchedMenu,
   });
 
-  const voe = useQuery({
-    queryKey: ["voe-clusters", selectedMonday.slice(0, 7)],
-    queryFn: () => api.voeClusters(`${selectedMonday.slice(0, 7)}-01`),
+  const voeCategory = useQuery({
+    queryKey: ["voe-by-category", selectedMonday.slice(0, 7)],
+    queryFn: () => api.voeByCategory(`${selectedMonday.slice(0, 7)}-01`),
+  });
+
+  const cornerSummary = useQuery({
+    queryKey: ["corner-summary", selectedMonday, sundayOfSelected],
+    queryFn: () => api.cornerAnalysis({ period_start: selectedMonday, period_end: sundayOfSelected }),
   });
 
   const totalHeadcount = weekly.data?.reduce((sum, d) => sum + d.headcount, 0) ?? 0;
@@ -113,8 +120,6 @@ export function HomePage() {
 
   const mealLogExportUrl = `/api/dashboard/meal-log/export?period_start=${exportStart}&period_end=${exportEnd}`;
 
-  const sundayOfSelected = addDays(selectedMonday, 6);
-
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -154,7 +159,7 @@ export function HomePage() {
           value={weekly.data?.length ?? 0}
           sub={classification === "전체" ? "평일 + 주말+공휴일" : classification}
         />
-        <StatTile label="선택한 달 VOE 클러스터 수" value={voe.data?.length ?? 0} />
+        <StatTile label="선택한 달 VOE 코멘트 수" value={voeCategory.data?.total_comments ?? 0} />
       </div>
 
       <Card title="주간 식수 추이">
@@ -185,6 +190,90 @@ export function HomePage() {
               rowKey={(r) => r.date as string}
             />
           </div>
+        )}
+      </Card>
+
+      <Card title="월간 VOE 분류 (맛·간·위생·서비스)">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          카테고리를 클릭하면 해당 분류의 코멘트를 볼 수 있습니다. 한 코멘트가 여러 분류에 동시에 잡힐 수 있습니다.
+        </p>
+        {voeCategory.isLoading && <LoadingState />}
+        {voeCategory.isError && <ErrorState error={voeCategory.error} />}
+        {voeCategory.data && voeCategory.data.total_comments === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이번 달 코멘트가 없습니다.
+          </p>
+        )}
+        {voeCategory.data && voeCategory.data.total_comments > 0 && (
+          <>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+              {voeCategory.data.categories.map((c) => (
+                <button
+                  key={c.category}
+                  onClick={() => setSelectedVoeCategory((cur) => (cur === c.category ? null : c.category))}
+                  className="rounded-md border p-3 text-left transition-colors"
+                  style={{
+                    borderColor: selectedVoeCategory === c.category ? "var(--accent)" : "var(--border)",
+                    background: selectedVoeCategory === c.category ? "var(--surface-2)" : "var(--surface)",
+                  }}
+                >
+                  <div className="text-[13px] font-medium">{c.category}</div>
+                  <div className="mt-1 text-lg font-semibold">{c.count}</div>
+                </button>
+              ))}
+            </div>
+            {selectedVoeCategory && (
+              <div className="mt-4">
+                {(() => {
+                  const selected = voeCategory.data.categories.find((c) => c.category === selectedVoeCategory);
+                  if (!selected || selected.comments.length === 0) {
+                    return (
+                      <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                        해당 분류의 코멘트가 없습니다.
+                      </p>
+                    );
+                  }
+                  return (
+                    <Table
+                      columns={[
+                        { key: "eaten_at", label: "취식일시" },
+                        { key: "corner_name", label: "코너" },
+                        { key: "comment", label: "코멘트" },
+                      ]}
+                      rows={selected.comments.map((c) => ({
+                        eaten_at: c.eaten_at.replace("T", " "),
+                        corner_name: c.corner_name ?? "-",
+                        comment: c.comment,
+                      }))}
+                      rowKey={(r, i) => `${r.eaten_at as string}-${i}`}
+                    />
+                  );
+                })()}
+              </div>
+            )}
+          </>
+        )}
+      </Card>
+
+      <Card title="코너별 식수 (선택한 주)">
+        {cornerSummary.isLoading && <LoadingState />}
+        {cornerSummary.isError && <ErrorState error={cornerSummary.error} />}
+        {cornerSummary.data && cornerSummary.data.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다.
+          </p>
+        )}
+        {cornerSummary.data && cornerSummary.data.length > 0 && (
+          <Table
+            columns={[
+              { key: "corner", label: "코너" },
+              { key: "headcount", label: "식수", align: "right" },
+            ]}
+            rows={[...cornerSummary.data]
+              .sort((a, b) => b.headcount_total - a.headcount_total)
+              .map((c) => ({ corner: c.corner_name, headcount: c.headcount_total.toLocaleString() }))}
+            rowKey={(r) => r.corner as string}
+          />
         )}
       </Card>
 
@@ -224,42 +313,6 @@ export function HomePage() {
             rowKey={(r) => r.period as string}
           />
         )}
-      </Card>
-
-      <Card title="월간 VOE 클러스터 (사내 LLM 기반)">
-        {voe.isLoading && <LoadingState />}
-        {voe.isError && <ErrorState error={voe.error} />}
-        {voe.data && voe.data.length === 0 && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            이번 달 클러스터링 결과가 없습니다. 사내 LLM 연동 후 배치(매월 1일)가 실행되면 표시됩니다.
-          </p>
-        )}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {voe.data?.map((c) => (
-            <div key={c.cluster_label} className="rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
-              <div className="flex items-center justify-between">
-                <span className="text-[13px] font-medium">{c.cluster_label}</span>
-                <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                  {c.comment_count}건
-                </span>
-              </div>
-              <p className="mt-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-                {c.representative_comment}
-              </p>
-              <div className="mt-2 flex flex-wrap gap-1">
-                {c.keywords.map((k) => (
-                  <span
-                    key={k}
-                    className="rounded px-1.5 py-0.5 text-xs"
-                    style={{ background: "var(--surface-2)", color: "var(--ink-secondary)" }}
-                  >
-                    {k}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
       </Card>
 
       <Card title="전체 취식 데이터 다운로드 (기간 선택)">

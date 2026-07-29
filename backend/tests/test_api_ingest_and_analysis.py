@@ -543,3 +543,39 @@ def test_corner_core_layer_menu_pairs_unknown_corner_returns_404(client):
         params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
     )
     assert resp.status_code == 404
+
+
+def test_voe_by_category_groups_comments_into_fixed_categories(client):
+    _ingest_meal_log(client, "E1", "맛남", comment="정말 맛있어요")
+    _ingest_meal_log(client, "E2", "개선", comment="국이 너무 싱거워요")
+    _ingest_meal_log(client, "E3", "개선", comment="위생 상태가 별로였어요")
+    _ingest_meal_log(client, "E4", "개선", comment="직원분이 불친절했어요")
+    _ingest_meal_log(client, "E5", "보통", comment="그냥 평범했어요")  # 기타로 분류
+    _ingest_meal_log(client, "E6", "맛남", comment=None)  # 코멘트 없음 — 집계 제외
+
+    resp = client.get("/api/dashboard/voe-by-category", params={"period": f"{MONDAY.isoformat()[:7]}-01"})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["total_comments"] == 5
+    categories = {c["category"]: c for c in body["categories"]}
+    assert [c["category"] for c in body["categories"]] == ["맛", "간", "위생", "서비스", "기타"]
+    assert categories["맛"]["count"] == 1
+    assert categories["간"]["count"] == 1
+    assert categories["위생"]["count"] == 1
+    assert categories["서비스"]["count"] == 1
+    assert categories["기타"]["count"] == 1
+    assert categories["기타"]["comments"][0]["comment"] == "그냥 평범했어요"
+
+
+def test_voe_by_category_multi_label_comment_counted_in_both_categories(client):
+    _ingest_meal_log(client, "E1", "개선", comment="맛없고 위생도 별로예요")
+
+    resp = client.get("/api/dashboard/voe-by-category", params={"period": f"{MONDAY.isoformat()[:7]}-01"})
+    body = resp.json()
+    categories = {c["category"]: c for c in body["categories"]}
+
+    assert body["total_comments"] == 1
+    assert categories["맛"]["count"] == 1
+    assert categories["위생"]["count"] == 1
+    assert categories["간"]["count"] == 0
