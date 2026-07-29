@@ -4,6 +4,7 @@ import ReactECharts from "echarts-for-react";
 import {
   api,
   type Classification,
+  type CornerMenuThroughputResponse,
   type CornerTrendRow,
   type Granularity,
   type MenuFoodVectorRow,
@@ -34,6 +35,24 @@ function isoDaysAgo(days: number): string {
 
 const PERIOD_END = isoDaysAgo(0);
 const PERIOD_START = isoDaysAgo(180); // PRD: 취식 데이터 6개월 누적 기준
+
+// 마우스를 올리면 나오는 숫자(차트 툴팁)는 표(.toFixed(2))와 자릿수를 맞춰
+// 소수점 2자리까지만 보여준다 — axis-trigger 툴팁은 포맷터가 없으면 원본 값을
+// 그대로 보여줘 자릿수가 길어질 수 있어 이 헬퍼로 통일한다.
+function formatTooltipNumber(value: number | string): string {
+  return typeof value === "number" ? value.toFixed(2) : value;
+}
+
+function axisTooltipFormatter(
+  params: { axisValueLabel?: string; axisValue?: string; marker: string; seriesName: string; value: unknown }[],
+): string {
+  const header = params[0]?.axisValueLabel ?? params[0]?.axisValue ?? "";
+  const lines = params.map((p) => {
+    const value = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
+    return `${p.marker}${p.seriesName}: ${formatTooltipNumber(value as number | string)}`;
+  });
+  return [header, ...lines].join("<br/>");
+}
 
 // 본사/계열사/기타를 항상 이 순서·색으로 그린다 (팔레트 categorical 순서 고정 원칙).
 // 데이터 키(division 필드값)는 그대로 "본사"를 쓰되, 본사=삼성전자뿐이라 화면
@@ -73,7 +92,7 @@ function DivisionAnalysisSection() {
   const option = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 32, bottom: 28 },
-    tooltip: { trigger: "axis" },
+    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
     legend: { top: 0, textStyle: { color: chartTheme.text } },
     xAxis: {
       type: "category",
@@ -392,7 +411,7 @@ function CornerAnalysisTab() {
   const headcountOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 16, bottom: 28 },
-    tooltip: { trigger: "axis" },
+    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
     xAxis: { type: "category", data: query.data?.map((c) => c.corner_name) ?? [], ...axisStyle },
     yAxis: {
       type: "value",
@@ -413,7 +432,7 @@ function CornerAnalysisTab() {
   const satisfactionOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 40, right: 16, top: 16, bottom: 28 },
-    tooltip: { trigger: "axis" },
+    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
     xAxis: { type: "category", data: query.data?.map((c) => c.corner_name) ?? [], ...axisStyle },
     yAxis: {
       type: "value",
@@ -476,7 +495,7 @@ function CornerAnalysisTab() {
   const satisfactionTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 40, right: 16, top: 40, bottom: 28 },
-    tooltip: { trigger: "axis" },
+    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
     legend: trendLegend,
     xAxis: { type: "category", data: trendPeriods, ...axisStyle },
     yAxis: {
@@ -493,7 +512,7 @@ function CornerAnalysisTab() {
   const throughputTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 40, bottom: 28 },
-    tooltip: { trigger: "axis" },
+    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
     legend: trendLegend,
     xAxis: { type: "category", data: trendPeriods, ...axisStyle },
     yAxis: {
@@ -566,7 +585,7 @@ function CornerAnalysisTab() {
                   diet: c.is_diet_corner ? "예" : "-",
                   headcount: c.headcount_total.toLocaleString(),
                   score: c.avg_taste_score?.toFixed(2) ?? "-",
-                  throughput: c.avg_peak_throughput_per_min?.toFixed(1) ?? "-",
+                  throughput: c.avg_peak_throughput_per_min?.toFixed(2) ?? "-",
                 }))}
                 rowKey={(r) => r.corner as string}
               />
@@ -638,13 +657,127 @@ function CornerAnalysisTab() {
         )}
       </Card>
       <CornerCoreLayerSection corners={query.data ?? []} />
+      <MenuAffinitySection />
     </div>
   );
 }
 
 const ALL_MENUS_TAB = "전체";
 
+// 메뉴 쌍을 표(정확한 수치)와 함께 관계도(연결성)로도 보여준다 — 노드 크기는
+// 그 메뉴가 관련된 쌍들의 동반 인원 합, 엣지 굵기는 lift(연관 강도)에 비례.
+function buildMenuPairGraphOption(
+  pairs: MenuPairRow[],
+  nodeColor: string,
+  chartTheme: { text: string },
+) {
+  const nodeWeight = new Map<string, number>();
+  for (const p of pairs) {
+    nodeWeight.set(p.menu_a, (nodeWeight.get(p.menu_a) ?? 0) + p.co_count);
+    nodeWeight.set(p.menu_b, (nodeWeight.get(p.menu_b) ?? 0) + p.co_count);
+  }
+  const maxWeight = Math.max(1, ...nodeWeight.values());
+  const maxLift = Math.max(1, ...pairs.map((p) => p.lift));
+
+  const nodes = [...nodeWeight.entries()].map(([name, weight]) => ({
+    name,
+    symbolSize: 14 + (weight / maxWeight) * 22,
+    itemStyle: { color: nodeColor },
+    label: { show: true, position: "right" as const, color: chartTheme.text, fontSize: 11 },
+  }));
+  const edges = pairs.map((p) => ({
+    source: p.menu_a,
+    target: p.menu_b,
+    value: p.lift,
+    co_count: p.co_count,
+    lineStyle: { width: 1 + (p.lift / maxLift) * 4, color: nodeColor, opacity: 0.4, curveness: 0.1 },
+  }));
+
+  return {
+    tooltip: {
+      formatter: (params: {
+        dataType?: string;
+        name?: string;
+        data?: { source?: string; target?: string; value?: number; co_count?: number };
+      }) => {
+        if (params.dataType === "edge") {
+          const d = params.data ?? {};
+          return `${d.source} + ${d.target}<br/>동반 인원: ${d.co_count}<br/>lift: ${formatTooltipNumber(d.value ?? 0)}`;
+        }
+        return params.name ?? "";
+      },
+    },
+    series: [
+      {
+        type: "graph" as const,
+        layout: "force" as const,
+        roam: true,
+        draggable: true,
+        force: { repulsion: 140, edgeLength: [40, 100] },
+        edgeSymbol: ["none", "none"],
+        nodes,
+        edges,
+      },
+    ],
+  };
+}
+
+// 코너의 "그날 대표 메뉴"별 피크타임 처리량을 느린 순으로 보여준다 — 점선은
+// 그 코너의 전체 평균(baseline), 기준선보다 느리면 warning, 아니면 good.
+function buildMenuThroughputOption(
+  data: CornerMenuThroughputResponse,
+  chartTheme: { text: string; axis: string; grid: string },
+) {
+  const goodColor = resolveColor("var(--good)");
+  const warnColor = resolveColor("var(--warning)");
+  const baseline = data.overall_avg_throughput ?? 0;
+  const menus = data.menus;
+
+  return {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 100, right: 24, top: 16, bottom: 28 },
+    tooltip: { trigger: "axis" as const, formatter: axisTooltipFormatter },
+    xAxis: {
+      type: "value" as const,
+      name: "평균 서브속도(분당)",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    yAxis: {
+      type: "category" as const,
+      inverse: true,
+      data: menus.map((m) => m.menu_name ?? "메뉴 미배정"),
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text },
+      axisTick: { show: false },
+    },
+    series: [
+      {
+        name: "평균 서브속도",
+        type: "bar" as const,
+        barMaxWidth: 20,
+        itemStyle: {
+          borderRadius: [0, 4, 4, 0] as [number, number, number, number],
+          color: (params: { dataIndex: number }) =>
+            menus[params.dataIndex].avg_throughput < baseline ? warnColor : goodColor,
+        },
+        data: menus.map((m) => m.avg_throughput),
+        markLine:
+          data.overall_avg_throughput != null
+            ? {
+                symbol: "none" as const,
+                label: { formatter: "전체 평균", color: chartTheme.text },
+                lineStyle: { color: chartTheme.axis, type: "dashed" as const },
+                data: [{ xAxis: data.overall_avg_throughput }],
+              }
+            : undefined,
+      },
+    ],
+  };
+}
+
 function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; corner_name: string }[] }) {
+  const chartTheme = useChartTheme();
   const [selection, setSelection] = useState<string>(ALL_MENUS_TAB);
   const [minVisitCount, setMinVisitCount] = useState(3);
   const [minShare, setMinShare] = useState(30);
@@ -670,6 +803,16 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
     queryFn: () =>
       api.topMenuPairs({ period_start: PERIOD_START, period_end: PERIOD_END, min_co_count: minCoCount }),
     enabled: isAll,
+  });
+
+  const throughputQuery = useQuery({
+    queryKey: ["corner-menu-throughput", effectiveCornerId],
+    queryFn: () =>
+      api.cornerMenuThroughput(effectiveCornerId as number, {
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+      }),
+    enabled: !isAll && effectiveCornerId != null,
   });
 
   const pairColumns = [
@@ -749,7 +892,13 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
             </p>
           )}
           {allQuery.data && allQuery.data.length > 0 && (
-            <Table columns={pairColumns} rows={pairRows(allQuery.data)} rowKey={(r) => r.pair as string} />
+            <>
+              <ReactECharts
+                option={buildMenuPairGraphOption(allQuery.data, resolveColor("var(--accent)"), chartTheme)}
+                style={{ height: 320 }}
+              />
+              <Table columns={pairColumns} rows={pairRows(allQuery.data)} rowKey={(r) => r.pair as string} />
+            </>
           )}
         </>
       ) : (
@@ -767,11 +916,21 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
                     표본 부족
                   </p>
                 ) : (
-                  <Table
-                    columns={pairColumns}
-                    rows={pairRows(cornerQuery.data.core_layer.top_pairs)}
-                    rowKey={(r) => r.pair as string}
-                  />
+                  <>
+                    <ReactECharts
+                      option={buildMenuPairGraphOption(
+                        cornerQuery.data.core_layer.top_pairs,
+                        resolveColor("var(--series-1)"),
+                        chartTheme,
+                      )}
+                      style={{ height: 260 }}
+                    />
+                    <Table
+                      columns={pairColumns}
+                      rows={pairRows(cornerQuery.data.core_layer.top_pairs)}
+                      rowKey={(r) => r.pair as string}
+                    />
+                  </>
                 )}
               </div>
               <div>
@@ -783,15 +942,43 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
                     표본 부족
                   </p>
                 ) : (
-                  <Table
-                    columns={pairColumns}
-                    rows={pairRows(cornerQuery.data.non_core.top_pairs)}
-                    rowKey={(r) => r.pair as string}
-                  />
+                  <>
+                    <ReactECharts
+                      option={buildMenuPairGraphOption(
+                        cornerQuery.data.non_core.top_pairs,
+                        resolveColor("var(--series-2)"),
+                        chartTheme,
+                      )}
+                      style={{ height: 260 }}
+                    />
+                    <Table
+                      columns={pairColumns}
+                      rows={pairRows(cornerQuery.data.non_core.top_pairs)}
+                      rowKey={(r) => r.pair as string}
+                    />
+                  </>
                 )}
               </div>
             </div>
           )}
+          <div className="mt-6">
+            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              메뉴별 피크타임 서브속도 — 그날 이 코너의 대표 메뉴 기준(점선은 전체 평균, 그보다 느리면 주황)
+            </p>
+            {throughputQuery.isLoading && <LoadingState />}
+            {throughputQuery.isError && <ErrorState error={throughputQuery.error} />}
+            {throughputQuery.data && throughputQuery.data.menus.length === 0 && (
+              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                표본 부족
+              </p>
+            )}
+            {throughputQuery.data && throughputQuery.data.menus.length > 0 && (
+              <ReactECharts
+                option={buildMenuThroughputOption(throughputQuery.data, chartTheme)}
+                style={{ height: Math.max(160, throughputQuery.data.menus.length * 32) }}
+              />
+            )}
+          </div>
         </>
       )}
     </Card>
@@ -867,7 +1054,7 @@ function MenuQuadrantTab() {
     grid: { left: 48, right: 24, top: 16, bottom: 40 },
     tooltip: {
       formatter: (p: { data: { name: string; value: number[] } }) =>
-        `${p.data.name}<br/>1회 제공당 식수: ${p.data.value[0].toFixed(1)}<br/>만족도: ${p.data.value[1].toFixed(2)}`,
+        `${p.data.name}<br/>1회 제공당 식수: ${p.data.value[0].toFixed(2)}<br/>만족도: ${p.data.value[1].toFixed(2)}`,
     },
     xAxis: {
       type: "value",
@@ -1181,7 +1368,6 @@ export function AnalysisPage() {
       {tab === "menus" && (
         <div className="space-y-4">
           <MenuQuadrantTab />
-          <MenuAffinitySection />
           <MenuFoodVectorAdminSection />
         </div>
       )}

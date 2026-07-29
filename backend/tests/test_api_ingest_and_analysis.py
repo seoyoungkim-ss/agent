@@ -629,6 +629,50 @@ def test_taste_clusters_recompute_and_list(client, db_session):
     assert resp.json()["cluster_label"] is not None
 
 
+def test_taste_clusters_exclude_take_out_from_dominant_corner_and_top_menus(client, db_session):
+    # 사번당 Take Out 방문(2회)이 한식 방문(1회)보다 많게 구성 — 제외 규칙이 없으면
+    # dominant_corner/top_menus가 "Take Out"/"선택형 Take out"으로 잘못 나온다.
+    def eat(employee_id, corner_name, menu_name, minute):
+        r = client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(11, minute)).isoformat(),
+                        "employee_id": employee_id,
+                        "meal_type": "중식",
+                        "corner_name": corner_name,
+                        "menu_name": menu_name,
+                        "taste_score": "맛남",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+
+    for i in range(4):
+        eat(f"T{i}", "한식", "김치찌개", i)
+        eat(f"T{i}", "Take Out", "선택형 Take out", 10 + i)
+        eat(f"T{i}", "Take Out", "선택형 Take out", 20 + i)
+
+    _set_food_vector(db_session, "김치찌개", [0.5] * 10)
+
+    resp = client.post("/api/analysis/users/taste-profile/recompute")
+    assert resp.status_code == 200
+    assert resp.json()["updated_employees"] == 4
+
+    resp = client.post("/api/analysis/users/taste-clusters/recompute", params={"k": 1})
+    assert resp.status_code == 200
+    assert resp.json()["clusters_created"] == 1
+
+    resp = client.get("/api/analysis/users/taste-clusters")
+    cluster = resp.json()[0]
+    assert cluster["dominant_corner"] == "한식"
+    assert "선택형 Take out" not in cluster["top_menus"]
+    assert cluster["top_menus"] == ["김치찌개"]
+
+
 def test_menu_affinity_finds_co_occurring_menu(client):
     # 떡볶이 먹는 3명 중 2명이 짜장면도 먹음
     def eat(employee_id, menu_name, minute):
@@ -834,6 +878,49 @@ def test_corner_core_layer_menu_pairs_excludes_take_out_placeholder_menus(client
 def test_corner_core_layer_menu_pairs_unknown_corner_returns_404(client):
     resp = client.get(
         "/api/analysis/corners/999999/core-layer-menu-pairs",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 404
+
+
+def test_corner_menu_throughput_sorts_slowest_menu_first(client, db_session):
+    # 느린메뉴가 나온 날은 피크타임(11:40~12:00, _ingest_meal_log 기본 취식시각
+    # 11:52는 이 구간 안)에 2명만 먹고, 빠른메뉴가 나온 날은 10명이 먹는다 —
+    # 처리량(분당 서브)이 낮을수록(=느릴수록) 먼저 나와야 한다.
+    for i in range(2):
+        _ingest_meal_log(client, f"S{i}", "맛남", eaten_date=MONDAY, menu_name="느린메뉴", corner_name="한식")
+    for i in range(2):
+        _ingest_meal_log(
+            client, f"S{i}b", "맛남", eaten_date=MONDAY + dt.timedelta(days=7), menu_name="느린메뉴", corner_name="한식"
+        )
+    for i in range(10):
+        _ingest_meal_log(
+            client, f"F{i}", "맛남", eaten_date=MONDAY + dt.timedelta(days=1), menu_name="빠른메뉴", corner_name="한식"
+        )
+    for i in range(10):
+        _ingest_meal_log(
+            client, f"F{i}b", "맛남", eaten_date=MONDAY + dt.timedelta(days=8), menu_name="빠른메뉴", corner_name="한식"
+        )
+
+    from app.models.master import CornerMaster
+
+    corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    resp = client.get(
+        f"/api/analysis/corners/{corner.corner_id}/menu-throughput",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=8)).isoformat()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [m["menu_name"] for m in body["menus"]] == ["느린메뉴", "빠른메뉴"]
+    assert body["menus"][0]["avg_throughput"] < body["menus"][1]["avg_throughput"]
+    assert body["menus"][0]["day_count"] == 2
+    assert body["overall_avg_throughput"] is not None
+
+
+def test_corner_menu_throughput_unknown_corner_returns_404(client):
+    resp = client.get(
+        "/api/analysis/corners/999999/menu-throughput",
         params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
     )
     assert resp.status_code == 404

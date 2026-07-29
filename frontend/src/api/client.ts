@@ -181,6 +181,20 @@ export interface CornerCoreLayerMenuPairsResponse {
   };
 }
 
+export interface MenuThroughputRow {
+  menu_id: number;
+  menu_name: string | null;
+  avg_throughput: number;
+  day_count: number;
+}
+
+export interface CornerMenuThroughputResponse {
+  corner_id: number;
+  corner_name: string;
+  overall_avg_throughput: number | null;
+  menus: MenuThroughputRow[];
+}
+
 export type FoodVectorSource = "규칙기반" | "LLM추정" | "관리자수동";
 
 export interface MenuFoodVectorRow {
@@ -318,6 +332,12 @@ export const api = {
     request<CornerCoreLayerMenuPairsResponse>(
       `/analysis/corners/${cornerId}/core-layer-menu-pairs${qs(params)}`,
     ),
+
+  cornerMenuThroughput: (
+    cornerId: number,
+    params: { period_start: string; period_end: string; min_day_count?: number },
+  ) =>
+    request<CornerMenuThroughputResponse>(`/analysis/corners/${cornerId}/menu-throughput${qs(params)}`),
 
   topMenuPairs: (params: { period_start: string; period_end: string; min_co_count?: number; top_n?: number }) =>
     request<MenuPairRow[]>(`/analysis/menu-pairs/top${qs(params)}`),

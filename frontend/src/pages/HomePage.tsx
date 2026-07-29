@@ -29,6 +29,29 @@ function isoDaysAgo(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
+
+// x축 날짜를 "MM-DD(요일)"로 보여줘 월~일 순서가 한눈에 보이게 한다.
+function weekdayLabel(dateIso: string): string {
+  return `${dateIso.slice(5)}(${WEEKDAY_KO[new Date(dateIso).getDay()]})`;
+}
+
+// 마우스를 올리면 나오는 숫자(차트 툴팁)는 소수점 2자리까지만 보여준다.
+function formatTooltipNumber(value: number | string): string {
+  return typeof value === "number" ? value.toFixed(2) : value;
+}
+
+function axisTooltipFormatter(
+  params: { axisValueLabel?: string; axisValue?: string; marker: string; seriesName: string; value: unknown }[],
+): string {
+  const header = params[0]?.axisValueLabel ?? params[0]?.axisValue ?? "";
+  const lines = params.map((p) => {
+    const value = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
+    return `${p.marker}${p.seriesName}: ${formatTooltipNumber(value as number | string)}`;
+  });
+  return [header, ...lines].join("<br/>");
+}
+
 function addDays(iso: string, days: number): string {
   const d = new Date(iso);
   d.setDate(d.getDate() + days);
@@ -112,16 +135,22 @@ export function HomePage() {
   const chartTheme = useChartTheme();
   const seriesWeekday = resolveColor("var(--series-1)");
   const seriesHoliday = resolveColor("var(--series-2)");
+  const holidayColor = resolveColor("var(--critical)");
+  const classificationByDate = new Map((weekly.data ?? []).map((d) => [d.date, d.classification]));
+  const weekdayAxisLabel = {
+    color: (value: string) => (classificationByDate.get(value) === "주말+공휴일" ? holidayColor : chartTheme.text),
+    formatter: (value: string) => weekdayLabel(value),
+  };
 
   const chartOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 16, bottom: 28 },
-    tooltip: { trigger: "axis" },
+    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
     xAxis: {
       type: "category",
-      data: weekly.data?.map((d) => d.date.slice(5)) ?? [],
+      data: weekly.data?.map((d) => d.date) ?? [],
       axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: { color: chartTheme.text },
+      axisLabel: weekdayAxisLabel,
       axisTick: { show: false },
     },
     yAxis: {
@@ -162,13 +191,13 @@ export function HomePage() {
   const cornerTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 32, bottom: 28 },
-    tooltip: { trigger: "axis" },
+    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
     legend: { top: 0, textStyle: { color: chartTheme.text }, data: trendCornersHome.map((c) => c.corner_name) },
     xAxis: {
       type: "category",
-      data: cornerTrendDays.map((d) => d.slice(5)),
+      data: cornerTrendDays,
       axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: { color: chartTheme.text },
+      axisLabel: weekdayAxisLabel,
       axisTick: { show: false },
     },
     yAxis: {

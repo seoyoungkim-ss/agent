@@ -31,6 +31,7 @@ from app.services.menu_affinity import (
     compute_menu_affinity,
     compute_top_menu_pairs,
 )
+from app.services.menu_throughput import build_corner_daily_throughput, compute_menu_throughput_summary
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
 
@@ -252,6 +253,44 @@ def corner_core_layer_menu_pairs(
                 compute_top_menu_pairs(non_core_menus, min_co_count=min_co_count, top_n=top_n)
             ),
         },
+    }
+
+
+@router.get("/corners/{corner_id}/menu-throughput")
+def corner_menu_throughput(
+    corner_id: int,
+    period_start: dt.date,
+    period_end: dt.date,
+    min_day_count: int = 2,
+    db: Session = Depends(get_db),
+):
+    """PRD 6.2: 그 코너에서 특정 메뉴가 나온 날의 피크타임 분당 서브 속도 비교.
+
+    `daily_corner_stats`의 서브속도는 코너 단위라 메뉴 연관성을 볼 수 없다 —
+    `meal_log`에서 날짜별 대표 메뉴(최빈 menu_id)를 구해 메뉴별 평균 처리량을
+    `overall_avg_throughput`(기준선) 대비 오름차순(느린 메뉴 먼저)으로 반환한다.
+    """
+    corner = db.get(CornerMaster, corner_id)
+    if corner is None:
+        raise HTTPException(status_code=404, detail="코너를 찾을 수 없습니다")
+
+    days = build_corner_daily_throughput(db, corner_id, period_start, period_end)
+    summary = compute_menu_throughput_summary(days, min_day_count=min_day_count)
+    menu_names = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
+
+    return {
+        "corner_id": corner_id,
+        "corner_name": corner.corner_name,
+        "overall_avg_throughput": summary.overall_avg_throughput,
+        "menus": [
+            {
+                "menu_id": e.menu_id,
+                "menu_name": menu_names.get(e.menu_id),
+                "avg_throughput": e.avg_throughput,
+                "day_count": e.day_count,
+            }
+            for e in summary.menus
+        ],
     }
 
 

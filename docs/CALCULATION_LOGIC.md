@@ -1361,3 +1361,122 @@ def _corner_id_by_menu_from_meal_log(
 **테스트**: `test_llm_client.py`에 `test_chat_stream_bypasses_proxy_env_vars`,
 `test_embed_bypasses_proxy_env_vars` 추가 — 패치된 `AsyncClient` 생성자에
 전달된 kwargs를 캡처해 `trust_env=False`가 실제로 넘어가는지 확인.
+
+---
+
+## 35. 분석/현황 UI 개선 7건 — 위치 이동·관계도·Take Out 제외·툴팁·메뉴별 처리량·요일표시 (2026-07)
+
+### 35.1 메뉴 동반 선택 경향성 위치 이동
+
+`MenuAffinitySection`(독립적인 메뉴명 검색 — 코너 파라미터 없음)을 "메뉴
+4분면" 탭에서 "코너별 분석" 탭의 `CornerCoreLayerSection` 바로 아래로
+옮겼다(`frontend/src/pages/AnalysisPage.tsx`). 렌더 위치만 바뀌었고 컴포넌트
+로직은 그대로다.
+
+### 35.2 코너 코어층 × 메뉴 동반 선택 쌍 — 관계도(네트워크 그래프)
+
+기존 표(lift/동반 인원 나열)는 그대로 두고, 그 위에 ECharts `graph`
+시리즈(force layout)로 관계도를 추가했다(`buildMenuPairGraphOption`,
+`AnalysisPage.tsx`). 표는 정확한 수치 조회용으로 남기고 관계도는 "누가
+누구와 자주 엮이는지"를 한눈에 보는 용도 — 툴팁은 enhance일 뿐 값 자체는
+표로도 항상 접근 가능하게 유지했다(dataviz 가이드).
+
+- 노드 크기 = 그 메뉴가 관련된 쌍들의 `co_count` 합에 비례
+- 엣지 굵기/불투명도 = `lift`에 비례
+- 색상: "전체" 모드는 `--accent` 단색, 코너 선택 모드는 코어층
+  `--series-1`(파랑)/나머지 `--series-2`(주황) — 기존 두 표의 `grid-cols-2`
+  레이아웃과 동일하게 나란히 배치, 카테고리 팔레트 순서 그대로 재사용(새
+  색 검증 불필요)
+
+### 35.3 취향 군집 요약에서 Take Out 제외
+
+**파일**: `backend/app/services/taste_clustering.py::compute_taste_clusters`
+
+27절(4분면)·33절(메뉴 동반선택 쌍)에서 쓰던 `master_data.py`의
+`PLACEHOLDER_MENU_NAMES`/`TAKE_OUT_CORNER_NAME`을 그대로 재사용해, 클러스터의
+`top_menus`/`dominant_corner` 집계에서 Take Out 관련 값을 제외했다:
+```python
+menu_counter = Counter(
+    name for l in logs
+    if (name := menu_names.get(l.menu_id)) and name not in PLACEHOLDER_MENU_NAMES
+)
+corner_counter = Counter(
+    name for l in logs
+    if (name := corner_names.get(l.corner_id)) and name != TAKE_OUT_CORNER_NAME
+)
+```
+순환 임포트 없음(`master_data.py`는 `taste_clustering.py`를 참조하지 않음).
+
+**테스트**: `test_taste_clusters_exclude_take_out_from_dominant_corner_and_
+top_menus`(`test_api_ingest_and_analysis.py`) — 사번당 Take Out 방문(2회)이
+한식 방문(1회)보다 많게 구성해, 제외 규칙이 없으면 `dominant_corner`가
+"Take Out"으로 잘못 나오는 걸 확실히 잡아내도록 함.
+
+### 35.4 차트 툴팁 소수점 2자리
+
+`Table` 컴포넌트엔 호버 툴팁이 없다 — 이 앱에서 "마우스를 올리면 숫자가
+나오는" 곳은 ECharts 차트 툴팁뿐이다. 공용 헬퍼 `formatTooltipNumber`/
+`axisTooltipFormatter`를 `AnalysisPage.tsx`·`HomePage.tsx` 각각에 추가하고
+(페이지 간 로컬 헬퍼 중복은 `isoDaysAgo`처럼 기존 컨벤션), 포맷터 없이
+원본 값을 그대로 보여주던 axis-trigger 툴팁 전부에 적용했다. 기존
+`.toFixed(1)` 쓰던 곳(4분면 산점도 "1회 제공당 식수", 코너 요약 표의
+"피크타임 분당 서브")도 `.toFixed(2)`로 통일해 자릿수를 맞췄다.
+
+⚠️ 참고: axis-trigger 툴팁의 헤더(날짜)는 ECharts `axisValueLabel`이
+함수형 `axisLabel.formatter`를 항상 반영하지는 않아 원본 ISO 날짜로 표시될
+수 있음(값 자체는 정상적으로 2자리 반올림됨) — 표시값 정확도에는 영향
+없는 사소한 표기 차이.
+
+### 35.5 코너별 "메뉴 있는 날 피크타임 서브속도" 비교
+
+**파일**: `backend/app/services/menu_throughput.py`(신규)
+
+`aggregate_daily_stats`(6절)는 코너/식사구분 단위로만 피크타임 처리량을
+계산해 메뉴 연관성을 볼 수 없었다. `meal_log`엔 이미 `menu_id`가 있으므로
+(32절 "meal_log를 신뢰" 원칙과 동일하게, `weekly_menu_plan` 별도 업로드에
+의존하지 않음) 새 컬럼 없이 계산 가능:
+
+```python
+def build_corner_daily_throughput(db, corner_id, period_start, period_end, settings=None) -> list[DayThroughput]:
+    # 코너의 날짜별로: peak 구간 count/분(aggregate_daily_stats와 동일 계산 방식) +
+    # 그날 그 코너 meal_log의 최빈 menu_id("그날의 대표 메뉴")
+def compute_menu_throughput_summary(days, *, min_day_count=2) -> MenuThroughputSummary:
+    # 순수 함수 — 대표 메뉴별 평균 처리량 + 전체 평균(baseline).
+    # day_count < min_day_count인 메뉴는 표본 부족으로 제외(4분면 low_sample과 동일 사상)
+```
+`build_corner_daily_throughput`(DB 오케스트레이션) + `compute_menu_
+throughput_summary`(순수 함수) 분리는 이 리포지토리의 기존 컨벤션.
+
+**API**: `GET /analysis/corners/{corner_id}/menu-throughput?period_start&
+period_end&min_day_count=2`(`analysis.py`) — `avg_throughput` 오름차순(느린
+메뉴 먼저)으로 반환, `overall_avg_throughput`이 기준선.
+
+**프론트**: `CornerCoreLayerSection`의 코너 선택 상태를 그대로 재사용 —
+코어층/나머지 표 아래에 가로 막대차트(`buildMenuThroughputOption`) 추가.
+느린 메뉴가 위로 오게 `yAxis.inverse: true`, `markLine`으로 기준선 점선,
+기준선보다 느리면 `--warning`, 아니면 `--good`(기존 `QuadrantBadge`가 쓰는
+상태색 재사용 — 막대 자체가 상태를 표시하므로 별도 범례 불필요).
+
+**테스트**: `test_menu_throughput.py`(순수 함수 4개),
+`test_corner_menu_throughput_sorts_slowest_menu_first`/
+`test_corner_menu_throughput_unknown_corner_returns_404`
+(`test_api_ingest_and_analysis.py`).
+
+### 35.6·35.7 홈 현황 주간 차트 — 요일 표시 + 주말/공휴일 빨간색
+
+`_compute_weekly_summary`(22절, `backend/app/api/dashboard.py`)는
+`start_date`(항상 그 주 월요일)부터 하루씩 증가시키며 반환해 **이미
+월→일 순서**였다(정렬 버그 없음, 코드 확인). 다만 x축 라벨이 "MM-DD"만
+보여줘 순서가 눈에 안 띄고, 주말/공휴일도 막대 색(범례)만 다를 뿐 날짜
+자체는 구분이 없었다.
+
+`frontend/src/pages/HomePage.tsx`에 `weekdayLabel(dateIso)`(요일 접미사
+추가)와 `classificationByDate` 맵을 추가해, "주간 식수 추이"·"코너별 주간
+식수 추이" 두 차트의 `xAxis.axisLabel`에 함수형 `formatter`(요일 표시)와
+`color`(주말/공휴일이면 `--critical`, 아니면 기본 텍스트색) 콜백을 붙였다.
+`xAxis.data`는 `.slice(5)`로 미리 자르지 않고 원본 ISO 날짜를 그대로
+유지해야 `classificationByDate.get(value)` 조회가 맞아떨어진다.
+
+**테스트**: 프론트 전용 시각적 변경이라 별도 단위테스트 없음 — Playwright
+스크린샷으로 x축이 "07-27(월)"~"08-02(일)" 순서로 나오고 토/일이 빨간색인
+것을 확인.

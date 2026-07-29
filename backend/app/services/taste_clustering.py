@@ -21,6 +21,7 @@ from app.models.logs import MealLog
 from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import EmployeeTasteProfile, TasteCluster
 from app.services.food_vector import FOOD_VECTOR_DIMENSIONS, FOOD_VECTOR_LABELS_KO
+from app.services.master_data import PLACEHOLDER_MENU_NAMES, TAKE_OUT_CORNER_NAME
 
 # 이 값보다 평균에서 튀어야 "선호형" 라벨에 그 차원 이름을 넣는다(0~1 스케일 기준).
 _LABEL_DEVIATION_THRESHOLD = 0.12
@@ -99,9 +100,18 @@ def compute_taste_clusters(
     for cluster_idx, member_ids in members_by_cluster.items():
         logs = db.query(MealLog).filter(MealLog.employee_id.in_(member_ids)).all()
 
-        menu_counter = Counter(menu_names[l.menu_id] for l in logs if l.menu_id in menu_names)
+        # Take Out은 세부 메뉴/코너 의미가 없는 플레이스홀더라 "대표 메뉴"/"주 이용
+        # 코너" 요약에서 제외한다 — 4분면·메뉴 동반선택 쌍에 이미 적용한 것과 같은
+        # 규칙(master_data.py의 상수를 공유).
+        menu_counter = Counter(
+            name
+            for l in logs
+            if (name := menu_names.get(l.menu_id)) and name not in PLACEHOLDER_MENU_NAMES
+        )
         corner_counter = Counter(
-            corner_names[l.corner_id] for l in logs if l.corner_id in corner_names
+            name
+            for l in logs
+            if (name := corner_names.get(l.corner_id)) and name != TAKE_OUT_CORNER_NAME
         )
         scores = [TASTE_SCORE_POINTS[l.taste_score] for l in logs if l.taste_score is not None]
 
