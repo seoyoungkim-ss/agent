@@ -96,3 +96,16 @@ def test_column_order_independent():
 def test_blank_row_skipped():
     rows = parse_meal_transaction_grid(_grid(_row(), ["" for _ in HEADERS]))
     assert len(rows) == 1
+
+
+def test_12_hour_am_pm_datetime_parsed():
+    # 실측 데이터의 일시 형식: "2026-03-31  7:04:43 PM" (12시간제, 시 0-padding 없음,
+    # 날짜-시간 사이 공백 2개 — strptime은 포맷 문자열의 공백을 \s+로 컴파일하므로
+    # 공백 개수 차이는 문제되지 않는다).
+    rows = parse_meal_transaction_grid(_grid(_row(일시="2026-03-31  7:04:43 PM")))
+    assert rows[0].eaten_at == dt.datetime(2026, 3, 31, 19, 4, 43)
+
+
+def test_12_hour_am_datetime_parsed():
+    rows = parse_meal_transaction_grid(_grid(_row(일시="2026-03-31 7:04:43 AM")))
+    assert rows[0].eaten_at == dt.datetime(2026, 3, 31, 7, 4, 43)

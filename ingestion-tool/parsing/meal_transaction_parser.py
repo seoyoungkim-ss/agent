@@ -65,7 +65,13 @@ def _parse_datetime(value: Any) -> dt.datetime:
     if isinstance(value, dt.date):
         return dt.datetime.combine(value, dt.time())
     text = _clean(value)
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y-%m-%d %I:%M:%S %p",  # 12시간제 + AM/PM, 예: "2026-03-31 7:04:43 PM"
+    ):
         try:
             return dt.datetime.strptime(text, fmt)
         except ValueError:
