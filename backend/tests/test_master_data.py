@@ -11,7 +11,7 @@ def test_take_out_aliases_merge_into_single_corner(db_session):
     r, r_is_new = get_or_create_corner(db_session, "Take Out R")
     m, m_is_new = get_or_create_corner(db_session, "Take Out M")
     l, l_is_new = get_or_create_corner(db_session, "Take Out L")
-    s, s_is_new = get_or_create_corner(db_session, "선택형 Take Out")
+    s, s_is_new = get_or_create_corner(db_session, "선택형 Take out")
 
     assert r_is_new is True
     assert m_is_new is False

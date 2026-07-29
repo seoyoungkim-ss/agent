@@ -971,8 +971,8 @@ period_and_corner`.
 
 ## 24. Take Out 4번째 별칭, 사번 ".0" 정규화, 전체 메뉴 동반선택, 홈 코너별 추이 (2026-07)
 
-**Take Out 4번째 별칭 — "선택형 Take Out"**: 23절에서 다룬 R/M/L 외에 "선택형
-Take Out"이라는 코너명도 같은 Take Out을 가리킨다는 게 추가로 확인됐다.
+**Take Out 4번째 별칭 — "선택형 Take out"**: 23절에서 다룬 R/M/L 외에 "선택형
+Take out"이라는 코너명도 같은 Take Out을 가리킨다는 게 추가로 확인됐다.
 `TAKE_OUT_ALIASES`(`app/services/master_data.py`)에 추가만 하면 되도록
 설계해뒀으므로 이 항목만 넣었다 — 정규화(`_normalize_corner_name`)와 백필
 스크립트(`merge_take_out_corners.py`)는 모두 이 집합을 그대로 참조해 자동
@@ -1012,7 +1012,7 @@ Take Out은 제외하지 않는다(홈 화면은 "취식 수 추이" 맥락이�
 옴)의 corner_id 기준으로 고정해, `AnalysisPage.tsx`의 코너별 파이/추이
 차트와 같은 색 안정성 원칙을 따른다.
 
-**테스트**: `test_master_data.py`에 "선택형 Take Out" 별칭 케이스와
+**테스트**: `test_master_data.py`에 "선택형 Take out" 별칭 케이스와
 `normalize_employee_id`/`get_or_create_employee` 정규화 테스트 추가,
 `test_maintenance_normalize_employee_ids.py`(신규, 병합·idempotent 검증),
 `test_api_ingest_and_analysis.py::test_top_menu_pairs_ignores_corner_and_

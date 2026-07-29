@@ -12,9 +12,10 @@ from app.services.food_vector_tagging import tag_food_vector_from_name
 _GREEN_MEAT_NAMES = {"그린미트"}
 
 TAKE_OUT_CORNER_NAME = "Take Out"
-# 취식기록 "코너" 컬럼 원문 — 같은 Take Out을 R/M/L 단말기 + "선택형 Take Out"으로
-# 나눠 찍는다(2026-07 실사용 확인). 전부 하나의 코너로 합친다.
-TAKE_OUT_ALIASES = {"Take Out R", "Take Out M", "Take Out L", "선택형 Take Out"}
+# 취식기록 "코너" 컬럼 원문 — 같은 Take Out을 R/M/L 단말기 + "선택형 Take out"으로
+# 나눠 찍는다(2026-07 실사용 확인 — "선택형 Take out"은 소문자 o). 전부 하나의
+# 코너로 합친다.
+TAKE_OUT_ALIASES = {"Take Out R", "Take Out M", "Take Out L", "선택형 Take out"}
 
 _TRAILING_DOT_ZERO = re.compile(r"^(\d+)\.0$")
 
