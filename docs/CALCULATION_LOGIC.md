@@ -1065,3 +1065,30 @@ YYYY-MM-01`(수동 트리거, 홈 화면의 "이번 달 재계산" 버튼)을 �
 `test_api_ingest_and_analysis.py::test_voe_by_category_prefers_stored_llm_
 categories_over_rule_based`, `::test_voe_by_category_recompute_falls_back_
 to_rules_when_llm_unconfigured`.
+
+## 26. 사번 ".0" 분리로 생긴 중복 취식 기록 — `dedupe_meal_log.py` (2026-07)
+
+**증상**: 실사용 데이터를 다운로드해 보니 맛평가·의견이 전부 비어 있었다
+(0건). ingestion-tool의 `--debug-sample` 진단(21절)으로는 맛평가 1,690건 중
+851건이 정상적으로 매칭됐다는 게 이미 확인된 상태라, 매칭 자체는 문제가 아니었다.
+
+**원인**: 사번이 "12345678"/"12345678.0"으로 갈라져 있던 동안(24절 이전),
+같은 취식 기록이 서로 다른 시점에 **두 번 따로 적재**됐다 — 한 번은 맛평가가
+매칭된 상태로, 한 번은 안 된 상태로(또는 그 반대). `meal_log`는 append-only라
+자연 중복 방지가 없으므로, 사번 표기가 다르면 완전히 다른 기록으로 보여 그냥
+둘 다 쌓인다. `normalize_employee_ids.py`(24절)로 사번을 합치고 나면, 그제서야
+"같은 사번·같은 일시·같은 식사구분·같은 코너·같은 메뉴"인 완전한 중복이 같은
+사번 아래 드러난다 — 이 중 하나가 우연히 맛평가가 없는 쪽이었고, 다운로드한
+데이터가 그 미매칭 사본에 치우쳐 있어 "맛평가가 전부 비어있다"처럼 보였다.
+
+**해결**: `app/maintenance/dedupe_meal_log.py`(신규) — `(사번, 취식일시,
+식사구분, 코너, 메뉴)` 조합이 완전히 같은 행이 여러 개면 하나만 남긴다.
+맛평가(`taste_score`)가 있는 행을 우선 남겨서, 중복 제거 과정에서 실제 평가
+데이터를 잃지 않게 한다(동점이면 먼저 적재된 행). **`normalize_employee_ids.py`
+를 먼저 실행해 사번을 합친 뒤에 이 스크립트를 돌려야 한다** — 사번이 안 합쳐진
+상태에서는 중복이 같은 그룹으로 안 잡힌다. 실행 후엔 다른 백필 스크립트들과
+마찬가지로 배치 집계(`daily-stats/recompute`, `menu-performance/recompute`)를
+다시 계산해야 한다.
+
+**테스트**: `test_maintenance_dedupe_meal_log.py`(신규) — 완전 중복 제거하며
+맛평가 있는 쪽 우선 보존, 코너가 다르면(진짜 다른 기록) 안 지움, idempotent.

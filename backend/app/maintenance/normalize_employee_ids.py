@@ -11,6 +11,11 @@ employee_master에 "12345678"과 "12345678.0"이 서로 다른 사번(행)으로
 여러 번 실행해도 안전하다(idempotent) — 이미 정리됐으면 조용히 종료한다. 실행
 후에는 daily_division_stats/employee_taste_profile을 다시 계산해야 한다(안내
 메시지 참고).
+
+⚠️ 사번이 "12345678"/"12345678.0"으로 갈라져 있던 동안 같은 취식 기록이 각각
+따로 적재됐다면(예: 맛평가 매칭 전/후로 나눠 재적재한 경우), 이 스크립트로
+사번을 합친 뒤에 완전히 같은 취식 기록이 중복으로 남을 수 있다 — 이 경우
+`python -m app.maintenance.dedupe_meal_log`를 이어서 실행해야 한다.
 """
 
 from sqlalchemy.orm import Session
@@ -53,7 +58,8 @@ def run() -> None:
             print("정리할 사번(.0 표기)이 없습니다 (이미 정리됐거나 해당 없음).")
             return
         print(f"✅ 사번의 '.0' 표기를 정리했습니다 (meal_log {reassigned}행 재배정).")
-        print("⚠️ daily_division_stats/daily_corner_stats, employee_taste_profile을 다시 계산해야 합니다 —")
+        print("⚠️ 이어서 python -m app.maintenance.dedupe_meal_log를 실행해 중복 취식 기록을 정리하세요.")
+        print("⚠️ 그 다음 daily_division_stats/daily_corner_stats, employee_taste_profile을 다시 계산해야 합니다 —")
         print("   '최근 180일 배치 집계 재계산' 버튼과 POST /api/analysis/users/taste-profile/recompute를 호출하세요.")
     finally:
         db.close()
