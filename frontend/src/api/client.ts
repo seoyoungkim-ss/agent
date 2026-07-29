@@ -213,6 +213,11 @@ export const api = {
   voeByCategory: (period: string) =>
     request<VoeByCategoryResponse>(`/dashboard/voe-by-category${qs({ period })}`),
 
+  recomputeVoeByCategory: (period: string) =>
+    request<{ classified_comments: number }>(`/dashboard/voe-by-category/recompute${qs({ period })}`, {
+      method: "POST",
+    }),
+
   cornerAnalysis: (params: {
     period_start: string;
     period_end: string;

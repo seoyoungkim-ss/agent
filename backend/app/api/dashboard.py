@@ -7,12 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
 from app.models.logs import MealLog
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import DailyDivisionStats, MenuPerformanceStats, MonthlyVoeCluster
 from app.services.holidays import DayClassification, HolidayService
+from app.services.llm_client import InternalLLMClient
 from app.services.voe_category import OTHER_CATEGORY, VOE_CATEGORIES, classify_voe_categories
+from app.services.voe_category_llm import classify_monthly_voe_via_llm
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -208,7 +211,7 @@ def voe_by_category(period: dt.date, db: Session = Depends(get_db)):
     month_start_dt = dt.datetime.combine(month_start, dt.time())
 
     rows = (
-        db.query(MealLog.comment, MealLog.eaten_at, CornerMaster.corner_name)
+        db.query(MealLog.comment, MealLog.eaten_at, CornerMaster.corner_name, MealLog.voe_categories)
         .join(CornerMaster, MealLog.corner_id == CornerMaster.corner_id)
         .filter(
             MealLog.eaten_at >= month_start_dt,
@@ -220,12 +223,14 @@ def voe_by_category(period: dt.date, db: Session = Depends(get_db)):
 
     buckets: dict[str, list[dict]] = {c: [] for c in [*VOE_CATEGORIES, OTHER_CATEGORY]}
     total_comments = 0
-    for comment, eaten_at, corner_name in rows:
+    for comment, eaten_at, corner_name, voe_categories in rows:
         if not comment or not comment.strip():
             continue
         total_comments += 1
         entry = {"eaten_at": eaten_at.isoformat(), "corner_name": corner_name, "comment": comment}
-        matched = classify_voe_categories(comment)
+        # voe_categories가 채워져 있으면 그 달 LLM 배치 결과(voe_category_llm.py)를
+        # 쓰고, 아직 배치가 안 돈 경우(NULL)만 규칙 기반으로 그때그때 대체한다.
+        matched = voe_categories if voe_categories is not None else classify_voe_categories(comment)
         for category in matched or [OTHER_CATEGORY]:
             buckets[category].append(entry)
 
@@ -236,3 +241,17 @@ def voe_by_category(period: dt.date, db: Session = Depends(get_db)):
             for category in [*VOE_CATEGORIES, OTHER_CATEGORY]
         ],
     }
+
+
+@router.post("/voe-by-category/recompute")
+async def recompute_voe_by_category(period: dt.date, db: Session = Depends(get_db)):
+    """그 달의 meal_log.voe_categories를 사내 LLM으로 다시 계산한다(누적 저장).
+
+    매달 새벽 스케줄러(app/scheduler.py::run_monthly_voe_category_classification)가
+    지난달치를 자동으로 돌리지만, 이번 달 데이터를 배치를 기다리지 않고 바로
+    반영하고 싶을 때 수동으로 트리거하는 용도다.
+    """
+    settings = get_settings()
+    client = InternalLLMClient(settings)
+    classified = await classify_monthly_voe_via_llm(db, period.replace(day=1), client)
+    return {"classified_comments": classified}

@@ -73,6 +73,10 @@ export function HomePage() {
     queryKey: ["voe-by-category", selectedMonday.slice(0, 7)],
     queryFn: () => api.voeByCategory(`${selectedMonday.slice(0, 7)}-01`),
   });
+  const recomputeVoeCategory = useMutation({
+    mutationFn: () => api.recomputeVoeByCategory(`${selectedMonday.slice(0, 7)}-01`),
+    onSuccess: () => voeCategory.refetch(),
+  });
 
   const cornerSummary = useQuery({
     queryKey: ["corner-summary", selectedMonday, sundayOfSelected],
@@ -273,9 +277,20 @@ export function HomePage() {
       </Card>
 
       <Card title="월간 VOE 분류 (맛·간·위생·서비스)">
-        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          카테고리를 클릭하면 해당 분류의 코멘트를 볼 수 있습니다. 한 코멘트가 여러 분류에 동시에 잡힐 수 있습니다.
-        </p>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            카테고리를 클릭하면 해당 분류의 코멘트를 볼 수 있습니다. 한 코멘트가 여러 분류에 동시에 잡힐 수
+            있습니다. 매달 새벽에 사내 LLM이 자동으로 분류하며, 이번 달을 바로 반영하려면 재계산하세요.
+          </p>
+          <Button
+            variant="secondary"
+            onClick={() => recomputeVoeCategory.mutate()}
+            disabled={recomputeVoeCategory.isPending}
+          >
+            {recomputeVoeCategory.isPending ? "분류 중..." : "이번 달 재계산"}
+          </Button>
+        </div>
+        {recomputeVoeCategory.isError && <ErrorState error={recomputeVoeCategory.error} />}
         {voeCategory.isLoading && <LoadingState />}
         {voeCategory.isError && <ErrorState error={voeCategory.error} />}
         {voeCategory.data && voeCategory.data.total_comments === 0 && (

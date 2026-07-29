@@ -1017,3 +1017,51 @@ Take Out은 제외하지 않는다(홈 화면은 "취식 수 추이" 맥락이�
 `test_maintenance_normalize_employee_ids.py`(신규, 병합·idempotent 검증),
 `test_api_ingest_and_analysis.py::test_top_menu_pairs_ignores_corner_and_
 covers_whole_population`.
+
+## 25. 월간 VOE 고정 분류를 LLM 기반으로 전환 — `voe_category_llm.py` (2026-07)
+
+19절에서 만든 맛/간/위생/서비스 고정 분류는 원래 키워드 문자열 부분일치
+규칙(`voe_category.py`)으로 계산했다. 실사용 피드백으로 "LLM이 키워드를 뽑고
+그 키워드로 카테고리를 매기는 방식"으로 바꿔달라는 요청이 들어와
+`voe_category_llm.py`(신규)를 추가했다. **고정 카테고리 자체(맛/간/위생/
+서비스+기타)는 그대로 유지한다** — 19절에서 이 기능을 만든 이유 자체가
+"매달 라벨이 바뀌는 K-means 클러스터(8절/`voe_clustering.py`)와 달리 리더가
+매달 같은 틀로 훑어보게 하려는 것"이었으므로, 카테고리를 LLM이 자유롭게
+바꾸게 하면 그 취지가 깨진다. 바뀐 건 "그 카테고리에 넣을지 말지 판단하는
+방법"뿐이다(문자열 매칭 → LLM 판단 + 근거 키워드).
+
+**저장 방식 — 왜 매번 계산하지 않고 누적 저장하는가**: `voe_clustering.py`의
+`cluster_monthly_voe()`와 같은 이유다 — 매번 홈 화면을 열 때마다 LLM을 부르면
+느리고 비용도 든다("누적이니 저장해두고 해", 사용자 확인). `meal_log`에
+`voe_categories`(`ARRAY(String(16))`)/`voe_keywords`(`ARRAY(String(64))`) 두
+컬럼을 추가했다(마이그레이션 `56b07f7edb3b`) — `comment_embedding` 컬럼과 같은
+패턴으로 코멘트 하나하나에 배치 계산 결과를 직접 얹어둔다. 매달 새벽
+스케줄러(`app/scheduler.py::run_monthly_voe_category_classification`, 지난달
+치를 03:15에 실행 — `monthly_voe`(03:00)와 5분 텀을 둬 순서를 명확히 함)가
+`classify_monthly_voe_via_llm()`을 돌려 채운다. 이번 달 데이터를 배치를
+기다리지 않고 반영하려면 `POST /dashboard/voe-by-category/recompute?period=
+YYYY-MM-01`(수동 트리거, 홈 화면의 "이번 달 재계산" 버튼)을 쓴다.
+
+**LLM 호출 — 배치 프롬프트**: 코멘트 하나마다 LLM을 부르면 요청 수가 너무
+많아지므로, `_BATCH_SIZE=30`개씩 묶어 한 프롬프트에 번호를 매겨 넣고
+"번호. 카테고리: A,B | 키워드: k1,k2" 형식으로 한 번에 응답받는다
+(`_classify_batch`). 응답 파싱(`_parse_batch_response`)은
+`voe_clustering.py::_summarize_cluster`처럼 관대하게 처리한다 — 형식이 어긋난
+줄은 조용히 건너뛰고, 카테고리 이름이 4개 고정 목록에 없으면 버리고, 못 찾은
+번호는 빈 카테고리로 남겨 호출부가 "기타"로 대체한다.
+
+**`voe_by_category` 엔드포인트의 하이브리드 읽기**: `meal_log.voe_categories`가
+채워져 있으면(그 달 배치가 이미 돌았으면) 그 값을 그대로 쓰고, `NULL`이면(아직
+배치 전 — 예: 이번 달이거나 이 기능 도입 이전 과거 데이터) 그 코멘트 하나만
+기존 규칙 기반(`classify_voe_categories`)으로 그때그때 계산해 대체한다 —
+한쪽이 비어 있다고 전체가 깨지지 않는다.
+
+**사내 LLM 미설정 시**: `classify_monthly_voe_via_llm()`이 규칙 기반으로
+대체 저장한다(배선 검증용, `voe_keywords`는 `None`으로 남음) — 다른 LLM
+기능들(`voe_clustering.py`, `food_vector_tagging.py`)과 같은 컨벤션.
+
+**테스트**: `test_voe_category_llm.py`(신규) — 배치 응답 파싱(정상/형식
+어긋남/모르는 카테고리 걸러내기), LLM 미설정 시 규칙 기반 대체 저장.
+`test_api_ingest_and_analysis.py::test_voe_by_category_prefers_stored_llm_
+categories_over_rule_based`, `::test_voe_by_category_recompute_falls_back_
+to_rules_when_llm_unconfigured`.

@@ -4,6 +4,7 @@
   최근 6개월 menu_performance_stats 재계산(PRD 6.3 "6개월 누적 데이터" 기준),
   employee_taste_profile 재계산
 - 매월 1일 새벽: 지난달 monthly_voe_cluster 재계산 (사내 LLM 임베딩 필요),
+  지난달 VOE 고정 분류(맛/간/위생/서비스) LLM 재계산(meal_log.voe_categories),
   taste_cluster(취향 군집) 재계산 — 표본이 부족하면 조용히 건너뜀(0건 생성)
 """
 
@@ -19,6 +20,7 @@ from app.services.aggregation import aggregate_daily_stats, aggregate_menu_perfo
 from app.services.llm_client import InternalLLMClient
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
+from app.services.voe_category_llm import classify_monthly_voe_via_llm
 from app.services.voe_clustering import cluster_monthly_voe
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,21 @@ def run_monthly_voe_clustering() -> None:
         db.close()
 
 
+def run_monthly_voe_category_classification() -> None:
+    db = SessionLocal()
+    try:
+        settings = get_settings()
+        client = InternalLLMClient(settings)
+        last_month_end = dt.date.today().replace(day=1) - dt.timedelta(days=1)
+        period_month = last_month_end.replace(day=1)
+        classified = asyncio.run(classify_monthly_voe_via_llm(db, period_month, client))
+        logger.info("monthly VOE category classification completed for %s (%d comments)", period_month, classified)
+    except Exception:
+        logger.exception("monthly VOE category classification failed")
+    finally:
+        db.close()
+
+
 def run_monthly_taste_clustering() -> None:
     db = SessionLocal()
     try:
@@ -76,6 +93,15 @@ def create_scheduler() -> BackgroundScheduler:
     scheduler.add_job(run_daily_batch, "cron", hour=2, minute=0, id="daily_batch", replace_existing=True)
     scheduler.add_job(
         run_monthly_voe_clustering, "cron", day=1, hour=3, minute=0, id="monthly_voe", replace_existing=True
+    )
+    scheduler.add_job(
+        run_monthly_voe_category_classification,
+        "cron",
+        day=1,
+        hour=3,
+        minute=15,
+        id="monthly_voe_category",
+        replace_existing=True,
     )
     scheduler.add_job(
         run_monthly_taste_clustering,

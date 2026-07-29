@@ -725,3 +725,36 @@ def test_voe_by_category_multi_label_comment_counted_in_both_categories(client):
     assert categories["맛"]["count"] == 1
     assert categories["위생"]["count"] == 1
     assert categories["간"]["count"] == 0
+
+
+def test_voe_by_category_prefers_stored_llm_categories_over_rule_based(client, db_session):
+    # "정말 좋아요"는 규칙 기반으로는 어느 카테고리에도 안 걸리지만(기타로 감),
+    # voe_categories가 이미 채워져 있으면(LLM 배치 결과) 그걸 그대로 써야 한다.
+    _ingest_meal_log(client, "E1", "맛남", comment="정말 좋아요")
+
+    from app.models.logs import MealLog
+
+    log = db_session.query(MealLog).filter_by(employee_id="E1").one()
+    log.voe_categories = ["서비스"]
+    db_session.commit()
+
+    resp = client.get("/api/dashboard/voe-by-category", params={"period": f"{MONDAY.isoformat()[:7]}-01"})
+    body = resp.json()
+    categories = {c["category"]: c for c in body["categories"]}
+    assert categories["서비스"]["count"] == 1
+    assert categories["기타"]["count"] == 0
+
+
+def test_voe_by_category_recompute_falls_back_to_rules_when_llm_unconfigured(client, db_session):
+    _ingest_meal_log(client, "E1", "맛남", comment="정말 맛있어요")
+
+    resp = client.post(
+        "/api/dashboard/voe-by-category/recompute", params={"period": f"{MONDAY.isoformat()[:7]}-01"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["classified_comments"] == 1
+
+    from app.models.logs import MealLog
+
+    log = db_session.query(MealLog).filter_by(employee_id="E1").one()
+    assert log.voe_categories == ["맛"]

@@ -1,7 +1,7 @@
 import datetime as dt
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, Date, DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text
+from sqlalchemy import ARRAY, Boolean, Date, DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -56,6 +56,12 @@ class MealLog(Base):
     comment_embedding: Mapped[list[float] | None] = mapped_column(
         Vector(COMMENT_EMBEDDING_DIM), nullable=True
     )
+    # PRD 5.2/5.3: 월간 VOE 고정 분류(맛/간/위생/서비스)의 LLM 배치 결과 — 매달
+    # app/services/voe_category_llm.py가 채운다(누적 저장, 매번 재호출하지 않음).
+    # NULL이면 아직 배치가 안 돈 것 — app/api/dashboard.py::voe_by_category가
+    # 이 경우만 규칙 기반(voe_category.py)으로 그때그때 대체한다.
+    voe_categories: Mapped[list[str] | None] = mapped_column(ARRAY(String(16)), nullable=True)
+    voe_keywords: Mapped[list[str] | None] = mapped_column(ARRAY(String(64)), nullable=True)
     menu_snapshot_id: Mapped[int | None] = mapped_column(
         ForeignKey("weekly_menu_plan.id"), nullable=True
     )
