@@ -800,3 +800,40 @@ test_voe_by_category_groups_comments_into_fixed_categories`,
 (월~일) 범위로 좁혀서** 재사용한 것이다. 만족도·피크타임 서브속도 등은
 "분석" 탭에만 남기고, 홈 화면에는 코너명/식수 2개 컬럼만 간략히 표시한다
 (`HomePage.tsx`).
+
+## 21. 맛평가 매칭 실패 진단 (`ingestion-tool --debug-sample`) — 취식기록 기준 진단의 함정
+
+실제 6개월치 운영 데이터를 적재하는 과정에서 맛평가 매칭률이 비정상적으로
+낮게(0%로) 표시되는 문제가 있었다. 원인을 좁히기 위해
+`ingestion-tool/parsing/merge.py`에 진단 함수 두 개를 두고 있다.
+
+**문제의 근원**: `cli.py`가 원래 출력하던 매칭률(`matched / len(rows)`)의
+분모는 **전체 취식기록 행 수**(예: 449,022행)였다. 그런데 맛평가는 응답률이
+낮은 게 정상이라 애초에 존재하는 맛평가 자체가 훨씬 적다(예: 1,690건). 즉
+"매칭률 0%"로 보였던 것도 사실은 852/1,690 ≈ 50%가 맞고 있었는데, 분모를
+잘못 잡아서 아주 작은 숫자로 보인 것 — 실제 버그가 없었는데도 있는 것처럼
+보인 사례다.
+
+- **`diagnose_match_failure_by_evaluation(transactions, evaluations,
+  employee_mapping=None)`** — **맛평가 건수를 분모로** 진단한다. 조인 키 4개
+  필드(ID/날짜/식사구분/메뉴명) 중 하나씩 빼고 다시 세되, 맛평가 한 건씩을
+  기준으로 세므로 **모든 카운트가 `total_evaluations`를 절대 못 넘는다.**
+  이게 신뢰할 수 있는 신호라 CLI가 우선 출력한다.
+- **`diagnose_match_failure(transactions, evaluations, employee_mapping=None)`**
+  — 취식기록 건수를 분모로 진단한다(원래 있던 함수). **⚠️ 함정**: 같은 날 같은
+  인기메뉴를 먹은 사람이 수백 명이면, ID 필드 하나만 무시해도 "그 날 그 메뉴를
+  먹은 아무 취식기록"이 전부 매칭 후보로 잡혀 숫자가 실제보다 크게 부풀려진다
+  (예: 실측에서 `match_without_id`가 58,365로 나왔지만, 이는 "58,365건이 ID만
+  고치면 매칭된다"는 뜻이 아니라 "취식기록 중 그만큼이 같은 날짜/식사구분/
+  메뉴명을 가진 것"에 가깝다). 참고용으로만 보조 출력한다.
+
+두 함수 모두 순수 함수(파일 I/O 없음)로 `parsing/merge.py`에 있고,
+`cli.py::_print_match_diagnosis()`가 A(맛평가 기준, 우선)/B(취식기록 기준,
+참고)를 순서대로 출력한다. `--debug-sample`을 붙이면 이 진단 다음에 원본 조인
+키 샘플(`repr()`)도 출력한다 — 사용법은 README "맛평가 매칭률이 이상하게
+낮거나 0%면" 절 참고.
+
+**테스트**: `ingestion-tool/tests/test_merge.py`의
+`test_diagnose_match_failure_by_evaluation_*` 6개 — 전체 일치, ID/메뉴명
+불일치 격리, 매핑 적용, 매칭 없음, 그리고 취식기록이 훨씬 많아도 카운트가
+맛평가 건수를 못 넘는지 확인하는 케이스.

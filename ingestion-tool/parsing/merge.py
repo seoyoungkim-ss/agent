@@ -46,13 +46,19 @@ def diagnose_match_failure(
     *,
     employee_mapping: dict[str, str] | None = None,
 ) -> dict[str, int]:
-    """맛평가 매칭률이 낮을 때 어느 필드가 원인인지 자동으로 좁혀주는 진단.
+    """맛평가 매칭률이 낮을 때 어느 필드가 원인인지 자동으로 좁혀주는 진단
+    (취식기록 기준 — ⚠️ 아래 주의 참고).
 
     조인 키 4개 필드(ID/날짜/식사구분/메뉴명) 중 하나씩 빼고도 맞는 평가가
-    있는지 센다. 예를 들어 match_without_id가 total과 비슷한데 full_match는
-    0에 가깝다면 ID 필드가 원인이고, match_without_id도 0에 가깝다면 날짜/
-    식사구분/메뉴명 쪽을 봐야 한다는 뜻이다. 사용자가 화면의 숫자만 읽어줘도
-    원인을 좁힐 수 있게 하려는 목적(원문 텍스트 복붙이 안 되는 사내망 환경 고려).
+    있는지 센다. 사용자가 화면의 숫자만 읽어줘도 원인을 좁힐 수 있게 하려는
+    목적(원문 텍스트 복붙이 안 되는 사내망 환경 고려).
+
+    ⚠️ **취식기록 수가 맛평가 수보다 훨씬 많은 게 보통이라(응답률이 낮으므로),
+    match_without_id처럼 ID를 빼고 세는 값은 과대평가되기 쉽다** — 같은 날
+    같은 인기메뉴를 먹은 사람이 수백 명이면, ID 하나 빼는 것만으로 그 사람들이
+    전부 "매칭 후보"로 잡히기 때문이다(실제로 그 평가를 쓴 사람인지는 무관하게).
+    맛평가 수를 분모로 쓰는 `diagnose_match_failure_by_evaluation()`이 훨씬
+    신뢰할 수 있는 신호이므로 그쪽을 우선 보는 게 좋다.
     """
     without_id: set[tuple] = set()
     without_date: set[tuple] = set()
@@ -92,6 +98,59 @@ def diagnose_match_failure(
         if (knox_id, date, menu) in without_meal_type:
             result["match_without_meal_type"] += 1
         if (knox_id, date, tx.meal_type) in without_menu:
+            result["match_without_menu"] += 1
+    return result
+
+
+def diagnose_match_failure_by_evaluation(
+    transactions: list[ParsedMealTransactionRow],
+    evaluations: list[ParsedTasteEvalRow],
+    *,
+    employee_mapping: dict[str, str] | None = None,
+) -> dict[str, int]:
+    """`diagnose_match_failure()`와 같은 목적이지만 **맛평가 건수를 분모로** 센다.
+
+    맛평가는 응답률이 낮아 취식기록보다 훨씬 적은 게 정상이라(예: 취식기록
+    45만 건에 맛평가 1,700건), 이쪽이 훨씬 정확한 신호다 — 모든 카운트가
+    `len(evaluations)`를 못 넘는다(취식기록 기준 진단은 인기메뉴 때문에 부풀려질
+    수 있음).
+    """
+    tx_full_keys: set[tuple] = set()
+    without_id: set[tuple] = set()
+    without_date: set[tuple] = set()
+    without_meal_type: set[tuple] = set()
+    without_menu: set[tuple] = set()
+    for tx in transactions:
+        knox_id = employee_key(tx.employee_id, employee_mapping)
+        date = tx.eaten_at.date()
+        menu = _normalize_menu(tx.menu_display_name)
+        tx_full_keys.add((knox_id, date, tx.meal_type, menu))
+        without_id.add((date, tx.meal_type, menu))
+        without_date.add((knox_id, tx.meal_type, menu))
+        without_meal_type.add((knox_id, date, menu))
+        without_menu.add((knox_id, date, tx.meal_type))
+
+    result = {
+        "total_evaluations": len(evaluations),
+        "full_match": 0,
+        "match_without_id": 0,
+        "match_without_date": 0,
+        "match_without_meal_type": 0,
+        "match_without_menu": 0,
+    }
+    for ev in evaluations:
+        knox_id = ev.knox_id.strip()
+        menu = _normalize_menu(ev.menu_name)
+
+        if (knox_id, ev.eaten_date, ev.meal_type, menu) in tx_full_keys:
+            result["full_match"] += 1
+        if (ev.eaten_date, ev.meal_type, menu) in without_id:
+            result["match_without_id"] += 1
+        if (knox_id, ev.meal_type, menu) in without_date:
+            result["match_without_date"] += 1
+        if (knox_id, ev.eaten_date, menu) in without_meal_type:
+            result["match_without_meal_type"] += 1
+        if (knox_id, ev.eaten_date, ev.meal_type) in without_menu:
             result["match_without_menu"] += 1
     return result
 

@@ -19,7 +19,13 @@ from config import load_config
 from io_excel import read_used_range
 from parsing.employee_mapping import load_employee_mapping
 from parsing.meal_transaction_parser import parse_meal_transaction_grid
-from parsing.merge import _eval_key, diagnose_match_failure, employee_key, merge_transactions_with_taste
+from parsing.merge import (
+    _eval_key,
+    diagnose_match_failure,
+    diagnose_match_failure_by_evaluation,
+    employee_key,
+    merge_transactions_with_taste,
+)
 from parsing.taste_eval_parser import parse_taste_eval_grid
 from parsing.weekly_menu_parser import parse_weekly_menu_grid
 from upload import upload_meal_log, upload_weekly_menu
@@ -39,17 +45,27 @@ def _print_match_diagnosis(transactions, evaluations, employee_mapping) -> None:
     """복붙이 안 되는 환경에서도 숫자만 읽으면 원인을 좁힐 수 있는 자동 진단.
 
     조인 키 4개 필드(ID/날짜/식사구분/메뉴명) 중 하나씩 빼고 다시 세어, 어느
-    필드가 매칭을 막고 있는지 알려준다.
+    필드가 매칭을 막고 있는지 알려준다. 맛평가 기준(정확) 진단을 먼저 보여주고,
+    취식기록 기준(참고용, 부풀려질 수 있음) 진단을 보조로 보여준다.
     """
+    by_eval = diagnose_match_failure_by_evaluation(transactions, evaluations, employee_mapping=employee_mapping)
+    print("\n--- 진단 A: 맛평가 기준 (정확한 신호 — 이걸 우선 보세요) ---")
+    print(f"  전체 맛평가: {by_eval['total_evaluations']}건")
+    print(f"  전부 일치(현재 매칭 결과): {by_eval['full_match']}건")
+    print(f"  ID만 무시하고 매칭: {by_eval['match_without_id']}건   <- 이게 높으면 ID(사번/Knox ID)가 원인")
+    print(f"  날짜만 무시하고 매칭: {by_eval['match_without_date']}건   <- 이게 높으면 날짜가 원인")
+    print(f"  식사구분만 무시하고 매칭: {by_eval['match_without_meal_type']}건   <- 이게 높으면 식사구분이 원인")
+    print(f"  메뉴명만 무시하고 매칭: {by_eval['match_without_menu']}건   <- 이게 높으면 메뉴명이 원인")
+    print("  (전부 일치가 낮은데 위 네 개도 다 낮으면, 여러 필드가 동시에 다른 것 — 아래 샘플을 봐야 함)")
+
     d = diagnose_match_failure(transactions, evaluations, employee_mapping=employee_mapping)
-    print("\n--- 진단: 필드 하나씩 빼고 매칭해보기 ---")
+    print("\n--- 진단 B: 취식기록 기준 (참고용 — 인기메뉴 때문에 부풀려질 수 있음) ---")
     print(f"  전체 취식기록: {d['total_transactions']}행, 전체 맛평가: {d['total_evaluations']}행")
     print(f"  전부 일치(현재 매칭 결과): {d['full_match']}행")
-    print(f"  ID만 무시하고 매칭: {d['match_without_id']}행   <- 이게 높으면 ID(사번/Knox ID)가 원인")
-    print(f"  날짜만 무시하고 매칭: {d['match_without_date']}행   <- 이게 높으면 날짜가 원인")
-    print(f"  식사구분만 무시하고 매칭: {d['match_without_meal_type']}행   <- 이게 높으면 식사구분이 원인")
-    print(f"  메뉴명만 무시하고 매칭: {d['match_without_menu']}행   <- 이게 높으면 메뉴명이 원인")
-    print("  (전부 일치가 낮은데 위 네 개도 다 낮으면, 여러 필드가 동시에 다른 것 — 아래 샘플을 봐야 함)")
+    print(f"  ID만 무시하고 매칭: {d['match_without_id']}행")
+    print(f"  날짜만 무시하고 매칭: {d['match_without_date']}행")
+    print(f"  식사구분만 무시하고 매칭: {d['match_without_meal_type']}행")
+    print(f"  메뉴명만 무시하고 매칭: {d['match_without_menu']}행")
 
 
 def _print_debug_sample(transactions, evaluations, employee_mapping, n: int) -> None:
