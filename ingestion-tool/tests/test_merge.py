@@ -1,7 +1,7 @@
 import datetime as dt
 
 from models import MealType, ParsedMealTransactionRow, ParsedTasteEvalRow, TasteScore
-from parsing.merge import merge_transactions_with_taste
+from parsing.merge import diagnose_match_failure, merge_transactions_with_taste
 
 
 def _tx(**overrides) -> ParsedMealTransactionRow:
@@ -111,3 +111,55 @@ def test_employee_mapping_missing_entry_falls_back_to_employee_id():
 
     merged = merge_transactions_with_taste(transactions, evaluations, employee_mapping=mapping)
     assert merged[0].taste_score is not None
+
+
+def test_diagnose_match_failure_all_fields_match():
+    d = diagnose_match_failure([_tx()], [_ev()])
+    assert d["full_match"] == 1
+    assert d["match_without_id"] == 1
+    assert d["match_without_date"] == 1
+    assert d["match_without_meal_type"] == 1
+    assert d["match_without_menu"] == 1
+
+
+def test_diagnose_match_failure_isolates_id_mismatch():
+    # ID만 다르고 나머지(날짜/식사구분/메뉴명)는 같음 — match_without_id만 높아야 함
+    transactions = [_tx(employee_id="E9999")]
+    evaluations = [_ev(knox_id="E1001")]
+
+    d = diagnose_match_failure(transactions, evaluations)
+    assert d["full_match"] == 0
+    assert d["match_without_id"] == 1
+    assert d["match_without_date"] == 0
+    assert d["match_without_meal_type"] == 0
+    assert d["match_without_menu"] == 0
+
+
+def test_diagnose_match_failure_isolates_menu_name_mismatch():
+    transactions = [_tx(menu_display_name="다른메뉴")]
+    evaluations = [_ev(menu_name="해물잡탕밥")]
+
+    d = diagnose_match_failure(transactions, evaluations)
+    assert d["full_match"] == 0
+    assert d["match_without_id"] == 0
+    assert d["match_without_menu"] == 1
+
+
+def test_diagnose_match_failure_uses_employee_mapping():
+    transactions = [_tx(employee_id="88887777")]
+    evaluations = [_ev(knox_id="knoxABC")]
+    mapping = {"88887777": "knoxABC"}
+
+    d = diagnose_match_failure(transactions, evaluations, employee_mapping=mapping)
+    assert d["full_match"] == 1
+
+
+def test_diagnose_match_failure_no_matches_anywhere():
+    transactions = [_tx(employee_id="E9999", menu_display_name="다른메뉴")]
+    evaluations = [_ev(eaten_date=dt.date(2026, 1, 1))]
+
+    d = diagnose_match_failure(transactions, evaluations)
+    assert d["full_match"] == 0
+    assert d["match_without_id"] == 0
+    assert d["match_without_date"] == 0
+    assert d["match_without_menu"] == 0

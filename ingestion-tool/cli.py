@@ -19,7 +19,7 @@ from config import load_config
 from io_excel import read_used_range
 from parsing.employee_mapping import load_employee_mapping
 from parsing.meal_transaction_parser import parse_meal_transaction_grid
-from parsing.merge import _eval_key, employee_key, merge_transactions_with_taste
+from parsing.merge import _eval_key, diagnose_match_failure, employee_key, merge_transactions_with_taste
 from parsing.taste_eval_parser import parse_taste_eval_grid
 from parsing.weekly_menu_parser import parse_weekly_menu_grid
 from upload import upload_meal_log, upload_weekly_menu
@@ -33,6 +33,23 @@ def _confirm(prompt: str) -> bool:
 def _warn_if_ssl_disabled(verify_ssl: bool) -> None:
     if not verify_ssl:
         print("⚠️ SSL 인증서 검증이 비활성화된 상태로 전송합니다 (config.json의 verify_ssl=false).")
+
+
+def _print_match_diagnosis(transactions, evaluations, employee_mapping) -> None:
+    """복붙이 안 되는 환경에서도 숫자만 읽으면 원인을 좁힐 수 있는 자동 진단.
+
+    조인 키 4개 필드(ID/날짜/식사구분/메뉴명) 중 하나씩 빼고 다시 세어, 어느
+    필드가 매칭을 막고 있는지 알려준다.
+    """
+    d = diagnose_match_failure(transactions, evaluations, employee_mapping=employee_mapping)
+    print("\n--- 진단: 필드 하나씩 빼고 매칭해보기 ---")
+    print(f"  전체 취식기록: {d['total_transactions']}행, 전체 맛평가: {d['total_evaluations']}행")
+    print(f"  전부 일치(현재 매칭 결과): {d['full_match']}행")
+    print(f"  ID만 무시하고 매칭: {d['match_without_id']}행   <- 이게 높으면 ID(사번/Knox ID)가 원인")
+    print(f"  날짜만 무시하고 매칭: {d['match_without_date']}행   <- 이게 높으면 날짜가 원인")
+    print(f"  식사구분만 무시하고 매칭: {d['match_without_meal_type']}행   <- 이게 높으면 식사구분이 원인")
+    print(f"  메뉴명만 무시하고 매칭: {d['match_without_menu']}행   <- 이게 높으면 메뉴명이 원인")
+    print("  (전부 일치가 낮은데 위 네 개도 다 낮으면, 여러 필드가 동시에 다른 것 — 아래 샘플을 봐야 함)")
 
 
 def _print_debug_sample(transactions, evaluations, employee_mapping, n: int) -> None:
@@ -114,6 +131,7 @@ def _cmd_meal_log(args: argparse.Namespace) -> int:
         print(f"  {row}")
 
     if args.debug_sample:
+        _print_match_diagnosis(transactions, evaluations, employee_mapping)
         _print_debug_sample(transactions, evaluations, employee_mapping, args.debug_sample)
 
     if not args.yes and not _confirm("백엔드로 전송할까요?"):

@@ -40,6 +40,62 @@ def _eval_key(knox_id: str, eaten_date, meal_type, menu_name: str) -> tuple:
     return (knox_id.strip(), eaten_date, meal_type, _normalize_menu(menu_name))
 
 
+def diagnose_match_failure(
+    transactions: list[ParsedMealTransactionRow],
+    evaluations: list[ParsedTasteEvalRow],
+    *,
+    employee_mapping: dict[str, str] | None = None,
+) -> dict[str, int]:
+    """맛평가 매칭률이 낮을 때 어느 필드가 원인인지 자동으로 좁혀주는 진단.
+
+    조인 키 4개 필드(ID/날짜/식사구분/메뉴명) 중 하나씩 빼고도 맞는 평가가
+    있는지 센다. 예를 들어 match_without_id가 total과 비슷한데 full_match는
+    0에 가깝다면 ID 필드가 원인이고, match_without_id도 0에 가깝다면 날짜/
+    식사구분/메뉴명 쪽을 봐야 한다는 뜻이다. 사용자가 화면의 숫자만 읽어줘도
+    원인을 좁힐 수 있게 하려는 목적(원문 텍스트 복붙이 안 되는 사내망 환경 고려).
+    """
+    without_id: set[tuple] = set()
+    without_date: set[tuple] = set()
+    without_meal_type: set[tuple] = set()
+    without_menu: set[tuple] = set()
+    for ev in evaluations:
+        knox_id = ev.knox_id.strip()
+        menu = _normalize_menu(ev.menu_name)
+        without_id.add((ev.eaten_date, ev.meal_type, menu))
+        without_date.add((knox_id, ev.meal_type, menu))
+        without_meal_type.add((knox_id, ev.eaten_date, menu))
+        without_menu.add((knox_id, ev.eaten_date, ev.meal_type))
+
+    result = {
+        "total_transactions": len(transactions),
+        "total_evaluations": len(evaluations),
+        "full_match": 0,
+        "match_without_id": 0,
+        "match_without_date": 0,
+        "match_without_meal_type": 0,
+        "match_without_menu": 0,
+    }
+    eval_index = {
+        _eval_key(ev.knox_id, ev.eaten_date, ev.meal_type, ev.menu_name): ev for ev in evaluations
+    }
+    for tx in transactions:
+        knox_id = employee_key(tx.employee_id, employee_mapping)
+        date = tx.eaten_at.date()
+        menu = _normalize_menu(tx.menu_display_name)
+
+        if _eval_key(knox_id, date, tx.meal_type, tx.menu_display_name) in eval_index:
+            result["full_match"] += 1
+        if (date, tx.meal_type, menu) in without_id:
+            result["match_without_id"] += 1
+        if (knox_id, tx.meal_type, menu) in without_date:
+            result["match_without_date"] += 1
+        if (knox_id, date, menu) in without_meal_type:
+            result["match_without_meal_type"] += 1
+        if (knox_id, date, tx.meal_type) in without_menu:
+            result["match_without_menu"] += 1
+    return result
+
+
 def merge_transactions_with_taste(
     transactions: list[ParsedMealTransactionRow],
     evaluations: list[ParsedTasteEvalRow],
