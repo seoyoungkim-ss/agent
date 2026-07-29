@@ -1,6 +1,7 @@
 import calendar
 import datetime as dt
 import io
+import statistics
 
 import xlsxwriter
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -9,15 +10,24 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.models.logs import MealLog
+from app.models.enums import TASTE_SCORE_POINTS
+from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import DailyDivisionStats, MenuPerformanceStats, MonthlyVoeCluster
 from app.services.holidays import DayClassification, HolidayService
 from app.services.llm_client import InternalLLMClient
+from app.services.menu_highlights import (
+    compute_menu_satisfaction_trends,
+    compute_new_menu_reactions,
+    week_start,
+)
 from app.services.voe_category import OTHER_CATEGORY, VOE_CATEGORIES, classify_voe_categories
 from app.services.voe_category_llm import classify_monthly_voe_via_llm
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+MENU_HIGHLIGHTS_WINDOW_DAYS = 180  # 6.3절 menu_performance_stats 롤링 윈도우와 동일 범위
+NEW_MENU_WINDOW_DAYS = 30  # "최근 도입된 신메뉴"로 볼 기간
 
 
 def _compute_weekly_summary(
@@ -255,3 +265,98 @@ async def recompute_voe_by_category(period: dt.date, db: Session = Depends(get_d
     client = InternalLLMClient(settings)
     classified = await classify_monthly_voe_via_llm(db, period.replace(day=1), client)
     return {"classified_comments": classified}
+
+
+@router.get("/menu-highlights")
+def menu_highlights(db: Session = Depends(get_db)):
+    """PRD 5.3: 메뉴 만족도 급상승/급하락 + 신메뉴 초기 반응 — 홈 화면용.
+
+    메뉴는 매주 나오지 않으므로 "이번 주 vs 지난 주" 대신 메뉴별 "마지막 등장
+    주 vs 그 직전 등장 주"를 비교한다(app/services/menu_highlights.py). 저장
+    없이 요청 시점에 바로 집계한다 — menu_performance_stats(6.3절, 180일
+    롤링 단일 구간)와는 목적이 달라 서로 건드리지 않는다.
+    """
+    settings = get_settings()
+    today = dt.date.today()
+    window_start_dt = dt.datetime.combine(today - dt.timedelta(days=MENU_HIGHLIGHTS_WINDOW_DAYS), dt.time())
+    window_end_dt = dt.datetime.combine(today + dt.timedelta(days=1), dt.time())
+
+    rows = (
+        db.query(
+            MealLog.menu_id, MealLog.eaten_at, MealLog.taste_score, MenuMaster.menu_name, CornerMaster.corner_name
+        )
+        .join(MenuMaster, MealLog.menu_id == MenuMaster.menu_id)
+        .join(CornerMaster, MealLog.corner_id == CornerMaster.corner_id)
+        .filter(
+            MealLog.eaten_at >= window_start_dt,
+            MealLog.eaten_at < window_end_dt,
+            MealLog.menu_id.isnot(None),
+            MealLog.taste_score.isnot(None),
+        )
+        .all()
+    )
+
+    global_avg_score = statistics.fmean([TASTE_SCORE_POINTS[r.taste_score] for r in rows]) if rows else 3.0
+
+    menu_names: dict[int, str] = {}
+    menu_corners: dict[int, str | None] = {}
+    weekly_scores: dict[int, dict[dt.date, list]] = {}
+    scores_by_menu: dict[int, list] = {}
+    for menu_id, eaten_at, taste_score, menu_name, corner_name in rows:
+        menu_names[menu_id] = menu_name
+        menu_corners[menu_id] = corner_name
+        weekly_scores.setdefault(menu_id, {}).setdefault(week_start(eaten_at.date()), []).append(taste_score)
+        scores_by_menu.setdefault(menu_id, []).append(taste_score)
+
+    rising, falling = compute_menu_satisfaction_trends(
+        weekly_scores,
+        menu_names,
+        menu_corners,
+        global_avg_score=global_avg_score,
+        shrinkage_m=settings.menu_score_shrinkage_m,
+        low_sample_threshold=settings.menu_score_low_sample_threshold,
+    )
+
+    new_menu_window_start = today - dt.timedelta(days=NEW_MENU_WINDOW_DAYS)
+    new_menu_rows = (
+        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name, CornerMaster.corner_name)
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
+        .filter(WeeklyMenuPlan.is_new_menu.is_(True), WeeklyMenuPlan.plan_date >= new_menu_window_start)
+        .all()
+    )
+    new_menus = {menu_id: (menu_name, corner_name) for menu_id, menu_name, corner_name in new_menu_rows}
+
+    new_menu_reactions = compute_new_menu_reactions(
+        new_menus,
+        scores_by_menu,
+        global_avg_score=global_avg_score,
+        shrinkage_m=settings.menu_score_shrinkage_m,
+        low_sample_threshold=settings.menu_score_low_sample_threshold,
+    )
+
+    def _trend(e):
+        return {
+            "menu_id": e.menu_id,
+            "menu_name": e.menu_name,
+            "corner_name": e.corner_name,
+            "recent_score": e.recent_score,
+            "prior_score": e.prior_score,
+            "delta": e.delta,
+            "evaluation_count": e.evaluation_count,
+        }
+
+    def _new_menu(e):
+        return {
+            "menu_id": e.menu_id,
+            "menu_name": e.menu_name,
+            "corner_name": e.corner_name,
+            "adjusted_score": e.adjusted_score,
+            "evaluation_count": e.evaluation_count,
+        }
+
+    return {
+        "rising": [_trend(e) for e in rising],
+        "falling": [_trend(e) for e in falling],
+        "new_menus": [_new_menu(e) for e in new_menu_reactions],
+    }

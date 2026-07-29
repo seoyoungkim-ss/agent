@@ -1092,3 +1092,55 @@ to_rules_when_llm_unconfigured`.
 
 **테스트**: `test_maintenance_dedupe_meal_log.py`(신규) — 완전 중복 제거하며
 맛평가 있는 쪽 우선 보존, 코너가 다르면(진짜 다른 기록) 안 지움, idempotent.
+
+## 27. 메뉴 4분면에서 테이크아웃 플레이스홀더 메뉴 제외 (2026-07)
+
+**"선택형 Take out"**, **"(포장)메디쏠라"** 두 메뉴명은 테이크아웃 특성상(현장에서
+가져가는 형태라 세부 메뉴를 정확히 못 남김) 4분면 비교에 안 맞는 플레이스홀더성
+메뉴로 확인됐다(사용자 확인). 26절의 코너 제외 원칙과 동일하게 — 표시에서만
+숨기지 않고 **`aggregate_menu_performance()`의 중앙값(수요/만족도 임계값) 계산
+자체에서 제외**한다. `app/services/aggregation.py::EXCLUDED_QUADRANT_MENU_NAMES`에
+등록된 메뉴명의 `menu_id`를 `meal_log` 조회 필터에서 미리 빼(`notin_`), 다른
+정상 메뉴들의 4분면 분류(수요/만족도 중앙값)가 이 두 메뉴 때문에 왜곡되지
+않게 한다.
+
+**테스트**: `test_api_ingest_and_analysis.py::
+test_menu_performance_recompute_excludes_take_out_placeholder_menus`.
+
+## 28. 홈 화면 "메뉴 하이라이트" — 만족도 급상승/급하락, 신메뉴 초기 반응 (2026-07)
+
+PRD 5.3의 "이슈 알림 배너"/"신메뉴 트래커" 아이디어를 메뉴 단위로 구현했다.
+홈 화면의 기존 "코너별 식수(선택한 주)" 표를 대체한다(코너별 식수는 이미
+"코너별 주간 식수 추이" 꺾은선그래프로 볼 수 있어 중복이었음).
+
+**비교 기준**: "이번 주 vs 지난 주" 같은 달력 주 단위 비교가 아니라, **메뉴별로
+"그 메뉴가 마지막으로 나온 주" vs "그 바로 전에 나온 주"**를 비교한다(사용자
+확인) — 메뉴가 매주 나오는 게 아니라서, 달력 주 비교는 최근 안 나온 메뉴를
+"변화 없음"으로 잘못 볼 수 있다.
+
+**구현**: `app/services/menu_highlights.py`(신규, 순수 함수 — `menu_performance.
+py`와 같은 컨벤션):
+- `week_start(date)`: 그 날짜가 속한 주의 월요일.
+- `compute_menu_satisfaction_trends()`: `{menu_id: {주 월요일: [그 주 평가
+  목록]}}`을 받아, 등장한 주가 2개 이상인 메뉴만 대상으로 마지막 두 주를
+  `compute_menu_score()`(6.3.1절, 베이지안 축소 — 표본 작은 주도 자연스럽게
+  완화되므로 별도 최소건수 컷 불필요)로 계산해 델타를 낸다. 델타가 진짜
+  양수/음수인 메뉴만 각각 "급상승"/"급하락" 후보에 넣고(변화 없는 메뉴는
+  어느 쪽에도 안 들어감), 델타 크기 상위 3개씩(기본값) 반환.
+- `compute_new_menu_reactions()`: `WeeklyMenuPlan.is_new_menu=True`(메뉴 최초
+  등장 시 한 번만 찍힘, 24절 이전 확인)이고 최근 30일 이내 등장한 메뉴의
+  평가건수·`compute_menu_score` 결과.
+
+**엔드포인트** `GET /dashboard/menu-highlights`(`app/api/dashboard.py`) — 저장
+없이 요청 시점에 `meal_log`를 바로 집계한다(180일 롤링 윈도우, 6.3절
+`menu_performance_stats`와 같은 범위지만 별개 목적이라 그 테이블은 안 건드림).
+전역 평균(`global_avg_score`)은 이 180일 윈도우의 평가 전체로 한 번만 계산해
+급상승/급하락/신메뉴 계산 모두에 공유한다.
+
+**프론트**: `HomePage.tsx`의 "메뉴 하이라이트" 카드 — 급상승/급하락/신메뉴
+3열, 각 최대 3개(신메뉴는 개수 제한 없음).
+
+**테스트**: `test_menu_highlights.py`(신규, 순수 함수 4개 — 주 시작일 계산,
+급상승/급하락 감지, top_n 제한, 신메뉴 평가 0건 처리), `test_api_ingest_and_
+analysis.py::test_menu_highlights_detects_rising_menu_and_new_menu_reaction`
+(엔드투엔드).

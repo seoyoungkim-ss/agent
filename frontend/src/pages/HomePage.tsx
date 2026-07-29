@@ -103,6 +103,11 @@ export function HomePage() {
     },
   });
 
+  const menuHighlights = useQuery({
+    queryKey: ["menu-highlights"],
+    queryFn: () => api.menuHighlights(),
+  });
+
   const totalHeadcount = weekly.data?.reduce((sum, d) => sum + d.headcount, 0) ?? 0;
   const chartTheme = useChartTheme();
   const seriesWeekday = resolveColor("var(--series-1)");
@@ -174,12 +179,14 @@ export function HomePage() {
     },
     series: trendCornersHome.map((c) => ({
       name: c.corner_name,
-      type: "bar" as const,
-      stack: "total",
+      type: "line" as const,
+      symbol: "circle",
+      symbolSize: 8,
+      lineStyle: { width: 2, color: resolveColor(homeCornerColor.get(c.corner_id) ?? "var(--series-1)") },
       itemStyle: {
-        borderColor: resolveColor("var(--surface)"),
-        borderWidth: 1,
         color: resolveColor(homeCornerColor.get(c.corner_id) ?? "var(--series-1)"),
+        borderColor: resolveColor("var(--surface)"),
+        borderWidth: 2,
       },
       data: cornerTrendDays.map((d) => trendByCornerHome.get(c.corner_name)?.get(d) ?? 0),
     })),
@@ -349,34 +356,85 @@ export function HomePage() {
         )}
       </Card>
 
-      <Card title="코너별 식수 (선택한 주)">
-        {cornerSummary.isLoading && <LoadingState />}
-        {cornerSummary.isError && <ErrorState error={cornerSummary.error} />}
-        {cornerSummary.data && cornerSummary.data.length === 0 && (
-          <div className="space-y-2">
-            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-              데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다 — 취식 데이터를 과거 기간
-              한꺼번에 적재한 경우, 스케줄러는 매일 새벽 전날치만 계산하므로 최근 180일치를 한 번에 다시
-              계산해야 합니다.
-            </p>
-            <Button variant="secondary" onClick={() => recomputeDailyStats.mutate()} disabled={recomputeDailyStats.isPending}>
-              {recomputeDailyStats.isPending ? "계산 중..." : "최근 180일 배치 집계 재계산"}
-            </Button>
-            {recomputeDailyStats.isError && <ErrorState error={recomputeDailyStats.error} />}
+      <Card title="메뉴 하이라이트">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          메뉴별로 이번에 나온 시점을 그 직전 등장 시점과 비교합니다(메뉴는 매주 나오지 않으므로 달력 주
+          단위가 아니라 메뉴별 직전 등장 대비입니다). 신메뉴는 최근 30일 내 처음 나온 메뉴의 초기 반응입니다.
+        </p>
+        {menuHighlights.isLoading && <LoadingState />}
+        {menuHighlights.isError && <ErrorState error={menuHighlights.error} />}
+        {menuHighlights.data && (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div>
+              <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                만족도 급상승
+              </p>
+              {menuHighlights.data.rising.length === 0 ? (
+                <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                  해당 없음
+                </p>
+              ) : (
+                <Table
+                  columns={[
+                    { key: "menu", label: "메뉴" },
+                    { key: "score", label: "만족도", align: "right" },
+                  ]}
+                  rows={menuHighlights.data.rising.map((r) => ({
+                    menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
+                    score: `${r.prior_score.toFixed(2)} → ${r.recent_score.toFixed(2)}`,
+                  }))}
+                  rowKey={(r, i) => `${r.menu as string}-${i}`}
+                />
+              )}
+            </div>
+            <div>
+              <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                만족도 급하락
+              </p>
+              {menuHighlights.data.falling.length === 0 ? (
+                <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                  해당 없음
+                </p>
+              ) : (
+                <Table
+                  columns={[
+                    { key: "menu", label: "메뉴" },
+                    { key: "score", label: "만족도", align: "right" },
+                  ]}
+                  rows={menuHighlights.data.falling.map((r) => ({
+                    menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
+                    score: `${r.prior_score.toFixed(2)} → ${r.recent_score.toFixed(2)}`,
+                  }))}
+                  rowKey={(r, i) => `${r.menu as string}-${i}`}
+                />
+              )}
+            </div>
+            <div>
+              <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                신메뉴 반응 (최근 30일)
+              </p>
+              {menuHighlights.data.new_menus.length === 0 ? (
+                <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                  해당 없음
+                </p>
+              ) : (
+                <Table
+                  columns={[
+                    { key: "menu", label: "메뉴" },
+                    { key: "score", label: "만족도(평가건수)", align: "right" },
+                  ]}
+                  rows={menuHighlights.data.new_menus.map((r) => ({
+                    menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
+                    score:
+                      r.evaluation_count > 0
+                        ? `${r.adjusted_score?.toFixed(2)} (${r.evaluation_count}건)`
+                        : "평가 없음",
+                  }))}
+                  rowKey={(r, i) => `${r.menu as string}-${i}`}
+                />
+              )}
+            </div>
           </div>
-        )}
-        {cornerSummary.data && cornerSummary.data.length > 0 && (
-          <Table
-            columns={[
-              { key: "corner", label: "코너" },
-              { key: "headcount", label: "식수", align: "right" },
-            ]}
-            rows={cornerSummary.data.map((c) => ({
-              corner: c.corner_name,
-              headcount: c.headcount_total.toLocaleString(),
-            }))}
-            rowKey={(r) => r.corner as string}
-          />
         )}
       </Card>
 

@@ -189,6 +189,74 @@ def test_menu_performance_recompute_and_read(client):
     assert jeyuk["quadrant"] is not None
 
 
+def test_menu_performance_recompute_excludes_take_out_placeholder_menus(client):
+    _ingest_weekly_menu(client)
+    _ingest_meal_log(client, "E1", "맛남")
+    _ingest_meal_log(client, "E2", "맛남")
+    _ingest_meal_log(client, "E3", "개선")
+    # 테이크아웃 플레이스홀더 메뉴 — 4분면 집계 자체에서 빠져야 함(중앙값도 왜곡 안 함)
+    _ingest_meal_log(client, "E4", "맛남", menu_name="선택형 Take out", corner_name="Take Out")
+    _ingest_meal_log(client, "E5", "맛남", menu_name="(포장)메디쏠라", corner_name="Take Out")
+
+    resp = client.post(
+        "/api/analysis/menu-performance/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    resp = client.get(
+        "/api/analysis/menu-performance",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    menu_names = {r["menu_name"] for r in resp.json()}
+    assert "선택형 Take out" not in menu_names
+    assert "(포장)메디쏠라" not in menu_names
+
+
+def test_menu_highlights_detects_rising_menu_and_new_menu_reaction(client):
+    _ingest_weekly_menu(client)  # 제육볶음/계란후라이, 한식, MONDAY
+
+    prior_week = MONDAY - dt.timedelta(days=14)
+    for i in range(3):
+        _ingest_meal_log(client, f"P{i}", "개선", eaten_date=prior_week, menu_name="제육볶음", corner_name="한식")
+    for i in range(3):
+        _ingest_meal_log(client, f"R{i}", "맛남", eaten_date=MONDAY, menu_name="제육볶음", corner_name="한식")
+
+    # 신메뉴 — 처음 등장하는 메뉴라 자동으로 is_new_menu=True로 찍힘
+    resp = client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                {
+                    "plan_date": MONDAY.isoformat(),
+                    "meal_type": "중식",
+                    "corner_name": "한식",
+                    "menu_name": "신메뉴테스트",
+                    "menu_role": "메인",
+                    "source_row_raw": "신메뉴테스트",
+                }
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    _ingest_meal_log(client, "N1", "맛남", eaten_date=MONDAY, menu_name="신메뉴테스트", corner_name="한식")
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    rising_names = {r["menu_name"] for r in body["rising"]}
+    falling_names = {r["menu_name"] for r in body["falling"]}
+    assert "제육볶음" in rising_names
+    assert "제육볶음" not in falling_names
+
+    new_menu_names = {r["menu_name"] for r in body["new_menus"]}
+    assert "신메뉴테스트" in new_menu_names
+    new_menu_entry = next(r for r in body["new_menus"] if r["menu_name"] == "신메뉴테스트")
+    assert new_menu_entry["evaluation_count"] == 1
+
+
 def test_dashboard_weekly_summary_classifies_days(client):
     resp = client.get(
         "/api/dashboard/weekly-summary",

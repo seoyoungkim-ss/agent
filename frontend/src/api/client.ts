@@ -78,6 +78,30 @@ export interface CornerAnalysisRow {
   avg_peak_throughput_per_min: number | null;
 }
 
+export interface MenuTrendEntry {
+  menu_id: number;
+  menu_name: string;
+  corner_name: string | null;
+  recent_score: number;
+  prior_score: number;
+  delta: number;
+  evaluation_count: number;
+}
+
+export interface NewMenuEntry {
+  menu_id: number;
+  menu_name: string;
+  corner_name: string | null;
+  adjusted_score: number | null;
+  evaluation_count: number;
+}
+
+export interface MenuHighlightsResponse {
+  rising: MenuTrendEntry[];
+  falling: MenuTrendEntry[];
+  new_menus: NewMenuEntry[];
+}
+
 export interface CornerTrendRow {
   period: string;
   corner_id: number;
@@ -217,6 +241,8 @@ export const api = {
     request<{ classified_comments: number }>(`/dashboard/voe-by-category/recompute${qs({ period })}`, {
       method: "POST",
     }),
+
+  menuHighlights: () => request<MenuHighlightsResponse>("/dashboard/menu-highlights"),
 
   cornerAnalysis: (params: {
     period_start: string;
