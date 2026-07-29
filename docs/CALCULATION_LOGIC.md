@@ -1188,11 +1188,9 @@ API)를 쓰는 경우 `api_key`가 비어있다는 이유만으로 계속 모의
 
 메뉴 수가 많아지면서 "메뉴 4분면" 탭의 표 하나에 모든 메뉴를 나열하면 훑어보기
 어려워졌다(실사용 피드백). `GET /analysis/menu-performance` 응답에
-`corner_name`을 추가했다 — `menu_performance_stats`엔 코너 정보가 없으므로,
-`weekly_menu_plan`에서 그 메뉴의 (조회 기간 내) **가장 최근 배치 코너**를
-찾아 붙인다(plan_date 내림차순으로 먼저 나오는 코너_id를 그 메뉴의 코너로
-확정 — `menu_id`당 한 번만 `setdefault`). 기간 내 weekly_menu_plan에 아예 없는
-메뉴는 `corner_name: null`(프론트에서 "코너 미배정"으로 묶임).
+`corner_name`을 추가했다 — `menu_performance_stats`엔 코너 정보가 없으므로
+다른 소스에서 붙여야 한다. (⚠️ 이 절 최초 구현은 `weekly_menu_plan` 기준이었으나
+32절에서 `meal_log` 기준으로 바뀌었다 — 아래는 최신 상태.)
 
 **프론트**(`MenuQuadrantTab`): 기존 하나의 큰 `<Table>`을 코너별로 묶어
 (`Map<corner_name, rows>`, 메뉴 개수 내림차순 정렬) 클릭하면 펼쳐지는 아코디언
@@ -1201,7 +1199,7 @@ API)를 쓰는 경우 `api_key`가 비어있다는 이유만으로 계속 모의
 못 보는" 문제가 없어서 그대로 둠).
 
 **테스트**: `test_menu_performance_recompute_and_read`에 `corner_name` 확인
-추가("제육볶음"이 `weekly_menu_plan` 배치대로 "한식"으로 나오는지).
+추가("제육볶음"이 실제 취식된 코너인 "한식"으로 나오는지).
 
 ---
 
@@ -1213,9 +1211,9 @@ API)를 쓰는 경우 `api_key`가 비어있다는 이유만으로 계속 모의
 구분 없이 나열돼 있어 메뉴가 늘수록 페이지 스크롤이 계속 길어졌다.
 
 **백엔드**: `GET /analysis/menus/food-vectors`(`list_menu_food_vectors`,
-`app/api/analysis.py`)에 `corner_name`을 추가했다. 이 엔드포인트엔 기간
-파라미터가 없으므로, 30절과 달리 **기간 필터 없이 전체 `weekly_menu_plan`에서
-그 메뉴의 가장 최근 배치 코너**(plan_date 내림차순 `setdefault`)를 붙인다.
+`app/api/analysis.py`)에 `corner_name`을 추가했다. 30절과 같은 헬퍼
+(`_corner_id_by_menu_from_meal_log`, 32절 참고)를 기간 필터 없이 호출해
+그 메뉴가 전체 기간에서 가장 많이 찍힌 코너를 붙인다.
 
 **프론트**(`AnalysisPage.tsx`): 두 섹션이 "코너별로 묶기 → 목록/카드 →
 클릭 확장"을 반복하므로 공용 헬퍼로 정리했다.
@@ -1239,4 +1237,61 @@ function CornerCardGrid({ groups, selected, onSelect }): JSX.Element
 안 펼쳐짐), 같은 코너명이 페이지에 두 번 나와도 서로 간섭하지 않는다.
 
 **테스트**: `test_list_menu_food_vectors_endpoint`에 `corner_name` 확인 추가
-(제육볶음 → "한식", 모듬과일 → `null`).
+(제육볶음 → "한식", 모듬과일 → "분식", 계란후라이(취식 기록 없음) → `null`).
+
+---
+
+## 32. "메뉴 4분면 전체가 코너 미배정" 버그 — corner_name 소스를 `weekly_menu_plan`
+→ `meal_log`로 교체 (2026-07)
+
+**증상**: 실사용 중 메뉴 4분면/음식벡터 관리의 코너 카드가 "코너 미배정"
+하나에 전체 메뉴가 다 몰리고, 실제 코너 카드(한식/일품/그린미트 등)는 하나도
+안 생기는 현상이 보고됨.
+
+**원인**: 30·31절의 `corner_name` 계산이 `weekly_menu_plan` 테이블을 기준으로
+그 메뉴의 최근 배치 코너를 찾는 방식이었다. 그런데 `weekly_menu_plan`은
+운영자가 **취식기록/맛평가(`meal-log`)와는 완전히 별도로** "주간 식단표" 파일을
+`ingestion-tool weekly-menu` 명령으로 업로드해야만 채워지는 테이블이다
+(`backend/app/api/ingest.py`의 `/ingest/weekly-menu`와 `/ingest/meal-log`는
+서로 다른 엔드포인트, 서로 다른 소스 파일). 실제 운영에서는 매일/과거 일괄
+`meal-log`만 계속 적재하고 `weekly-menu`는 업로드하지 않았거나 극히 일부
+기간만 업로드했을 가능성이 높다 — 그러면 `weekly_menu_plan`이 비어 있거나
+조회 기간과 안 겹쳐서, **모든** 메뉴의 `corner_id_by_menu` 조회가 실패하고
+`corner_name: null`로 떨어진다(멀쩡한 데이터가 있어도 이 조인 하나 때문에
+전체가 미배정으로 보임).
+
+**수정**: `corner_name`을 `weekly_menu_plan`이 아니라 **`meal_log`에서 그
+메뉴가 실제로 가장 많이 찍힌 코너(최빈값)**로 다시 계산하도록 바꿨다.
+`meal_log.corner_id`는 POS 취식기록 원본에 이미 실려 있는 값이라
+(`ingest_meal_log`에서 `row.corner_name`으로 매번 채워짐) `meal-log`
+적재만으로 항상 채워지고, `weekly-menu` 업로드 여부와 무관하다 — 운영
+워크플로우가 실제로 뭘 하는지에 의존하지 않는 더 견고한 소스다.
+
+**파일**: `backend/app/api/analysis.py::_corner_id_by_menu_from_meal_log`
+```python
+def _corner_id_by_menu_from_meal_log(
+    db: Session, period_start: dt.date | None = None, period_end: dt.date | None = None
+) -> dict[int, int]:
+    query = db.query(MealLog.menu_id, MealLog.corner_id, func.count().label("cnt")).filter(
+        MealLog.menu_id.isnot(None)
+    )
+    if period_start is not None and period_end is not None:
+        ...  # [period_start, period_end] 양끝 포함 (17절과 같은 +1일 배타 상한 패턴)
+    rows = query.group_by(MealLog.menu_id, MealLog.corner_id).order_by(func.count().desc()).all()
+    corner_id_by_menu: dict[int, int] = {}
+    for menu_id, corner_id, _cnt in rows:
+        corner_id_by_menu.setdefault(menu_id, corner_id)  # count 내림차순이라 최빈 코너가 먼저 잡힘
+    return corner_id_by_menu
+```
+`menu_performance`(기간 필터 적용)와 `list_menu_food_vectors`(기간 필터
+없음) 둘 다 이 헬퍼를 공유한다. 어떤 메뉴가 그 기간에 `meal_log`로 한 번도
+취식되지 않았으면(예: 부찬만 있고 실제로 안 팔린 메뉴) 여전히
+`corner_name: null`(코너 미배정)로 남는다 — 이건 정상 동작이다.
+
+**⚠️ 참고**: `weekly_menu_plan`은 이제 corner_name 계산에는 안 쓰이지만,
+`ingest_meal_log`의 "메뉴명이 없는 소스는 그 날 그 코너의 메인 메뉴로 간주"
+폴백 로직(12절)에는 여전히 쓰인다 — 완전히 안 쓰는 테이블이 된 건 아니다.
+
+**테스트**: 30·31절의 관련 테스트를 `meal_log` 기준 동작에 맞게 갱신
+(`test_list_menu_food_vectors_endpoint`가 "코너에서 실제로 취식된 메뉴만
+그 코너로 잡히고, 취식 기록이 없는 메뉴는 미배정으로 남는지" 확인).

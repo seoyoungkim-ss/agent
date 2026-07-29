@@ -108,7 +108,8 @@ def test_menu_food_vector_stays_untagged_when_no_rule_matches(client, db_session
 
 def test_list_menu_food_vectors_endpoint(client):
     _ingest_weekly_menu(client)
-    _ingest_meal_log(client, "E55555", "맛남", menu_name="모듬과일")
+    _ingest_meal_log(client, "E11111", "맛남")  # 코너의 메인 메뉴(제육볶음)와 자동 연결, 코너 "한식"
+    _ingest_meal_log(client, "E55555", "맛남", menu_name="모듬과일", corner_name="분식")
 
     resp = client.get("/api/analysis/menus/food-vectors")
     assert resp.status_code == 200
@@ -116,10 +117,13 @@ def test_list_menu_food_vectors_endpoint(client):
     names = {row["menu_name"] for row in rows}
     assert "제육볶음" in names
     assert "모듬과일" in names
+    assert "계란후라이" in names
     jeyuk = next(r for r in rows if r["menu_name"] == "제육볶음")
-    assert jeyuk["corner_name"] == "한식"  # weekly_menu_plan 배치 기준
+    assert jeyuk["corner_name"] == "한식"  # meal_log에서 실제 취식된 코너 기준
     moduem = next(r for r in rows if r["menu_name"] == "모듬과일")
-    assert moduem["corner_name"] is None  # weekly_menu_plan에 없는 메뉴 — 코너 미배정
+    assert moduem["corner_name"] == "분식"  # 실제로 이 코너에서 취식됨
+    gyeranhurai = next(r for r in rows if r["menu_name"] == "계란후라이")
+    assert gyeranhurai["corner_name"] is None  # meal_log에 취식 기록이 없는 메뉴(부찬) — 코너 미배정
 
     resp_untagged = client.get("/api/analysis/menus/food-vectors", params={"untagged_only": True})
     untagged_names = {row["menu_name"] for row in resp_untagged.json()}
@@ -192,7 +196,7 @@ def test_menu_performance_recompute_and_read(client):
     jeyuk = next(r for r in rows if r["menu_name"] == "제육볶음")
     assert jeyuk["evaluation_count"] == 3
     assert jeyuk["quadrant"] is not None
-    assert jeyuk["corner_name"] == "한식"  # weekly_menu_plan 배치 기준
+    assert jeyuk["corner_name"] == "한식"  # meal_log에서 실제 취식된 코너 기준
 
 
 def test_menu_performance_recompute_excludes_take_out_placeholder_menus(client):

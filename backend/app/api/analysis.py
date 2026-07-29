@@ -4,12 +4,13 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
 from app.models.enums import FoodVectorSource
-from app.models.logs import WeeklyMenuPlan
+from app.models.logs import MealLog
 from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import (
     DailyCornerStats,
@@ -43,6 +44,35 @@ def _period_bucket(stat_date: dt.date, granularity: str) -> str:
         monday = stat_date - dt.timedelta(days=stat_date.weekday())
         return monday.isoformat()
     return stat_date.isoformat()
+
+
+def _corner_id_by_menu_from_meal_log(
+    db: Session, period_start: dt.date | None = None, period_end: dt.date | None = None
+) -> dict[int, int]:
+    """메뉴별로 실제 취식된 코너(최빈값)를 찾는다.
+
+    weekly_menu_plan(주간 식단표)은 meal-log와 별도로 운영자가 직접 업로드해야
+    하는 소스라 실사용 중 누락되기 쉽다(2026-07 실사용에서 전체 메뉴가
+    "코너 미배정"으로 나오는 원인이었음) — meal_log.corner_id는 POS 취식기록
+    자체에 이미 실려 있어 meal-log만 적재해도 항상 채워진다. 그래서 코너 배정은
+    weekly_menu_plan 대신 meal_log에서 그 메뉴가 가장 많이 찍힌 코너를 쓴다.
+    """
+    query = db.query(MealLog.menu_id, MealLog.corner_id, func.count().label("cnt")).filter(
+        MealLog.menu_id.isnot(None)
+    )
+    if period_start is not None and period_end is not None:
+        period_start_dt = dt.datetime.combine(period_start, dt.time())
+        period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+        query = query.filter(MealLog.eaten_at >= period_start_dt, MealLog.eaten_at < period_end_exclusive)
+    rows = (
+        query.group_by(MealLog.menu_id, MealLog.corner_id)
+        .order_by(func.count().desc())
+        .all()
+    )
+    corner_id_by_menu: dict[int, int] = {}
+    for menu_id, corner_id, _cnt in rows:
+        corner_id_by_menu.setdefault(menu_id, corner_id)  # count 내림차순이라 최빈 코너가 먼저 잡힘
+    return corner_id_by_menu
 
 
 @router.get("/divisions")
@@ -229,7 +259,7 @@ def corner_core_layer_menu_pairs(
 def menu_performance(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
     """PRD 6.3: 메뉴별 성과 (4분면 라벨 포함). 사전에 recompute가 호출돼 있어야 한다.
 
-    corner_name은 weekly_menu_plan에서 그 메뉴의 기간 내 가장 최근 배치 코너를
+    corner_name은 meal_log에서 그 메뉴가 기간 내 가장 많이 찍힌 코너(최빈값)를
     붙인 것 — 프론트에서 메뉴가 너무 많을 때 코너별로 묶어 보여주는 용도다.
     """
     rows = (
@@ -239,16 +269,7 @@ def menu_performance(period_start: dt.date, period_end: dt.date, db: Session = D
     )
     menus = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
     corners = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
-
-    corner_id_by_menu: dict[int, int] = {}
-    plan_rows = (
-        db.query(WeeklyMenuPlan.menu_id, WeeklyMenuPlan.corner_id)
-        .filter(WeeklyMenuPlan.plan_date.between(period_start, period_end))
-        .order_by(WeeklyMenuPlan.plan_date.desc())
-        .all()
-    )
-    for menu_id, corner_id in plan_rows:
-        corner_id_by_menu.setdefault(menu_id, corner_id)  # plan_date 내림차순이라 최신 배치가 먼저 잡힘
+    corner_id_by_menu = _corner_id_by_menu_from_meal_log(db, period_start, period_end)
 
     return [
         {
@@ -374,8 +395,8 @@ def recompute_taste_clusters(k: int = 5, db: Session = Depends(get_db)):
 def list_menu_food_vectors(untagged_only: bool = False, db: Session = Depends(get_db)):
     """PRD 6.1: 관리자용 메뉴 food_vector 현황 — 수동 조정 화면에서 목록으로 쓴다.
 
-    corner_name은 menu-performance와 같은 방식으로 weekly_menu_plan에서 그
-    메뉴의 (기간 제한 없이 전체에서) 가장 최근 배치 코너를 붙인 것 — 프론트가
+    corner_name은 menu-performance와 같은 방식으로 meal_log에서 그 메뉴가
+    (기간 제한 없이 전체에서) 가장 많이 찍힌 코너(최빈값)를 붙인 것 — 프론트가
     메뉴 목록을 코너별로 묶어 보여주는 용도다.
     """
     query = db.query(MenuMaster)
@@ -384,13 +405,7 @@ def list_menu_food_vectors(untagged_only: bool = False, db: Session = Depends(ge
     menus = query.order_by(MenuMaster.menu_name).all()
 
     corners = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
-    corner_id_by_menu: dict[int, int] = {}
-    for menu_id, corner_id in (
-        db.query(WeeklyMenuPlan.menu_id, WeeklyMenuPlan.corner_id)
-        .order_by(WeeklyMenuPlan.plan_date.desc())
-        .all()
-    ):
-        corner_id_by_menu.setdefault(menu_id, corner_id)
+    corner_id_by_menu = _corner_id_by_menu_from_meal_log(db)
 
     return [
         {
