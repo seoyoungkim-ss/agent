@@ -55,6 +55,10 @@ def find_header_row(
     요일마다 두 열씩 병합돼 있어 라벨 값은 왼쪽 열에만 들어있다(오른쪽 열은
     빈 값) — 그리드 전체에서 값이 있는 행을 순서대로 스캔하므로 헤더가 몇
     번째 행에 있든(제목행이 앞에 있어도) 상관없다.
+
+    실제 파일은 헤더 셀에 "7/6(월)"처럼 날짜가 요일과 함께 들어있어(사용자
+    확인, 2026-07) 정확히 일치하지 않으므로, 요일 글자가 셀 텍스트 안에
+    포함돼 있는지로 판단한다.
     """
     threshold = max(1, num_days - 2)  # 기존 "7개 중 5개" 비율(≈71%)을 유지
     for row_idx, row in enumerate(grid):
@@ -62,7 +66,7 @@ def find_header_row(
         for day_offset in range(num_days):
             col = first_day_col + day_offset * day_col_span
             labels.append(_clean(row[col]) if col < len(row) else "")
-        matches = sum(1 for label, expected in zip(labels, _WEEKDAY_LABELS) if label == expected)
+        matches = sum(1 for label, expected in zip(labels, _WEEKDAY_LABELS) if expected in label)
         if matches >= threshold:
             return row_idx
     raise WeeklyMenuParseError(

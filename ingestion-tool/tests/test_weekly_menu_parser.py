@@ -21,7 +21,7 @@ def _sample_grid():
     """
     return [
         ["2026년 7월 둘째주 식단표", None, None, None, None, None, None, None, None, None, None, None, None, None, None],
-        ["구분", "코너", None, "월", None, "화", None, "수", None, "목", None, "금", None, "토", None],
+        ["구분", "코너", None, "7/6(월)", None, "7/7(화)", None, "7/8(수)", None, "7/9(목)", None, "7/10(금)", None, "7/11(토)", None],
         ["중식", "한식", None, "제육볶음", None, "된장찌개", None, "[한상차림]", None, "함박스테이크&소스", None, "비빔밥", None, "돈까스", None],
         [None, None, None, "(돈육:국내산)", None, None, None, "닭갈비", None, None, None, None, None, None, None],
         [None, None, None, "김치", None, "깍두기", None, None, None, "피클", None, "나물", None, "단무지", None],
@@ -35,6 +35,15 @@ def _sample_grid():
 
 def test_find_header_row_is_second_row():
     assert find_header_row(_sample_grid()) == 1
+
+
+def test_find_header_row_matches_date_prefixed_weekday_label():
+    # 실제 파일은 요일 헤더 셀이 "월" 단독이 아니라 "7/6(월)"처럼 날짜와 같이 들어있음
+    grid = [
+        [None] * 15,
+        ["구분", "코너", None, "7/6(월)", None, "7/7(화)", None, "7/8(수)", None, "7/9(목)", None, "7/10(금)", None, "7/11(토)", None],
+    ]
+    assert find_header_row(grid) == 1
 
 
 def test_split_cell_into_items_newline():
