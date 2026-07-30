@@ -39,6 +39,7 @@ from app.services.menu_combination import (
 from app.services.menu_throughput import build_corner_daily_throughput, compute_menu_throughput_summary
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
+from app.services.weekly_menu_prediction import compute_predicted_impact
 from app.services.weekly_menu_review import (
     add_feedback,
     build_weekly_menu_slots,
@@ -507,6 +508,33 @@ def update_menu_food_vector(
     }
 
 
+class NewMenuStatusUpdateRequest(BaseModel):
+    menu_name: str
+    is_new: bool | None  # True=강제 신메뉴 노출, False=강제 제외, null=자동판정으로 되돌림
+
+
+@router.put("/menus/new-menu-status")
+def update_new_menu_status(payload: NewMenuStatusUpdateRequest, db: Session = Depends(get_db)):
+    """PRD 5.3: 홈 "신메뉴 반응"의 자동판정(weekly_menu_plan.is_new_menu, 최근
+    30일 창)을 관리자가 직접 뒤집는다 — 자동판정이 인제스트 순서에 따라
+    깨지기 쉽고, 30일이 지나면 강제로 빠지는 문제를 관리자가 직접 보정할 수
+    있게 한다(2026-07 실사용 요청).
+    """
+    menu = db.query(MenuMaster).filter(MenuMaster.menu_name == payload.menu_name).first()
+    if menu is None:
+        raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다")
+
+    menu.new_menu_override = payload.is_new
+    menu.new_menu_marked_on = dt.date.today() if payload.is_new is not None else None
+    db.commit()
+    return {
+        "menu_id": menu.menu_id,
+        "menu_name": menu.menu_name,
+        "new_menu_override": menu.new_menu_override,
+        "new_menu_marked_on": menu.new_menu_marked_on.isoformat() if menu.new_menu_marked_on else None,
+    }
+
+
 @router.post("/menus/tag-with-llm")
 async def tag_menus_with_llm(db: Session = Depends(get_db)):
     """PRD 6.1: 규칙 기반으로 태깅 못 한(food_vector NULL) 메뉴를 사내 LLM으로 보강한다."""
@@ -609,6 +637,20 @@ async def reclassify_weekly_menu_roles_endpoint(
     return {"reclassified_slots": reclassified}
 
 
+@router.get("/weekly-menu/{plan_id}/predicted-impact")
+async def weekly_menu_predicted_impact(plan_id: int, db: Session = Depends(get_db)):
+    """PRD 7: 이 슬롯(메인메뉴)의 기존 성적 + 예상 점유율/식수 + LLM 정성 코멘트.
+
+    쿼리/LLM 호출 비용 때문에 목록 조회에서는 계산하지 않고, 프론트에서 "예측
+    보기" 버튼을 눌렀을 때만 호출한다(2026-07 사용자 확인).
+    """
+    client = InternalLLMClient(get_settings())
+    result = await compute_predicted_impact(db, client, plan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="메인메뉴로 지정된 주간 식단표 항목을 찾을 수 없습니다")
+    return result
+
+
 @router.get("/menu-affinity/{menu_name}")
 def menu_affinity(
     menu_name: str,
@@ -658,6 +700,7 @@ def menu_side_combinations(menu_name: str, period_start: dt.date, period_end: dt
                 "sides": [menu_names.get(sid) for sid in sorted(s.side_menu_ids)],
                 "day_count": s.day_count,
                 "avg_satisfaction": s.avg_satisfaction,
+                "avg_headcount": round(s.avg_headcount, 1),
                 "nutrition_profile": compute_combo_nutrition_profile(
                     [menu.menu_id, *s.side_menu_ids], food_vectors
                 ),

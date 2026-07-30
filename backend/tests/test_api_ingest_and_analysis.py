@@ -299,6 +299,93 @@ def test_menu_highlights_flags_new_menu_needing_attention_when_unevaluated(clien
     assert entry["needs_attention"] is True
 
 
+def test_new_menu_status_manual_add_bypasses_auto_window(client):
+    # meal-log만으로 생긴 메뉴는 weekly_menu_plan.is_new_menu가 전혀 안 찍히므로
+    # 자동판정으로는 "신메뉴 반응"에 절대 안 뜬다 — 관리자가 직접 등록하면 떠야 함.
+    _ingest_meal_log(client, "E1", "맛남", menu_name="관리자등록메뉴", corner_name="한식")
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    assert "관리자등록메뉴" not in {r["menu_name"] for r in resp.json()["new_menus"]}
+
+    resp = client.put(
+        "/api/analysis/menus/new-menu-status", json={"menu_name": "관리자등록메뉴", "is_new": True}
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    entry = next(r for r in resp.json()["new_menus"] if r["menu_name"] == "관리자등록메뉴")
+    assert entry["is_manual"] is True
+    assert entry["days_since_introduction"] == 0
+    assert entry["corner_name"] == "한식"
+
+
+def test_new_menu_status_manual_remove_hides_auto_detected_menu(client):
+    resp = client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                {
+                    "plan_date": MONDAY.isoformat(),
+                    "meal_type": "중식",
+                    "corner_name": "한식",
+                    "menu_name": "자동감지신메뉴",
+                    "menu_role": "메인",
+                    "source_row_raw": "자동감지신메뉴",
+                }
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    assert "자동감지신메뉴" in {r["menu_name"] for r in resp.json()["new_menus"]}
+
+    resp = client.put(
+        "/api/analysis/menus/new-menu-status", json={"menu_name": "자동감지신메뉴", "is_new": False}
+    )
+    assert resp.status_code == 200
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    assert "자동감지신메뉴" not in {r["menu_name"] for r in resp.json()["new_menus"]}
+
+
+def test_weekly_menu_predicted_impact_returns_prediction_and_fallback_comment(client):
+    _ingest_weekly_menu(client)  # 제육볶음(메인)/계란후라이(부찬), 한식, MONDAY
+    for i in range(3):
+        _ingest_meal_log(client, f"P{i}", "맛남", menu_name="제육볶음", corner_name="한식")
+
+    resp = client.get(
+        "/api/analysis/weekly-menu", params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()}
+    )
+    assert resp.status_code == 200
+    slot = next(s for s in resp.json() if s["corner_name"] == "한식")
+    main_plan_id = slot["main"]["plan_id"]
+    side_plan_id = slot["sides"][0]["plan_id"]
+
+    resp = client.get(f"/api/analysis/weekly-menu/{main_plan_id}/predicted-impact")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["main_menu"]["menu_name"] == "제육볶음"
+    assert isinstance(body["prediction"]["predicted_headcount"], (int, float))
+    assert isinstance(body["prediction"]["predicted_share"], (int, float))
+    assert "사내 LLM 미설정" in body["summary_comment"]  # 테스트 환경엔 사내 LLM 미설정
+
+    # 메인이 아닌(부찬) plan_id로는 예측을 못 만든다
+    resp = client.get(f"/api/analysis/weekly-menu/{side_plan_id}/predicted-impact")
+    assert resp.status_code == 404
+
+    resp = client.get("/api/analysis/weekly-menu/999999/predicted-impact")
+    assert resp.status_code == 404
+
+
+def test_new_menu_status_unknown_menu_name_404s(client):
+    resp = client.put(
+        "/api/analysis/menus/new-menu-status", json={"menu_name": "존재안함", "is_new": True}
+    )
+    assert resp.status_code == 404
+
+
 def test_improvement_points_surfaces_congestion_satisfaction_voe(client):
     def eat(employee_id, corner_name, minute, taste="맛남", menu_name=None, comment=None, eaten_date=MONDAY):
         client.post(

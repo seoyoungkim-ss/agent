@@ -1006,10 +1006,12 @@ function CornerCardGrid({
   groups,
   selected,
   onSelect,
+  countLabel = "개 메뉴",
 }: {
   groups: [string, unknown[]][];
   selected: string | null;
   onSelect: (cornerName: string) => void;
+  countLabel?: string;
 }) {
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
@@ -1024,7 +1026,10 @@ function CornerCardGrid({
           }}
         >
           <div className="text-[13px] font-medium">{cornerName}</div>
-          <div className="mt-1 text-lg font-semibold">{items.length}개 메뉴</div>
+          <div className="mt-1 text-lg font-semibold">
+            {items.length}
+            {countLabel}
+          </div>
         </button>
       ))}
     </div>
@@ -1385,7 +1390,8 @@ function MenuComboSection() {
                 </span>
               </div>
               <div className="mt-1 text-[13px]">
-                만족도: {c.avg_satisfaction != null ? c.avg_satisfaction.toFixed(2) : "평가 없음"}
+                만족도: {c.avg_satisfaction != null ? c.avg_satisfaction.toFixed(2) : "평가 없음"} · 평균 식수:{" "}
+                {c.avg_headcount.toFixed(1)}명
               </div>
               {Object.keys(c.nutrition_profile).length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs" style={{ color: "var(--ink-muted)" }}>
@@ -1432,6 +1438,12 @@ function daysUntil(iso: string): number {
   return Math.round((target.getTime() - today.getTime()) / 86_400_000);
 }
 
+const WEEKLY_WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
+
+function weekdayLabel(dateIso: string): string {
+  return `${dateIso.slice(5)}(${WEEKLY_WEEKDAY_KO[new Date(dateIso).getDay()]})`;
+}
+
 function WeeklyMenuRoleRow({
   item,
   label,
@@ -1464,11 +1476,71 @@ function WeeklyMenuRoleRow({
   );
 }
 
+function PredictedImpactPanel({ planId }: { planId: number }) {
+  const query = useQuery({
+    queryKey: ["weekly-menu-predicted-impact", planId],
+    queryFn: () => api.weeklyMenuPredictedImpact(planId),
+  });
+
+  return (
+    <div
+      className="mt-2 rounded-md border p-3 text-[13px]"
+      style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
+    >
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {query.data && (
+        <div className="space-y-1.5">
+          <div>
+            기존 만족도:{" "}
+            {query.data.main_menu.adjusted_score != null ? query.data.main_menu.adjusted_score.toFixed(2) : "이력 없음"}
+            {" · "}
+            기존 식수: {query.data.main_menu.total_headcount ?? "이력 없음"}
+          </div>
+          <div>
+            이 부찬 조합 이력:{" "}
+            {query.data.combo_history
+              ? `${query.data.combo_history.day_count}일 등장, 만족도 ${
+                  query.data.combo_history.avg_satisfaction != null
+                    ? query.data.combo_history.avg_satisfaction.toFixed(2)
+                    : "평가 없음"
+                }, 평균 식수 ${query.data.combo_history.avg_headcount.toFixed(1)}명`
+              : "이 정확한 조합의 과거 이력 없음"}
+          </div>
+          <div>
+            예상 식수: {query.data.prediction.predicted_headcount.toFixed(1)}명 · 예상 점유율:{" "}
+            {(query.data.prediction.predicted_share * 100).toFixed(1)}%
+          </div>
+          <div className="rounded p-2" style={{ background: "var(--surface)", color: "var(--ink-secondary)" }}>
+            {query.data.summary_comment}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WeeklyMenuReviewTab() {
   const [selectedMonday, setSelectedMonday] = useState(weeklyMondayOf(new Date()));
   const sunday = weeklyAddDays(selectedMonday, 6);
   const [expandedCorner, setExpandedCorner] = useState<string | null>(null);
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
+  const [editingSlots, setEditingSlots] = useState<Set<string>>(new Set());
+  const toggleEditingSlot = (key: string) =>
+    setEditingSlots((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const [predictingSlots, setPredictingSlots] = useState<Set<string>>(new Set());
+  const togglePredictingSlot = (key: string) =>
+    setPredictingSlots((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   const slotsQuery = useQuery({
     queryKey: ["weekly-menu", selectedMonday],
@@ -1536,6 +1608,7 @@ function WeeklyMenuReviewTab() {
             groups={cornerGroups}
             selected={expandedCorner}
             onSelect={(c) => setExpandedCorner((cur) => (cur === c ? null : c))}
+            countLabel="일치 식단"
           />
         )}
         {expandedCorner && (
@@ -1543,11 +1616,12 @@ function WeeklyMenuReviewTab() {
             {expandedSlots.map((slot) => {
               const key = `${slot.plan_date}_${slot.corner_id}`;
               const dday = daysUntil(slot.feedback_deadline);
+              const isEditing = editingSlots.has(key);
               return (
                 <div key={key} className="rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
                   <div className="flex items-center justify-between">
                     <span className="text-[13px] font-medium">
-                      {slot.plan_date} ({slot.meal_type})
+                      {weekdayLabel(slot.plan_date)} · {slot.corner_name} ({slot.meal_type})
                     </span>
                     <span
                       className="text-xs"
@@ -1556,23 +1630,61 @@ function WeeklyMenuReviewTab() {
                       {slot.is_past_deadline ? "마감" : `의견 제출 D-${dday}`}
                     </span>
                   </div>
-                  <div className="mt-2 space-y-1">
-                    {slot.main && (
-                      <WeeklyMenuRoleRow
-                        item={slot.main}
-                        label="메인"
-                        onChangeRole={(role) => updateRole.mutate({ planId: slot.main!.plan_id, menuRole: role })}
-                      />
+
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span
+                      className="rounded px-2 py-0.5 text-[13px] font-semibold"
+                      style={{ background: "var(--surface-2)", color: "var(--ink)" }}
+                    >
+                      {slot.main ? slot.main.menu_name : "메인메뉴 미배정"}
+                    </span>
+                    {slot.sides.length > 0 && (
+                      <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                        부찬: {slot.sides.map((s) => s.menu_name).join(", ")}
+                      </span>
                     )}
-                    {slot.sides.map((item) => (
-                      <WeeklyMenuRoleRow
-                        key={item.plan_id}
-                        item={item}
-                        label="부찬"
-                        onChangeRole={(role) => updateRole.mutate({ planId: item.plan_id, menuRole: role })}
-                      />
-                    ))}
+                    {slot.main && (
+                      <button
+                        className="text-xs underline"
+                        style={{ color: "var(--accent)" }}
+                        onClick={() => togglePredictingSlot(key)}
+                      >
+                        {predictingSlots.has(key) ? "예측 닫기" : "예측 보기"}
+                      </button>
+                    )}
+                    <button
+                      className="ml-auto text-xs underline"
+                      style={{ color: "var(--ink-muted)" }}
+                      onClick={() => toggleEditingSlot(key)}
+                    >
+                      {isEditing ? "수정 닫기" : "수정"}
+                    </button>
                   </div>
+
+                  {slot.main && predictingSlots.has(key) && (
+                    <PredictedImpactPanel planId={slot.main.plan_id} />
+                  )}
+
+                  {isEditing && (
+                    <div className="mt-2 space-y-1 border-t pt-2" style={{ borderColor: "var(--border)" }}>
+                      {slot.main && (
+                        <WeeklyMenuRoleRow
+                          item={slot.main}
+                          label="메인"
+                          onChangeRole={(role) => updateRole.mutate({ planId: slot.main!.plan_id, menuRole: role })}
+                        />
+                      )}
+                      {slot.sides.map((item) => (
+                        <WeeklyMenuRoleRow
+                          key={item.plan_id}
+                          item={item}
+                          label="부찬"
+                          onChangeRole={(role) => updateRole.mutate({ planId: item.plan_id, menuRole: role })}
+                        />
+                      ))}
+                    </div>
+                  )}
+
                   <div className="mt-2 flex gap-2">
                     <input
                       value={commentDrafts[key] ?? ""}

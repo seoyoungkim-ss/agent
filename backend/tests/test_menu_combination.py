@@ -9,9 +9,9 @@ from app.services.menu_combination import (
 
 def test_compute_combo_satisfaction_summary_groups_by_side_combo_sorted_desc():
     days = [
-        ComboDay(dt.date(2026, 7, 6), frozenset({1, 2}), avg_satisfaction=4.5),
-        ComboDay(dt.date(2026, 7, 13), frozenset({1, 2}), avg_satisfaction=4.3),
-        ComboDay(dt.date(2026, 7, 20), frozenset({3}), avg_satisfaction=2.0),
+        ComboDay(dt.date(2026, 7, 6), frozenset({1, 2}), avg_satisfaction=4.5, headcount=10),
+        ComboDay(dt.date(2026, 7, 13), frozenset({1, 2}), avg_satisfaction=4.3, headcount=8),
+        ComboDay(dt.date(2026, 7, 20), frozenset({3}), avg_satisfaction=2.0, headcount=5),
     ]
     summaries = compute_combo_satisfaction_summary(days)
     assert len(summaries) == 2
@@ -21,10 +21,19 @@ def test_compute_combo_satisfaction_summary_groups_by_side_combo_sorted_desc():
     assert summaries[1].side_menu_ids == frozenset({3})
 
 
+def test_compute_combo_satisfaction_summary_averages_headcount_per_combo():
+    days = [
+        ComboDay(dt.date(2026, 7, 6), frozenset({1}), avg_satisfaction=4.0, headcount=10),
+        ComboDay(dt.date(2026, 7, 13), frozenset({1}), avg_satisfaction=4.0, headcount=20),
+    ]
+    summaries = compute_combo_satisfaction_summary(days)
+    assert summaries[0].avg_headcount == 15.0
+
+
 def test_compute_combo_satisfaction_summary_puts_unevaluated_combo_last():
     days = [
-        ComboDay(dt.date(2026, 7, 6), frozenset({1}), avg_satisfaction=None),
-        ComboDay(dt.date(2026, 7, 13), frozenset({2}), avg_satisfaction=3.0),
+        ComboDay(dt.date(2026, 7, 6), frozenset({1}), avg_satisfaction=None, headcount=3),
+        ComboDay(dt.date(2026, 7, 13), frozenset({2}), avg_satisfaction=3.0, headcount=4),
     ]
     summaries = compute_combo_satisfaction_summary(days)
     assert summaries[0].side_menu_ids == frozenset({2})
@@ -33,9 +42,9 @@ def test_compute_combo_satisfaction_summary_puts_unevaluated_combo_last():
 
 def test_compute_combo_satisfaction_summary_filters_by_min_day_count():
     days = [
-        ComboDay(dt.date(2026, 7, 6), frozenset({1}), avg_satisfaction=4.0),
-        ComboDay(dt.date(2026, 7, 13), frozenset({2}), avg_satisfaction=3.0),
-        ComboDay(dt.date(2026, 7, 20), frozenset({2}), avg_satisfaction=3.5),
+        ComboDay(dt.date(2026, 7, 6), frozenset({1}), avg_satisfaction=4.0, headcount=5),
+        ComboDay(dt.date(2026, 7, 13), frozenset({2}), avg_satisfaction=3.0, headcount=5),
+        ComboDay(dt.date(2026, 7, 20), frozenset({2}), avg_satisfaction=3.5, headcount=5),
     ]
     summaries = compute_combo_satisfaction_summary(days, min_day_count=2)
     assert len(summaries) == 1

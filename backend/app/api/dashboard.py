@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from app.api.analysis import corner_analysis, menu_performance
+from app.api.analysis import _corner_id_by_menu_from_meal_log, corner_analysis, menu_performance
 from app.config import get_settings
 from app.db import get_db
 from app.models.enums import TASTE_SCORE_POINTS
@@ -341,6 +341,25 @@ def menu_highlights(db: Session = Depends(get_db)):
         first_plan_date = min(plan_date, existing[2]) if existing else plan_date
         new_menus[menu_id] = (menu_name, corner_name, first_plan_date)
 
+    # 관리자 수동 지정(2026-07) — 자동판정(위 30일 창) 위에 얹는다. override=True는
+    # 30일 창과 무관하게 계속 노출(해제 전까지), override=False는 자동판정으로
+    # 떴어도 강제로 뺀다. 코너명은 weekly_menu_plan이 아니라 meal_log 최빈
+    # 코너로 찾는다(analysis.py의 관례와 동일 — weekly_menu_plan은 누락되기 쉬움).
+    manual_new_menu_ids: set[int] = set()
+    override_rows = db.query(MenuMaster).filter(MenuMaster.new_menu_override.isnot(None)).all()
+    if override_rows:
+        corner_id_by_menu = _corner_id_by_menu_from_meal_log(db)
+        corner_name_by_id = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+        for menu in override_rows:
+            if menu.new_menu_override is False:
+                new_menus.pop(menu.menu_id, None)
+                continue
+            marked_on = menu.new_menu_marked_on or today
+            corner_id = corner_id_by_menu.get(menu.menu_id)
+            corner_name = corner_name_by_id.get(corner_id) if corner_id is not None else None
+            new_menus[menu.menu_id] = (menu.menu_name, corner_name, marked_on)
+            manual_new_menu_ids.add(menu.menu_id)
+
     new_menu_reactions = compute_new_menu_reactions(
         new_menus,
         scores_by_menu,
@@ -370,6 +389,7 @@ def menu_highlights(db: Session = Depends(get_db)):
             "evaluation_count": e.evaluation_count,
             "days_since_introduction": e.days_since_introduction,
             "needs_attention": e.days_since_introduction >= 7 and e.evaluation_count == 0,
+            "is_manual": e.menu_id in manual_new_menu_ids,
         }
 
     return {

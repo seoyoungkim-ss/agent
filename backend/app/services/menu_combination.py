@@ -23,6 +23,7 @@ class ComboDay:
     plan_date: dt.date
     side_menu_ids: frozenset[int]
     avg_satisfaction: float | None  # 그날 그 코너에서 main_menu_id로 찍힌 meal_log 평균
+    headcount: int  # 그날 그 코너의 main_menu_id 취식 건수(식수) — 평가 여부 무관, 전부 카운트
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class ComboSummary:
     side_menu_ids: frozenset[int]
     day_count: int
     avg_satisfaction: float | None
+    avg_headcount: float  # 이 조합이 등장한 날들의 평균 식수
 
 
 def build_side_combos_for_main_menu(
@@ -70,23 +72,25 @@ def build_side_combos_for_main_menu(
     for plan_date, corner_id, meal_type in main_slots:
         day_start = dt.datetime.combine(plan_date, dt.time())
         day_end = day_start + dt.timedelta(days=1)
-        scores = (
+        # 평가 여부와 무관하게 그날 이 메뉴를 취식한 모든 행을 가져온다 — 만족도는
+        # 그중 평가가 있는 것만 평균내고, 식수(headcount)는 전체 건수를 쓴다.
+        rows = (
             db.query(MealLog.taste_score)
             .filter(
                 MealLog.menu_id == main_menu_id,
                 MealLog.corner_id == corner_id,
                 MealLog.eaten_at >= day_start,
                 MealLog.eaten_at < day_end,
-                MealLog.taste_score.isnot(None),
             )
             .all()
         )
-        score_values = [TASTE_SCORE_POINTS[s] for (s,) in scores]
+        score_values = [TASTE_SCORE_POINTS[s] for (s,) in rows if s is not None]
         results.append(
             ComboDay(
                 plan_date=plan_date,
                 side_menu_ids=frozenset(sides_by_slot.get((plan_date, corner_id, meal_type), set())),
                 avg_satisfaction=statistics.fmean(score_values) if score_values else None,
+                headcount=len(rows),
             )
         )
     return results
@@ -99,10 +103,12 @@ def compute_combo_satisfaction_summary(
     내림차순(평가 없는 조합은 맨 뒤)으로 정렬한다."""
     day_counts: dict[frozenset[int], int] = {}
     scores_by_combo: dict[frozenset[int], list[float]] = {}
+    headcounts_by_combo: dict[frozenset[int], list[int]] = {}
     for d in days:
         day_counts[d.side_menu_ids] = day_counts.get(d.side_menu_ids, 0) + 1
         if d.avg_satisfaction is not None:
             scores_by_combo.setdefault(d.side_menu_ids, []).append(d.avg_satisfaction)
+        headcounts_by_combo.setdefault(d.side_menu_ids, []).append(d.headcount)
 
     results = [
         ComboSummary(
@@ -111,6 +117,7 @@ def compute_combo_satisfaction_summary(
             avg_satisfaction=(
                 statistics.fmean(scores_by_combo[combo]) if combo in scores_by_combo else None
             ),
+            avg_headcount=statistics.fmean(headcounts_by_combo[combo]),
         )
         for combo, count in day_counts.items()
         if count >= min_day_count

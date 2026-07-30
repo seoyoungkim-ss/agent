@@ -1686,3 +1686,125 @@ popularity`, `test_what_if_uses_quadrant_multiplier_for_planned_menu_
 with_performance_data`(둘 다 `test_api_ingest_and_analysis.py`) — 코너
 평균 대비 특정 메뉴의 share_of_traffic 비율로 예측치가 실제로 달라지는지
 숫자로 고정.
+
+## 37. 신메뉴 수동 지정 + 주간 식단표 관리 화면 재설계(메인 강조 + 예측 패널) (2026-07)
+
+실사용 피드백 두 가지를 반영했다: (1) "신메뉴 반응"의 자동판정(`is_new_menu`)이
+인제스트 순서에 따라 깨지기 쉽고 30일이 지나면 강제로 빠져서, 관리자가 직접
+추가/해제할 수 있게 해달라는 요청. (2) 주간 식단표 관리 화면에서 코너 하나를
+펼치면 메인 1개 + 부찬 여러 개가 완전히 같은 스타일로 나란히 나와 "5~6개
+메뉴"처럼 보이는 문제 — 메인을 시각적으로 강조하고, 그 메인메뉴가 그동안
+어땠는지/이번에 나오면 어떻게 될지를 보여주는 예측 패널을 추가했다.
+
+### 37.1 신메뉴 수동 지정
+
+**스키마**: `MenuMaster`에 `new_menu_override: bool | None`(None=자동판정
+따름, True=강제 노출, False=강제 제외), `new_menu_marked_on: date | None`
+(override=True로 설정한 시점 = 도입일 기준) 추가
+(`c1a2f6e9b3d4_add_new_menu_override_to_menu_master.py`).
+
+**API**: `PUT /api/analysis/menus/new-menu-status` `{menu_name, is_new}` —
+`food_vector_source`/`role_source`와 같은 "규칙 위에 관리자 수동 오버라이드"
+패턴이지만, 대상 스키마가 이미 있는 3단계 enum이 아니라 단순 override라서
+별도 enum 없이 nullable bool로 처리했다. `menu_name`으로 조회하는 이유는
+프론트가 이미 `GET /menu-combinations/{menu_name}`에서 menu_id 없이
+menu_name만 들고 있는 지점이 있어 그 컨벤션을 그대로 재사용하기 위함.
+
+**`dashboard.py::menu_highlights`**: 기존 자동판정(최근 30일
+`is_new_menu=True`)으로 dict를 만든 뒤, `new_menu_override IS NOT NULL`인
+`MenuMaster` 행을 추가로 반영한다 — `True`는 30일 창과 무관하게 계속
+노출(해제 전까지), `False`는 자동판정으로 떴어도 강제로 뺀다. 수동으로 추가된
+메뉴의 코너명은 `weekly_menu_plan`이 아니라 `_corner_id_by_menu_from_meal_log`
+(meal_log 최빈 코너, 32절과 동일 이유 — weekly_menu_plan은 누락되기 쉬움)로
+찾는다. 응답에 `is_manual` 필드를 추가해 프론트가 "관리자 지정" 배지를
+붙인다.
+
+**프론트**: `HomePage.tsx` "신메뉴 반응" 표 위에 메뉴명 입력 + "신메뉴로 등록"
+버튼, 각 행에 "신메뉴 아님으로 표시" 버튼을 추가했다.
+
+**테스트**: `test_new_menu_status_manual_add_bypasses_auto_window`(meal-log로만
+생긴 메뉴는 자동판정에 절대 안 걸리는데 수동 등록하면 뜨는지),
+`test_new_menu_status_manual_remove_hides_auto_detected_menu`,
+`test_new_menu_status_unknown_menu_name_404s`(모두
+`test_api_ingest_and_analysis.py`).
+
+### 37.2 주간 식단표 슬롯 카드 — 메인 강조 + 부찬 요약
+
+**프론트만 변경** (`frontend/src/pages/AnalysisPage.tsx`,
+`WeeklyMenuReviewTab`): 슬롯 카드 헤더 아래에 메인메뉴명을 배경이 있는
+칩으로 굵게 강조하고, 부찬은 "부찬: OO, OO, OO" 한 줄로 압축했다. 기존
+역할 수정(드롭다운, `role_source` 표시, LLM 일괄재분류)은 API/로직을 전혀
+안 건드리고 "수정" 토글 뒤로 접었다 — 평소엔 깔끔한 요약만 보이고, 고칠
+때만 펼친다. `CornerCardGrid`도 "{n}개 메뉴"라는 라벨이 실제로는 그 주의
+날짜(슬롯) 개수를 세고 있어 오해 소지가 있었는데("메뉴 4분면" 탭에서는
+`MenuPerformanceRow` 개수라 맞는 라벨이지만 재사용 컴포넌트라 그대로
+가져다 씀), 이 탭 호출부에만 `countLabel="일치 식단"`을 넘겨 문구만
+고쳤다(다른 탭은 기본값 "개 메뉴" 그대로).
+
+### 37.3 예측 패널 — 버튼 클릭 시에만 계산
+
+쿼리 여러 번 + LLM 호출이 슬롯 펼칠 때마다 자동으로 몰리면 느려지므로
+(사용자 확인), 슬롯 카드에 "예측 보기" 버튼을 두고 클릭 시에만
+`GET /api/analysis/weekly-menu/{plan_id}/predicted-impact`를 호출한다.
+
+**신규 서비스** `backend/app/services/weekly_menu_prediction.py`:
+
+- **기존 만족도/식수**: 그 메뉴의 가장 최근 `MenuPerformanceStats` 행
+  (`adjusted_score`, `total_headcount`, `evaluation_count`).
+- **이 조합(메인+부찬)의 과거 성적**: `menu_combination.py`를 확장해
+  `ComboDay`/`ComboSummary`에 `headcount`/`avg_headcount`를 추가했다(기존엔
+  만족도만 있었음 — `build_side_combos_for_main_menu`가 이미 그 날짜의
+  meal_log를 훑고 있어서 `taste_score.isnot(None)` 필터를 없애고 평가
+  여부와 무관하게 전체 행 수를 식수로, 그중 평가된 것만 만족도 평균으로
+  집계하도록 바꿨다). 지금 이 슬롯의 실제 부찬 구성(`frozenset`)과 정확히
+  일치하는 `ComboSummary`만 골라 보여준다 — 부찬이 하나라도 다르면
+  "이 정확한 조합의 과거 이력 없음".
+- **예상 점유율/식수(숫자 계산)**: `simulation.py`의 기존 baseline(코너별
+  최근 8회 headcount 평균)·`_menu_popularity_multiplier`(식수 점유율
+  배수)·`_planned_main_menu_id` 로직을 그대로 재사용하되, 사용자가 명시적
+  요청한 "코너 분당 서브 수(처리량)도 고려"를 반영하기 위해
+  `menu_throughput.py::compute_menu_throughput_summary`에서 뽑은 "이
+  메뉴의 평균 처리량 ÷ 코너 전체 평균 처리량" 비율을 추가 신호로 넣었다.
+  두 신호(식수 점유율 배수, 처리량 비율)를 **기하평균**으로 합성한다
+  (`combine_menu_multiplier`, 순수 함수) — 신호가 하나만 있으면 그것만,
+  둘 다 없으면 기존 `_DEFAULT_NEW_MENU_MULTIPLIER`(1.15)로 폴백. 이 코너의
+  `predicted_headcount = baseline × 합성배수`, 나머지 코너들은
+  `congestion_forecast`와 동일하게(baseline × 각자의 계획 메뉴 배수, 계획
+  없으면 baseline 그대로) 계산해서, `predicted_share = 이 코너 ÷ 전체 합`
+  으로 정규화한다(`compute_predicted_share`, 순수 함수).
+- **코어층/코너간 경쟁(정성 코멘트만)**: 이 코드베이스엔 코어층→식수 영향이나
+  교차-코너 경쟁을 숫자로 바꾸는 확정 공식이 없다(코어층 분류는 직원 집합
+  분류만 있고, 18절의 코어층×메뉴쌍 비교는 서술적 분석일 뿐 예측에 안
+  쓰임 — 2026-07 확인, 사용자도 정성 코멘트 방식에 동의). 그래서 이
+  둘은 실제 신호(코어층 vs 비코어층 각각 이 메뉴를 먹어본 인원 수 —
+  `compute_core_layer_menu_signal`, 순수 함수; 같은 날 다른 코너가
+  `POPULAR` 4분면 메뉴를 내는지)를 LLM 프롬프트에 사실로만 넣고,
+  "사실에 없는 숫자를 지어내지 말 것"을 명시해 2~3문장 서술로만
+  받는다(`llm_client.chat_complete`, 이미 있는 짧은 호출용 헬퍼).
+  `llm_client.is_configured`가 False면(로컬/테스트 환경) 위 숫자들을
+  그대로 조립한 템플릿 문장으로 폴백.
+
+**순환 임포트 주의**: `simulation.py`가 `analysis.py`의
+`_corner_id_by_menu_from_meal_log`를 가져다 쓰는데, 이 예측 서비스는
+`analysis.py`의 신규 엔드포인트에서 호출되므로 모듈 최상단에서
+`simulation.py`를 임포트하면 `analysis → weekly_menu_prediction →
+simulation → analysis` 순환이 생긴다. `compute_predicted_impact` 함수
+**안에서** `from app.api.simulation import ...`를 하는 지연 임포트로
+피했다(호출 시점엔 세 모듈 다 이미 로드가 끝난 뒤라 문제없음).
+
+**API**: `GET /api/analysis/weekly-menu/{plan_id}/predicted-impact` — `plan_id`가
+없거나 그 행이 메인메뉴가 아니면(부찬 행이거나 잘못된 id) 404.
+
+**테스트**: `test_weekly_menu_prediction.py`(순수 함수: `combine_menu_
+multiplier`의 기하평균/폴백, `compute_predicted_share`의 정규화,
+`compute_core_layer_menu_signal`의 카운트), `test_menu_combination.py`에
+`avg_headcount` 집계 테스트 추가,
+`test_weekly_menu_predicted_impact_returns_prediction_and_fallback_comment`
+(`test_api_ingest_and_analysis.py`, 엔드투엔드 + 부찬 행/존재하지 않는
+id에 대한 404 확인).
+
+**검증**: Playwright로 실사용 시나리오 확인 — 홈에서 신메뉴 수동 등록 시
+"(관리자 지정)" 배지가 붙고 표에 즉시 반영됨, 주간 식단표 관리에서 슬롯이
+메인 강조 칩 + 부찬 요약으로 보이고 "수정" 토글로 기존 정정 기능이 그대로
+동작함, "예측 보기" 클릭 시에만 쿼리+LLM(미설정 시 폴백 문장)이 실행되고
+기존 만족도/조합 이력/예상 식수·점유율이 표시됨.

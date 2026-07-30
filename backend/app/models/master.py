@@ -51,6 +51,13 @@ class MenuMaster(Base):
         SAEnum(FoodVectorSource, values_callable=lambda e: [x.value for x in e], native_enum=False),
         nullable=True,
     )
+    # 신메뉴 자동판정(weekly_menu_plan.is_new_menu, 최근 30일 창)을 관리자가
+    # 직접 뒤집을 수 있게 하는 오버라이드 — None=자동판정 따름, True=강제로
+    # "신메뉴 반응"에 노출(30일 창 무시, 해제 전까지 계속), False=자동판정이
+    # True여도 강제로 숨김. new_menu_marked_on은 override를 True로 설정한
+    # 시점 — "도입일"로 취급해 경과일 계산에 쓴다(2026-07).
+    new_menu_override: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    new_menu_marked_on: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
 
 
 class HolidayCalendar(Base):

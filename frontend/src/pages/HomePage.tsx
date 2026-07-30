@@ -130,6 +130,12 @@ export function HomePage() {
     queryKey: ["menu-highlights"],
     queryFn: () => api.menuHighlights(),
   });
+  const updateNewMenuStatus = useMutation({
+    mutationFn: ({ menuName, isNew }: { menuName: string; isNew: boolean | null }) =>
+      api.updateNewMenuStatus(menuName, isNew),
+    onSuccess: () => menuHighlights.refetch(),
+  });
+  const [newMenuNameDraft, setNewMenuNameDraft] = useState("");
 
   const improvementPoints = useQuery({
     queryKey: ["improvement-points"],
@@ -478,8 +484,28 @@ export function HomePage() {
             </div>
             <div>
               <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                신메뉴 반응 (최근 30일)
+                신메뉴 반응 (최근 30일 자동판정 + 관리자 직접 지정)
               </p>
+              <div className="mb-2 flex gap-2">
+                <input
+                  type="text"
+                  value={newMenuNameDraft}
+                  onChange={(e) => setNewMenuNameDraft(e.target.value)}
+                  placeholder="메뉴명 (예: 제육볶음)"
+                  className="min-w-0 flex-1 rounded border px-2 py-1 text-[13px]"
+                  style={{ borderColor: "var(--border)" }}
+                />
+                <Button
+                  disabled={!newMenuNameDraft.trim() || updateNewMenuStatus.isPending}
+                  onClick={() => {
+                    updateNewMenuStatus.mutate({ menuName: newMenuNameDraft.trim(), isNew: true });
+                    setNewMenuNameDraft("");
+                  }}
+                >
+                  신메뉴로 등록
+                </Button>
+              </div>
+              {updateNewMenuStatus.isError && <ErrorState error={updateNewMenuStatus.error} />}
               {menuHighlights.data.new_menus.length === 0 ? (
                 <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
                   해당 없음
@@ -490,9 +516,20 @@ export function HomePage() {
                     { key: "menu", label: "메뉴" },
                     { key: "days", label: "도입 후 경과일", align: "right" },
                     { key: "score", label: "만족도(평가건수)", align: "right" },
+                    { key: "action", label: "", align: "right" },
                   ]}
                   rows={menuHighlights.data.new_menus.map((r) => ({
-                    menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
+                    menu: (
+                      <>
+                        {r.menu_name}
+                        {r.corner_name ? ` (${r.corner_name})` : ""}
+                        {r.is_manual && (
+                          <span className="ml-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                            (관리자 지정)
+                          </span>
+                        )}
+                      </>
+                    ),
                     days: r.needs_attention ? (
                       <span style={{ color: "var(--warning)" }}>{r.days_since_introduction}일 · 반응 없음</span>
                     ) : (
@@ -502,8 +539,17 @@ export function HomePage() {
                       r.evaluation_count > 0
                         ? `${r.adjusted_score?.toFixed(2)} (${r.evaluation_count}건)`
                         : "평가 없음",
+                    action: (
+                      <button
+                        className="text-xs underline"
+                        style={{ color: "var(--ink-muted)" }}
+                        onClick={() => updateNewMenuStatus.mutate({ menuName: r.menu_name, isNew: false })}
+                      >
+                        신메뉴 아님으로 표시
+                      </button>
+                    ),
                   }))}
-                  rowKey={(r, i) => `${r.menu as string}-${i}`}
+                  rowKey={(_, i) => `new-menu-${i}`}
                 />
               )}
             </div>

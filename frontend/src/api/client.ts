@@ -96,6 +96,7 @@ export interface NewMenuEntry {
   evaluation_count: number;
   days_since_introduction: number;
   needs_attention: boolean;
+  is_manual: boolean;
 }
 
 export interface MenuHighlightsResponse {
@@ -246,6 +247,7 @@ export interface MenuComboRow {
   sides: (string | null)[];
   day_count: number;
   avg_satisfaction: number | null;
+  avg_headcount: number;
   nutrition_profile: Record<string, number>;
 }
 
@@ -253,6 +255,25 @@ export interface MenuCombinationsResponse {
   menu_id: number;
   menu_name: string;
   combos: MenuComboRow[];
+}
+
+export interface PredictedImpactResponse {
+  main_menu: {
+    menu_id: number;
+    menu_name: string | null;
+    adjusted_score: number | null;
+    total_headcount: number | null;
+    evaluation_count: number | null;
+  };
+  combo_history: { day_count: number; avg_satisfaction: number | null; avg_headcount: number } | null;
+  prediction: {
+    predicted_headcount: number;
+    predicted_share: number;
+    menu_share_of_traffic: number | null;
+    corner_avg_share_of_traffic: number | null;
+    throughput_ratio: number | null;
+  };
+  summary_comment: string;
 }
 
 export interface WhatIfCornerResult {
@@ -413,6 +434,12 @@ export const api = {
   tagMenusWithLlm: () =>
     request<{ tagged_menus: number }>(`/analysis/menus/tag-with-llm`, { method: "POST" }),
 
+  updateNewMenuStatus: (menuName: string, isNew: boolean | null) =>
+    request<{ menu_id: number; menu_name: string; new_menu_override: boolean | null; new_menu_marked_on: string | null }>(
+      `/analysis/menus/new-menu-status`,
+      { method: "PUT", body: JSON.stringify({ menu_name: menuName, is_new: isNew }) },
+    ),
+
   weeklyMenu: (params: { period_start: string; period_end: string }) =>
     request<WeeklyMenuSlot[]>(`/analysis/weekly-menu${qs(params)}`),
 
@@ -421,6 +448,9 @@ export const api = {
       `/analysis/weekly-menu/${planId}/role`,
       { method: "PUT", body: JSON.stringify({ menu_role: menuRole }) },
     ),
+
+  weeklyMenuPredictedImpact: (planId: number) =>
+    request<PredictedImpactResponse>(`/analysis/weekly-menu/${planId}/predicted-impact`),
 
   reclassifyWeeklyMenuRolesWithLlm: (params: { period_start: string; period_end: string }) =>
     request<{ reclassified_slots: number }>(

@@ -1,0 +1,293 @@
+"""주간 식단표 슬롯(메인메뉴)의 예상 영향 — 버튼 클릭 시에만 계산한다(2026-07,
+사용자 확인 — 슬롯 펼칠 때마다 자동으로 돌면 쿼리+LLM 호출이 몰려 느려짐).
+
+기존 만족도/식수(menu_performance_stats), 이 조합(메인+부찬)의 과거 성적
+(menu_combination.py), 예상 점유율/식수(코너 baseline × 메뉴 인기도 배수 ×
+분당 처리량 비율을 기하평균으로 합성)는 숫자로 계산한다. "코어층 영향"과
+"코너간 메뉴 경쟁"은 이 코드베이스에 확정된 계산 공식이 없어(코어층 분류는
+직원 집합 분류만 있고, 교차-코너 경쟁 모델은 아예 없음, 2026-07 확인) 실제
+신호(코어층 방문 빈도, 같은 날 경쟁 코너의 인기메뉴 여부)를 LLM에게 근거로
+주고 2~3문장 정성 코멘트로만 받는다(사용자도 이 방식에 동의함) — 실제 수치를
+지어내지 않도록 프롬프트에 못박는다.
+"""
+
+import datetime as dt
+from dataclasses import dataclass
+
+from sqlalchemy.orm import Session
+
+from app.models.enums import MenuQuadrant, MenuRole
+from app.models.logs import WeeklyMenuPlan
+from app.models.master import CornerMaster, MenuMaster
+from app.models.stats import MenuPerformanceStats
+from app.services.corner_core_layer import build_employee_corner_counts, classify_corner_core_layer
+from app.services.holidays import HolidayService
+from app.services.llm_client import InternalLLMClient
+from app.services.menu_affinity import build_employee_menu_sets
+from app.services.menu_combination import build_side_combos_for_main_menu, compute_combo_satisfaction_summary
+from app.services.menu_throughput import build_corner_daily_throughput, compute_menu_throughput_summary
+
+_HISTORY_WINDOW_DAYS = 180  # menu_performance_stats 롤링 윈도우(6.3절)와 동일 범위
+
+
+def combine_menu_multiplier(share_multiplier: float | None, throughput_ratio: float | None) -> float | None:
+    """순수 함수 — 두 인기도 신호(식수 점유율 배수, 분당 처리량 비율)를
+    기하평균으로 합성한다. 신호가 하나만 있으면 그것만 쓰고, 둘 다 없으면
+    None(호출부가 기본 배수로 폴백)."""
+    signals = [s for s in (share_multiplier, throughput_ratio) if s is not None and s > 0]
+    if not signals:
+        return None
+    product = 1.0
+    for s in signals:
+        product *= s
+    return product ** (1 / len(signals))
+
+
+def compute_predicted_share(corner_headcounts: dict[int, float]) -> dict[int, float]:
+    """순수 함수 — {corner_id: predicted_headcount}를 받아 {corner_id: 점유율}로 정규화한다."""
+    total = sum(corner_headcounts.values())
+    if total <= 0:
+        return {corner_id: 0.0 for corner_id in corner_headcounts}
+    return {corner_id: headcount / total for corner_id, headcount in corner_headcounts.items()}
+
+
+@dataclass(frozen=True)
+class CoreLayerMenuSignal:
+    core_employee_count: int
+    core_menu_eaters: int
+    non_core_employee_count: int
+    non_core_menu_eaters: int
+
+
+def compute_core_layer_menu_signal(
+    core_employee_ids: set[str],
+    all_employee_ids: set[str],
+    employee_menus: dict[str, set[str]],
+    menu_name: str,
+) -> CoreLayerMenuSignal:
+    """순수 함수 — 코어층/비코어층 각각 이 메뉴를 먹어본 적 있는 인원 수를 센다.
+    확정된 배수 공식이 없으므로 이 카운트는 LLM 프롬프트에 사실로만 넘긴다."""
+    non_core_ids = all_employee_ids - core_employee_ids
+    core_eaters = sum(1 for e in core_employee_ids if menu_name in employee_menus.get(e, set()))
+    non_core_eaters = sum(1 for e in non_core_ids if menu_name in employee_menus.get(e, set()))
+    return CoreLayerMenuSignal(
+        core_employee_count=len(core_employee_ids),
+        core_menu_eaters=core_eaters,
+        non_core_employee_count=len(non_core_ids),
+        non_core_menu_eaters=non_core_eaters,
+    )
+
+
+def _build_summary_prompt(facts: dict[str, str]) -> str:
+    return (
+        "당신은 구내식당 메뉴 담당자를 돕는 분석가입니다. 아래 사실만 근거로 이번에 "
+        f"'{facts['corner_name']}' 코너에서 '{facts['menu_name']}'이(가) 나올 때 어떨지 "
+        "2~3문장으로 요약하세요. 사실에 없는 숫자를 지어내지 말고 정성적으로 서술하세요.\n\n"
+        f"- 기존 만족도: {facts['existing_satisfaction']}\n"
+        f"- 기존 평균 식수: {facts['existing_headcount']}\n"
+        f"- 이 부찬 조합 과거 이력: {facts['combo_history']}\n"
+        f"- 예상 점유율/식수: {facts['prediction']}\n"
+        f"- 코어층 신호: {facts['core_layer']}\n"
+        f"- 같은 날 경쟁 코너 현황: {facts['competition']}\n"
+    )
+
+
+def _fallback_summary(facts: dict[str, str]) -> str:
+    return (
+        f"{facts['menu_name']}은(는) 예상 식수 {facts['prediction_headcount_text']}, "
+        f"예상 점유율 {facts['prediction_share_text']}로 추정됩니다. 기존 만족도는 "
+        f"{facts['existing_satisfaction']}입니다. (사내 LLM 미설정 — 수치 기반 요약)"
+    )
+
+
+async def compute_predicted_impact(db: Session, llm_client: InternalLLMClient, plan_id: int) -> dict | None:
+    """오케스트레이션 — plan_id(메인메뉴 행)의 예측 패널 데이터 전체를 조립한다.
+    plan_id가 없거나 그 행이 메인메뉴가 아니면 None(호출부가 404/400 처리)."""
+    plan = db.get(WeeklyMenuPlan, plan_id)
+    if plan is None or plan.menu_role != MenuRole.MAIN:
+        return None
+
+    menu = db.get(MenuMaster, plan.menu_id)
+    corner = db.get(CornerMaster, plan.corner_id)
+
+    period_end = plan.plan_date - dt.timedelta(days=1)
+    period_start = period_end - dt.timedelta(days=_HISTORY_WINDOW_DAYS)
+
+    # 1) 기존 만족도/식수 — 가장 최근 menu_performance_stats 구간
+    menu_stats = (
+        db.query(MenuPerformanceStats)
+        .filter_by(menu_id=plan.menu_id)
+        .order_by(MenuPerformanceStats.period_end.desc())
+        .first()
+    )
+
+    # 2) 이 조합(메인+부찬)의 과거 성적 — 지금 이 슬롯의 실제 부찬 구성과 일치하는 것만
+    current_side_ids = frozenset(
+        row[0]
+        for row in db.query(WeeklyMenuPlan.menu_id)
+        .filter(
+            WeeklyMenuPlan.plan_date == plan.plan_date,
+            WeeklyMenuPlan.corner_id == plan.corner_id,
+            WeeklyMenuPlan.meal_type == plan.meal_type,
+            WeeklyMenuPlan.menu_role == MenuRole.SIDE,
+        )
+        .all()
+    )
+    combo_days = build_side_combos_for_main_menu(db, plan.menu_id, period_start, period_end)
+    combo_summaries = compute_combo_satisfaction_summary(combo_days)
+    combo_match = next((c for c in combo_summaries if c.side_menu_ids == current_side_ids), None)
+
+    # 3) 예상 점유율/식수 — simulation.py의 baseline/배수 로직 재사용.
+    # 지연 임포트: simulation.py가 analysis.py의 헬퍼를 가져다 쓰는데(_corner_id_
+    # by_menu_from_meal_log), 이 파일은 analysis.py의 신규 엔드포인트에서 호출되므로
+    # 모듈 최상단에서 임포트하면 analysis → 이 파일 → simulation → analysis로
+    # 순환 임포트가 생긴다. 함수 안에서 임포트하면 호출 시점엔 세 모듈 다 이미
+    # 로드가 끝난 뒤라 문제없다.
+    from app.api.simulation import (
+        _DEFAULT_NEW_MENU_MULTIPLIER,
+        _baseline_headcount,
+        _menu_popularity_multiplier,
+        _planned_main_menu_id,
+    )
+
+    holiday_svc = HolidayService(db)
+    is_holiday = holiday_svc.is_holiday(plan.plan_date)
+
+    share_multiplier = _menu_popularity_multiplier(db, plan.corner_id, plan.menu_id)
+    throughput_days = build_corner_daily_throughput(db, plan.corner_id, period_start, period_end)
+    throughput_summary = compute_menu_throughput_summary(throughput_days)
+    throughput_entry = next((m for m in throughput_summary.menus if m.menu_id == plan.menu_id), None)
+    throughput_ratio = (
+        throughput_entry.avg_throughput / throughput_summary.overall_avg_throughput
+        if throughput_entry and throughput_summary.overall_avg_throughput
+        else None
+    )
+    combined_multiplier = combine_menu_multiplier(share_multiplier, throughput_ratio)
+    target_multiplier = combined_multiplier if combined_multiplier is not None else _DEFAULT_NEW_MENU_MULTIPLIER
+
+    corner_headcounts: dict[int, float] = {}
+    for c in db.query(CornerMaster).all():
+        baseline = _baseline_headcount(db, c.corner_id, plan.meal_type, is_holiday)
+        if c.corner_id == plan.corner_id:
+            corner_headcounts[c.corner_id] = baseline * target_multiplier
+            continue
+        other_planned = _planned_main_menu_id(db, c.corner_id, plan.meal_type, plan.plan_date)
+        other_multiplier = (
+            _menu_popularity_multiplier(db, c.corner_id, other_planned) if other_planned is not None else None
+        )
+        corner_headcounts[c.corner_id] = baseline * other_multiplier if other_multiplier else baseline
+
+    predicted_shares = compute_predicted_share(corner_headcounts)
+    predicted_headcount = corner_headcounts.get(plan.corner_id, 0.0)
+    predicted_share = predicted_shares.get(plan.corner_id, 0.0)
+
+    # 4) 코어층/경쟁 사실 수집 (숫자 공식화 안 함 — LLM 프롬프트용 사실만)
+    employee_corner_counts = build_employee_corner_counts(db, period_start, period_end)
+    core_layer_employees = {
+        r.employee_id for r in classify_corner_core_layer(employee_corner_counts, plan.corner_id)
+    }
+    employee_menus = build_employee_menu_sets(db, period_start, period_end)
+    core_signal = compute_core_layer_menu_signal(
+        core_layer_employees,
+        set(employee_corner_counts.keys()),
+        employee_menus,
+        menu.menu_name if menu else "",
+    )
+
+    competing_rows = (
+        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name, CornerMaster.corner_name)
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
+        .filter(
+            WeeklyMenuPlan.plan_date == plan.plan_date,
+            WeeklyMenuPlan.meal_type == plan.meal_type,
+            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+            WeeklyMenuPlan.corner_id != plan.corner_id,
+        )
+        .all()
+    )
+    competing_popular = []
+    for other_menu_id, other_menu_name, other_corner_name in competing_rows:
+        other_stats = (
+            db.query(MenuPerformanceStats)
+            .filter_by(menu_id=other_menu_id)
+            .order_by(MenuPerformanceStats.period_end.desc())
+            .first()
+        )
+        if other_stats and other_stats.quadrant_label == MenuQuadrant.POPULAR:
+            competing_popular.append(f"{other_corner_name}의 {other_menu_name}(인기메뉴)")
+
+    # 5) LLM 코멘트 — 위에서 모은 사실을 문장으로 정리해 프롬프트에 넣는다
+    existing_satisfaction_text = (
+        f"{menu_stats.adjusted_score:.2f}"
+        if menu_stats and menu_stats.adjusted_score is not None
+        else "이력 없음"
+    )
+    existing_headcount_text = f"{menu_stats.total_headcount}" if menu_stats else "이력 없음"
+    combo_history_text = (
+        f"이 조합으로 {combo_match.day_count}일 등장, 평균 만족도 {combo_match.avg_satisfaction:.2f}, "
+        f"평균 식수 {combo_match.avg_headcount:.1f}명"
+        if combo_match and combo_match.avg_satisfaction is not None
+        else (
+            f"이 조합으로 {combo_match.day_count}일 등장했으나 평가 없음"
+            if combo_match
+            else "이 정확한 부찬 조합의 과거 이력 없음"
+        )
+    )
+    prediction_headcount_text = f"{predicted_headcount:.1f}명"
+    prediction_share_text = f"{predicted_share * 100:.1f}%"
+    core_layer_text = (
+        f"코어층 {core_signal.core_employee_count}명 중 {core_signal.core_menu_eaters}명, "
+        f"비코어층 {core_signal.non_core_employee_count}명 중 {core_signal.non_core_menu_eaters}명이 "
+        "이 메뉴를 먹어본 적 있음"
+    )
+    competition_text = ", ".join(competing_popular) if competing_popular else "같은 날 인기메뉴로 경쟁하는 코너 없음"
+
+    facts = {
+        "corner_name": corner.corner_name if corner else "",
+        "menu_name": menu.menu_name if menu else "",
+        "existing_satisfaction": existing_satisfaction_text,
+        "existing_headcount": existing_headcount_text,
+        "combo_history": combo_history_text,
+        "prediction": f"식수 {prediction_headcount_text}, 점유율 {prediction_share_text}",
+        "prediction_headcount_text": prediction_headcount_text,
+        "prediction_share_text": prediction_share_text,
+        "core_layer": core_layer_text,
+        "competition": competition_text,
+    }
+
+    if llm_client.is_configured:
+        summary_comment = await llm_client.chat_complete([{"role": "user", "content": _build_summary_prompt(facts)}])
+    else:
+        summary_comment = _fallback_summary(facts)
+
+    return {
+        "main_menu": {
+            "menu_id": plan.menu_id,
+            "menu_name": menu.menu_name if menu else None,
+            "adjusted_score": menu_stats.adjusted_score if menu_stats else None,
+            "total_headcount": menu_stats.total_headcount if menu_stats else None,
+            "evaluation_count": menu_stats.evaluation_count if menu_stats else None,
+        },
+        "combo_history": (
+            {
+                "day_count": combo_match.day_count,
+                "avg_satisfaction": combo_match.avg_satisfaction,
+                "avg_headcount": round(combo_match.avg_headcount, 1),
+            }
+            if combo_match
+            else None
+        ),
+        "prediction": {
+            "predicted_headcount": round(predicted_headcount, 1),
+            "predicted_share": round(predicted_share, 3),
+            "menu_share_of_traffic": menu_stats.share_of_traffic if menu_stats else None,
+            "corner_avg_share_of_traffic": (
+                round(menu_stats.share_of_traffic / share_multiplier, 4)
+                if menu_stats and menu_stats.share_of_traffic is not None and share_multiplier
+                else None
+            ),
+            "throughput_ratio": round(throughput_ratio, 2) if throughput_ratio else None,
+        },
+        "summary_comment": summary_comment.strip(),
+    }
