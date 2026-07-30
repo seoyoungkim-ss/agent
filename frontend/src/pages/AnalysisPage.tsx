@@ -10,6 +10,8 @@ import {
   type MenuFoodVectorRow,
   type MenuPairRow,
   type MenuPerformanceRow,
+  type WeeklyMenuPlanItem,
+  type WeeklyMenuSlot,
 } from "../api/client";
 import {
   Button,
@@ -25,7 +27,7 @@ import {
   useChartTheme,
 } from "../components/ui";
 
-type SubTab = "menus" | "corners" | "users";
+type SubTab = "menus" | "corners" | "users" | "weekly-menu";
 
 function isoDaysAgo(days: number): string {
   const d = new Date();
@@ -1334,11 +1336,299 @@ function MenuFoodVectorAdminSection() {
   );
 }
 
+function MenuComboSection() {
+  const [menuName, setMenuName] = useState("");
+  const [searched, setSearched] = useState<string | null>(null);
+  const query = useQuery({
+    queryKey: ["menu-combinations", searched],
+    queryFn: () =>
+      api.menuSideCombinations(searched as string, { period_start: PERIOD_START, period_end: PERIOD_END }),
+    enabled: !!searched,
+    retry: false,
+  });
+
+  return (
+    <Card title="부찬 조합별 만족도 비교 — 메인메뉴 기준">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        메인 메뉴명을 검색하면, 그동안 짝지어 나온 부찬 조합별로 그 날짜의 평균 만족도를 비교합니다.
+        영양 프로필은 실제 칼로리·영양성분이 아니라 메뉴 특성(매운맛/단백질/채소 비중 등) 기반
+        추정치입니다.
+      </p>
+      <div className="mb-3 flex gap-2">
+        <input
+          className="w-48 rounded-md border px-3 py-2 text-[13px]"
+          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+          placeholder="메뉴명 (예: 제육볶음)"
+          value={menuName}
+          onChange={(e) => setMenuName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && setSearched(menuName)}
+        />
+        <Button onClick={() => setSearched(menuName)}>조회</Button>
+      </div>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {query.data && query.data.combos.length === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          이 메뉴가 메인으로 나온 부찬 조합 기록이 없습니다.
+        </p>
+      )}
+      {query.data && query.data.combos.length > 0 && (
+        <div className="space-y-2">
+          {query.data.combos.map((c, i) => (
+            <div key={i} className="rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] font-medium">
+                  {c.sides.filter(Boolean).join(" + ") || "부찬 없음"}
+                </span>
+                <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                  {c.day_count}일 등장
+                </span>
+              </div>
+              <div className="mt-1 text-[13px]">
+                만족도: {c.avg_satisfaction != null ? c.avg_satisfaction.toFixed(2) : "평가 없음"}
+              </div>
+              {Object.keys(c.nutrition_profile).length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  {Object.entries(c.nutrition_profile).map(([label, value]) => (
+                    <span key={label}>
+                      {label} {value.toFixed(2)}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function weeklyMondayOf(date: Date): string {
+  const d = new Date(date);
+  const day = (d.getDay() + 6) % 7; // 월=0 ... 일=6
+  d.setDate(d.getDate() - day);
+  return d.toISOString().slice(0, 10);
+}
+
+function weeklyAddDays(iso: string, days: number): string {
+  const d = new Date(iso);
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function daysUntil(iso: string): number {
+  const target = new Date(iso);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  target.setHours(0, 0, 0, 0);
+  return Math.round((target.getTime() - today.getTime()) / 86_400_000);
+}
+
+function WeeklyMenuRoleRow({
+  item,
+  label,
+  onChangeRole,
+}: {
+  item: WeeklyMenuPlanItem;
+  label: "메인" | "부찬";
+  onChangeRole: (role: "메인" | "부찬") => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2 text-[13px]">
+      <span>
+        {item.menu_name}
+        {item.role_source !== "관리자수동" && (
+          <span className="ml-1.5 text-xs" style={{ color: "var(--ink-muted)" }}>
+            (자동분류·{item.role_source})
+          </span>
+        )}
+      </span>
+      <select
+        value={label}
+        onChange={(e) => onChangeRole(e.target.value as "메인" | "부찬")}
+        className="rounded border px-1.5 py-0.5 text-xs"
+        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+      >
+        <option value="메인">메인</option>
+        <option value="부찬">부찬</option>
+      </select>
+    </div>
+  );
+}
+
+function WeeklyMenuReviewTab() {
+  const [selectedMonday, setSelectedMonday] = useState(weeklyMondayOf(new Date()));
+  const sunday = weeklyAddDays(selectedMonday, 6);
+  const [expandedCorner, setExpandedCorner] = useState<string | null>(null);
+  const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
+
+  const slotsQuery = useQuery({
+    queryKey: ["weekly-menu", selectedMonday],
+    queryFn: () => api.weeklyMenu({ period_start: selectedMonday, period_end: sunday }),
+  });
+  const feedbackQuery = useQuery({
+    queryKey: ["weekly-menu-feedback", selectedMonday],
+    queryFn: () => api.weeklyMenuFeedback({ period_start: selectedMonday, period_end: sunday }),
+  });
+  const updateRole = useMutation({
+    mutationFn: (params: { planId: number; menuRole: "메인" | "부찬" }) =>
+      api.updateWeeklyMenuRole(params.planId, params.menuRole),
+    onSuccess: () => slotsQuery.refetch(),
+  });
+  const reclassifyWithLlm = useMutation({
+    mutationFn: () => api.reclassifyWeeklyMenuRolesWithLlm({ period_start: selectedMonday, period_end: sunday }),
+    onSuccess: () => slotsQuery.refetch(),
+  });
+  const submitFeedback = useMutation({
+    mutationFn: (params: { plan_date: string; corner_id: number; comment: string }) =>
+      api.createWeeklyMenuFeedback(params),
+    onSuccess: () => feedbackQuery.refetch(),
+  });
+
+  const slots = slotsQuery.data ?? [];
+  const cornerGroups = groupByCorner(slots);
+  const expandedSlots = (cornerGroups.find(([c]) => c === expandedCorner)?.[1] ?? [] as WeeklyMenuSlot[])
+    .slice()
+    .sort((a, b) => a.plan_date.localeCompare(b.plan_date));
+
+  return (
+    <div className="space-y-4">
+      <Card title="주간 식단표 관리">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          식당에서 2주 전에 전달한 식단표를 확인하고, 셀 병합 등으로 메인/부찬이 잘못 나뉘었으면
+          여기서 직접 고치세요. 각 날짜의 개선의견은 그 날짜의 7일 전(마감)까지 제출할 수 있습니다.
+        </p>
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <Button variant="secondary" onClick={() => setSelectedMonday((d) => weeklyAddDays(d, -7))}>
+            ◀ 이전 주
+          </Button>
+          <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            {selectedMonday} ~ {sunday}
+          </span>
+          <Button variant="secondary" onClick={() => setSelectedMonday((d) => weeklyAddDays(d, 7))}>
+            다음 주 ▶
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => reclassifyWithLlm.mutate()}
+            disabled={reclassifyWithLlm.isPending}
+          >
+            {reclassifyWithLlm.isPending ? "재분류 중..." : "일괄 자동 분류(LLM)"}
+          </Button>
+        </div>
+        {slotsQuery.isLoading && <LoadingState />}
+        {slotsQuery.isError && <ErrorState error={slotsQuery.error} />}
+        {!slotsQuery.isLoading && slots.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이 기간에 등록된 주간 식단표가 없습니다.
+          </p>
+        )}
+        {cornerGroups.length > 0 && (
+          <CornerCardGrid
+            groups={cornerGroups}
+            selected={expandedCorner}
+            onSelect={(c) => setExpandedCorner((cur) => (cur === c ? null : c))}
+          />
+        )}
+        {expandedCorner && (
+          <div className="mt-4 space-y-3">
+            {expandedSlots.map((slot) => {
+              const key = `${slot.plan_date}_${slot.corner_id}`;
+              const dday = daysUntil(slot.feedback_deadline);
+              return (
+                <div key={key} className="rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[13px] font-medium">
+                      {slot.plan_date} ({slot.meal_type})
+                    </span>
+                    <span
+                      className="text-xs"
+                      style={{ color: slot.is_past_deadline ? "var(--ink-muted)" : "var(--warning)" }}
+                    >
+                      {slot.is_past_deadline ? "마감" : `의견 제출 D-${dday}`}
+                    </span>
+                  </div>
+                  <div className="mt-2 space-y-1">
+                    {slot.main && (
+                      <WeeklyMenuRoleRow
+                        item={slot.main}
+                        label="메인"
+                        onChangeRole={(role) => updateRole.mutate({ planId: slot.main!.plan_id, menuRole: role })}
+                      />
+                    )}
+                    {slot.sides.map((item) => (
+                      <WeeklyMenuRoleRow
+                        key={item.plan_id}
+                        item={item}
+                        label="부찬"
+                        onChangeRole={(role) => updateRole.mutate({ planId: item.plan_id, menuRole: role })}
+                      />
+                    ))}
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <input
+                      value={commentDrafts[key] ?? ""}
+                      onChange={(e) => setCommentDrafts((c) => ({ ...c, [key]: e.target.value }))}
+                      placeholder="개선의견 (예: 이 부찬 조합 별로예요)"
+                      className="flex-1 rounded-md border px-2 py-1 text-[13px]"
+                      style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                    />
+                    <Button
+                      variant="secondary"
+                      disabled={!commentDrafts[key]}
+                      onClick={() => {
+                        submitFeedback.mutate({
+                          plan_date: slot.plan_date,
+                          corner_id: slot.corner_id,
+                          comment: commentDrafts[key],
+                        });
+                        setCommentDrafts((c) => ({ ...c, [key]: "" }));
+                      }}
+                    >
+                      등록
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      <Card title="등록된 개선의견">
+        {feedbackQuery.isLoading && <LoadingState />}
+        {feedbackQuery.isError && <ErrorState error={feedbackQuery.error} />}
+        {feedbackQuery.data && feedbackQuery.data.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이 기간에 등록된 개선의견이 없습니다.
+          </p>
+        )}
+        {feedbackQuery.data && feedbackQuery.data.length > 0 && (
+          <Table
+            columns={[
+              { key: "plan_date", label: "날짜" },
+              { key: "corner", label: "코너" },
+              { key: "comment", label: "의견" },
+            ]}
+            rows={feedbackQuery.data.map((f) => ({
+              plan_date: f.plan_date,
+              corner: f.corner_name ?? "-",
+              comment: f.comment,
+            }))}
+            rowKey={(r, i) => `${r.plan_date as string}-${i}`}
+          />
+        )}
+      </Card>
+    </div>
+  );
 }
 
 export function AnalysisPage() {
@@ -1347,6 +1637,7 @@ export function AnalysisPage() {
     { value: "menus", label: "메뉴 4분면" },
     { value: "corners", label: "코너별 분석" },
     { value: "users", label: "사용자 분석" },
+    { value: "weekly-menu", label: "주간 식단표 관리" },
   ];
   return (
     <div className="space-y-4">
@@ -1368,11 +1659,13 @@ export function AnalysisPage() {
       {tab === "menus" && (
         <div className="space-y-4">
           <MenuQuadrantTab />
+          <MenuComboSection />
           <MenuFoodVectorAdminSection />
         </div>
       )}
       {tab === "corners" && <CornerAnalysisTab />}
       {tab === "users" && <UserAnalysisTab />}
+      {tab === "weekly-menu" && <WeeklyMenuReviewTab />}
     </div>
   );
 }

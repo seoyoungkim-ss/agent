@@ -131,6 +131,12 @@ export function HomePage() {
     queryFn: () => api.menuHighlights(),
   });
 
+  const improvementPoints = useQuery({
+    queryKey: ["improvement-points"],
+    queryFn: () =>
+      api.improvementPoints({ period_start: RECOMPUTE_PERIOD_START, period_end: RECOMPUTE_PERIOD_END }),
+  });
+
   const totalHeadcount = weekly.data?.reduce((sum, d) => sum + d.headcount, 0) ?? 0;
   const chartTheme = useChartTheme();
   const seriesWeekday = resolveColor("var(--series-1)");
@@ -268,6 +274,38 @@ export function HomePage() {
         />
         <StatTile label="선택한 달 VOE 코멘트 수" value={voeCategory.data?.total_comments ?? 0} />
       </div>
+
+      <Card title="개선 포인트 — 혼잡도 / 만족도 / VOE">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          최근 180일 분석 기준으로 지금 손볼 만한 지점입니다(v0 휴리스틱 — 매 요청 시
+          자동으로 골라 보여줍니다).
+        </p>
+        {improvementPoints.isLoading && <LoadingState />}
+        {improvementPoints.isError && <ErrorState error={improvementPoints.error} />}
+        {improvementPoints.data && improvementPoints.data.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            특별한 이상 없음
+          </p>
+        )}
+        {improvementPoints.data && improvementPoints.data.length > 0 && (
+          <ul className="space-y-2">
+            {improvementPoints.data.map((p, i) => (
+              <li key={i} className="flex items-start gap-2">
+                <span
+                  className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
+                  style={{ background: p.severity === "critical" ? "var(--critical)" : "var(--warning)" }}
+                />
+                <div>
+                  <div className="text-[13px] font-medium">{p.title}</div>
+                  <div className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                    {p.detail}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
 
       <Card title="주간 식수 추이">
         <div className="mb-3">
@@ -450,10 +488,16 @@ export function HomePage() {
                 <Table
                   columns={[
                     { key: "menu", label: "메뉴" },
+                    { key: "days", label: "도입 후 경과일", align: "right" },
                     { key: "score", label: "만족도(평가건수)", align: "right" },
                   ]}
                   rows={menuHighlights.data.new_menus.map((r) => ({
                     menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
+                    days: r.needs_attention ? (
+                      <span style={{ color: "var(--warning)" }}>{r.days_since_introduction}일 · 반응 없음</span>
+                    ) : (
+                      `${r.days_since_introduction}일`
+                    ),
                     score:
                       r.evaluation_count > 0
                         ? `${r.adjusted_score?.toFixed(2)} (${r.evaluation_count}건)`

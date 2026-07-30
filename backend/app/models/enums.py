@@ -33,6 +33,18 @@ class MenuRole(str, enum.Enum):
     SIDE = "부찬"
 
 
+class MenuRoleSource(str, enum.Enum):
+    """PRD: weekly_menu_plan.menu_role(주찬/부찬)이 어떻게 정해졌는지 구분한다.
+
+    FoodVectorSource와 동일한 3단계 패턴 — MANUAL로 표시된 행은 이후 LLM
+    일괄 재분류 배치(app/services/weekly_menu_role_llm.py)가 건드리지 않는다.
+    """
+
+    RULE = "규칙기반"
+    LLM = "LLM추정"
+    MANUAL = "관리자수동"
+
+
 class HolidayType(str, enum.Enum):
     """PRD 3.1: 근로자의 날/대체공휴일을 포함해 휴일로 분류."""
 

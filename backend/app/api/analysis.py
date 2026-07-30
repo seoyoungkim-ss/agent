@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.models.enums import FoodVectorSource
+from app.models.enums import FoodVectorSource, MenuRole
 from app.models.logs import MealLog
 from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import (
@@ -31,9 +31,21 @@ from app.services.menu_affinity import (
     compute_menu_affinity,
     compute_top_menu_pairs,
 )
+from app.services.menu_combination import (
+    build_side_combos_for_main_menu,
+    compute_combo_nutrition_profile,
+    compute_combo_satisfaction_summary,
+)
 from app.services.menu_throughput import build_corner_daily_throughput, compute_menu_throughput_summary
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
+from app.services.weekly_menu_review import (
+    add_feedback,
+    build_weekly_menu_slots,
+    list_feedback,
+    set_menu_role,
+)
+from app.services.weekly_menu_role_llm import reclassify_weekly_menu_roles
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -503,6 +515,100 @@ async def tag_menus_with_llm(db: Session = Depends(get_db)):
     return {"tagged_menus": tagged}
 
 
+def _serialize_weekly_menu_item(item) -> dict | None:
+    if item is None:
+        return None
+    return {"plan_id": item.plan_id, "menu_id": item.menu_id, "menu_name": item.menu_name, "role_source": item.role_source}
+
+
+@router.get("/weekly-menu")
+def list_weekly_menu(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """주간 식단표 검토/관리 화면: 그 기간의 (날짜, 코너, 식사구분)별 주찬/부찬과
+    개선의견 제출 마감(plan_date - 7일) 정보를 반환한다."""
+    slots = build_weekly_menu_slots(db, period_start, period_end)
+    return [
+        {
+            "plan_date": s.plan_date.isoformat(),
+            "corner_id": s.corner_id,
+            "corner_name": s.corner_name,
+            "meal_type": s.meal_type,
+            "main": _serialize_weekly_menu_item(s.main),
+            "sides": [_serialize_weekly_menu_item(item) for item in s.sides],
+            "feedback_deadline": s.feedback_deadline.isoformat(),
+            "is_past_deadline": s.is_past_deadline,
+        }
+        for s in slots
+    ]
+
+
+class MenuRoleUpdateRequest(BaseModel):
+    menu_role: MenuRole
+
+
+@router.put("/weekly-menu/{plan_id}/role")
+def update_weekly_menu_role(plan_id: int, payload: MenuRoleUpdateRequest, db: Session = Depends(get_db)):
+    """관리자가 셀 병합 등으로 잘못 판별된 주찬/부찬을 직접 고친다.
+
+    role_source가 "관리자수동"으로 잠겨 이후 LLM 일괄 재분류가 이 행을 건드리지
+    않는다(food_vector 관리자수동 잠금과 동일한 보호 방식).
+    """
+    plan = set_menu_role(db, plan_id, payload.menu_role)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="식단표 항목을 찾을 수 없습니다")
+    return {"plan_id": plan.id, "menu_role": plan.menu_role.value, "role_source": plan.role_source.value}
+
+
+class WeeklyMenuFeedbackRequest(BaseModel):
+    plan_date: dt.date
+    corner_id: int
+    comment: str
+
+
+@router.post("/weekly-menu/feedback")
+def create_weekly_menu_feedback(payload: WeeklyMenuFeedbackRequest, db: Session = Depends(get_db)):
+    """관리자가 주간 식단표에 남기는 개선의견 — 마감(plan_date - 7일)이 지나도
+    저장은 항상 가능하다(이력으로 남김), 화면에서 마감 여부만 배지로 알려준다."""
+    corner = db.get(CornerMaster, payload.corner_id)
+    if corner is None:
+        raise HTTPException(status_code=404, detail="코너를 찾을 수 없습니다")
+    feedback = add_feedback(db, payload.plan_date, payload.corner_id, payload.comment)
+    return {
+        "id": feedback.id,
+        "plan_date": feedback.plan_date.isoformat(),
+        "corner_id": feedback.corner_id,
+        "comment": feedback.comment,
+        "created_at": feedback.created_at.isoformat(),
+    }
+
+
+@router.get("/weekly-menu/feedback")
+def list_weekly_menu_feedback(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    corners = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+    feedback_rows = list_feedback(db, period_start, period_end)
+    return [
+        {
+            "id": f.id,
+            "plan_date": f.plan_date.isoformat(),
+            "corner_id": f.corner_id,
+            "corner_name": corners.get(f.corner_id),
+            "comment": f.comment,
+            "created_at": f.created_at.isoformat(),
+        }
+        for f in feedback_rows
+    ]
+
+
+@router.post("/weekly-menu/reclassify-roles-with-llm")
+async def reclassify_weekly_menu_roles_endpoint(
+    period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)
+):
+    """규칙 기반으로 나뉜(role_source != 관리자수동) 주찬/부찬을 사내 LLM으로
+    일괄 재분류한다. 관리자가 수동으로 고친 행은 건드리지 않는다."""
+    client = InternalLLMClient(get_settings())
+    reclassified = await reclassify_weekly_menu_roles(db, client, period_start, period_end)
+    return {"reclassified_slots": reclassified}
+
+
 @router.get("/menu-affinity/{menu_name}")
 def menu_affinity(
     menu_name: str,
@@ -522,6 +628,43 @@ def menu_affinity(
             status_code=404, detail=f"'{menu_name}' 메뉴의 취식 기록이 이 기간에 없습니다."
         )
     return [{"menu_name": r.menu_name, "co_count": r.co_count, "lift": r.lift} for r in results]
+
+
+@router.get("/menu-combinations/{menu_name}")
+def menu_side_combinations(menu_name: str, period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """이 메뉴가 메인(주찬)으로 나온 날짜들을 부찬 조합별로 묶어 만족도를
+    비교한다. 같은 메인메뉴는 항상 같은 부찬을 받는다는 전제(2026-07 확인)로
+    날짜 단위 비교를 쓴다 — meal_log는 개인이 어떤 부찬을 골랐는지 모른다.
+    """
+    menu = db.query(MenuMaster).filter_by(menu_name=menu_name).one_or_none()
+    if menu is None:
+        raise HTTPException(status_code=404, detail=f"'{menu_name}' 메뉴를 찾을 수 없습니다")
+
+    days = build_side_combos_for_main_menu(db, menu.menu_id, period_start, period_end)
+    summaries = compute_combo_satisfaction_summary(days)
+
+    all_menu_ids = {menu.menu_id}
+    for s in summaries:
+        all_menu_ids.update(s.side_menu_ids)
+    menus = db.query(MenuMaster).filter(MenuMaster.menu_id.in_(all_menu_ids)).all()
+    menu_names = {m.menu_id: m.menu_name for m in menus}
+    food_vectors = {m.menu_id: [float(x) for x in m.food_vector] for m in menus if m.food_vector is not None}
+
+    return {
+        "menu_id": menu.menu_id,
+        "menu_name": menu.menu_name,
+        "combos": [
+            {
+                "sides": [menu_names.get(sid) for sid in sorted(s.side_menu_ids)],
+                "day_count": s.day_count,
+                "avg_satisfaction": s.avg_satisfaction,
+                "nutrition_profile": compute_combo_nutrition_profile(
+                    [menu.menu_id, *s.side_menu_ids], food_vectors
+                ),
+            }
+            for s in summaries
+        ],
+    }
 
 
 @router.get("/menu-pairs/top")

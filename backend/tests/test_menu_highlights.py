@@ -59,14 +59,22 @@ def test_menu_satisfaction_trends_limits_to_top_n():
 
 
 def test_new_menu_reactions_computes_score_per_menu():
-    new_menus = {10: ("신메뉴A", "한식"), 11: ("신메뉴B", None)}
+    today = dt.date(2026, 7, 29)
+    new_menus = {
+        10: ("신메뉴A", "한식", dt.date(2026, 7, 27)),  # 2일째
+        11: ("신메뉴B", None, dt.date(2026, 7, 15)),  # 14일째
+    }
     scores_by_menu = {10: [TasteScore.DELICIOUS, TasteScore.DELICIOUS]}  # 11은 평가 없음
 
     results = compute_new_menu_reactions(
-        new_menus, scores_by_menu, global_avg_score=3.0, shrinkage_m=5, low_sample_threshold=3
+        new_menus, scores_by_menu, global_avg_score=3.0, shrinkage_m=5, low_sample_threshold=3, today=today
     )
     by_id = {r.menu_id: r for r in results}
     assert by_id[10].evaluation_count == 2
     assert by_id[10].adjusted_score is not None
+    assert by_id[10].days_since_introduction == 2
     assert by_id[11].evaluation_count == 0
     assert by_id[11].adjusted_score == 3.0  # 평가 없으면 전역 평균으로 수렴
+    assert by_id[11].days_since_introduction == 14
+    # 도입일 오름차순(최신 먼저) 정렬
+    assert [r.menu_id for r in results] == [10, 11]

@@ -265,6 +265,315 @@ def test_menu_highlights_detects_rising_menu_and_new_menu_reaction(client):
     assert "신메뉴테스트" in new_menu_names
     new_menu_entry = next(r for r in body["new_menus"] if r["menu_name"] == "신메뉴테스트")
     assert new_menu_entry["evaluation_count"] == 1
+    assert new_menu_entry["days_since_introduction"] == (dt.date.today() - MONDAY).days
+    assert new_menu_entry["needs_attention"] is False  # 이미 평가가 있음
+
+
+def test_menu_highlights_flags_new_menu_needing_attention_when_unevaluated(client):
+    # 도입 후 오래됐는데(NEW_MENU_WINDOW_DAYS=30 이내지만 7일은 넘김) 평가가
+    # 하나도 없으면 관심 유도가 필요하다는 신호(needs_attention)를 켠다.
+    stale_date = dt.date.today() - dt.timedelta(days=10)
+    resp = client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                {
+                    "plan_date": stale_date.isoformat(),
+                    "meal_type": "중식",
+                    "corner_name": "한식",
+                    "menu_name": "무관심신메뉴",
+                    "menu_role": "메인",
+                    "source_row_raw": "무관심신메뉴",
+                }
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    assert resp.status_code == 200
+    entry = next(r for r in resp.json()["new_menus"] if r["menu_name"] == "무관심신메뉴")
+    assert entry["evaluation_count"] == 0
+    assert entry["days_since_introduction"] == 10
+    assert entry["needs_attention"] is True
+
+
+def test_improvement_points_surfaces_congestion_satisfaction_voe(client):
+    def eat(employee_id, corner_name, minute, taste="맛남", menu_name=None, comment=None, eaten_date=MONDAY):
+        client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(eaten_date, dt.time(11, minute)).isoformat(),
+                        "employee_id": employee_id,
+                        "meal_type": "중식",
+                        "corner_name": corner_name,
+                        "menu_name": menu_name,
+                        "taste_score": taste,
+                        "comment": comment,
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    # 혼잡도: 한식은 식수는 많지만(20명) 피크타임(11:40~12:00) 안에는 2명만 —
+    # 나머지는 피크 밖(13시)이라 서브속도가 낮게 잡힌다. 일품은 식수는 적지만
+    # 전부 피크 안이라 서브속도가 높다.
+    for i in range(2):
+        eat(f"H{i}", "한식", 45, menu_name="비인기저조메뉴", taste="개선")
+    for i in range(18):
+        client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(13, i % 60)).isoformat(),
+                        "employee_id": f"H{i + 2}",
+                        "meal_type": "중식",
+                        "corner_name": "한식",
+                        "menu_name": "비인기저조메뉴",
+                        "taste_score": "개선",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+    for i in range(5):
+        eat(f"I{i}", "일품", 46, menu_name="인기메뉴", taste="맛남")
+
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    resp = client.post(
+        "/api/analysis/menu-performance/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    # VOE: 이번 달엔 "위생" 코멘트가 늘고, 지난달엔 거의 없었음
+    prior_month_date = (MONDAY.replace(day=1) - dt.timedelta(days=1))
+    eat("V0", "한식", 50, comment="위생 상태가 별로였어요", eaten_date=prior_month_date)
+    for i in range(4):
+        eat(f"V{i + 1}", "한식", 51, comment="위생이 너무 안 좋아요", eaten_date=MONDAY)
+
+    resp = client.get(
+        "/api/dashboard/improvement-points",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    points = resp.json()
+    axes = {p["axis"] for p in points}
+    assert "congestion" in axes
+    assert "satisfaction" in axes
+    assert "voe" in axes
+
+    congestion = next(p for p in points if p["axis"] == "congestion")
+    assert "한식" in congestion["title"]
+    satisfaction = next(p for p in points if p["axis"] == "satisfaction")
+    assert "비인기저조메뉴" in satisfaction["title"]
+    voe = next(p for p in points if p["axis"] == "voe")
+    assert "위생" in voe["title"]
+
+
+def test_list_weekly_menu_groups_main_and_sides_with_deadline(client):
+    _ingest_weekly_menu(client)  # 제육볶음(메인)/계란후라이(부찬), 한식, MONDAY
+
+    resp = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    slots = resp.json()
+    assert len(slots) == 1
+    slot = slots[0]
+    assert slot["corner_name"] == "한식"
+    assert slot["main"]["menu_name"] == "제육볶음"
+    assert slot["main"]["role_source"] == "규칙기반"
+    assert [s["menu_name"] for s in slot["sides"]] == ["계란후라이"]
+    assert slot["feedback_deadline"] == (MONDAY - dt.timedelta(days=7)).isoformat()
+    expected_past_deadline = dt.date.today() > (MONDAY - dt.timedelta(days=7))
+    assert slot["is_past_deadline"] == expected_past_deadline
+
+
+def test_update_weekly_menu_role_locks_role_source_to_manual(client, db_session):
+    _ingest_weekly_menu(client)
+    resp = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    side_plan_id = resp.json()[0]["sides"][0]["plan_id"]
+
+    # 부찬을 부찬인 채로(역할은 그대로) 관리자가 "확인 완료"로 저장하는 상황을
+    # 가정 — role_source만 관리자수동으로 잠기는지 확인(메인 중복 생기는
+    # 케이스는 group_weekly_menu_rows의 별도 관심사라 여기서 안 섞음).
+    resp = client.put(f"/api/analysis/weekly-menu/{side_plan_id}/role", json={"menu_role": "부찬"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["menu_role"] == "부찬"
+    assert body["role_source"] == "관리자수동"
+
+    from app.models.logs import WeeklyMenuPlan
+
+    plan = db_session.get(WeeklyMenuPlan, side_plan_id)
+    db_session.refresh(plan)
+    assert plan.role_source.value == "관리자수동"
+
+
+def test_update_weekly_menu_role_to_main_demotes_previous_main(client, db_session):
+    # 부찬을 메인으로 승격하면 기존 메인은 자동으로 부찬으로 내려가야 한다 —
+    # 안 그러면 슬롯에 메인이 2개 남아 조회 화면과 시뮬레이션이 서로 다른
+    # 메뉴를 "그 날의 메인"으로 볼 수 있다(실사용 중 발견).
+    _ingest_weekly_menu(client)
+    resp = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    slot = resp.json()[0]
+    old_main_plan_id = slot["main"]["plan_id"]
+    side_plan_id = slot["sides"][0]["plan_id"]
+
+    resp = client.put(f"/api/analysis/weekly-menu/{side_plan_id}/role", json={"menu_role": "메인"})
+    assert resp.status_code == 200
+
+    from app.models.logs import WeeklyMenuPlan
+
+    old_main_plan = db_session.get(WeeklyMenuPlan, old_main_plan_id)
+    db_session.refresh(old_main_plan)
+    assert old_main_plan.menu_role.value == "부찬"
+    assert old_main_plan.role_source.value == "관리자수동"
+
+    # 조회 화면과 실제 DB 상태가 일치하는지 — 메인이 정확히 하나만 남아야 함
+    resp = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    slot = resp.json()[0]
+    assert slot["main"]["plan_id"] == side_plan_id
+    assert [s["plan_id"] for s in slot["sides"]] == [old_main_plan_id]
+
+
+def test_update_weekly_menu_role_unknown_plan_returns_404(client):
+    resp = client.put("/api/analysis/weekly-menu/999999/role", json={"menu_role": "메인"})
+    assert resp.status_code == 404
+
+
+def test_weekly_menu_feedback_create_and_list(client, db_session):
+    _ingest_weekly_menu(client)
+    from app.models.master import CornerMaster
+
+    corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    resp = client.post(
+        "/api/analysis/weekly-menu/feedback",
+        json={"plan_date": MONDAY.isoformat(), "corner_id": corner.corner_id, "comment": "이 부찬 조합 별로예요"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["comment"] == "이 부찬 조합 별로예요"
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/feedback",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) == 1
+    assert items[0]["corner_name"] == "한식"
+    assert items[0]["comment"] == "이 부찬 조합 별로예요"
+
+
+def test_weekly_menu_feedback_unknown_corner_returns_404(client):
+    resp = client.post(
+        "/api/analysis/weekly-menu/feedback",
+        json={"plan_date": MONDAY.isoformat(), "corner_id": 999999, "comment": "테스트"},
+    )
+    assert resp.status_code == 404
+
+
+def test_menu_side_combinations_compares_satisfaction_by_combo(client, db_session):
+    week1 = MONDAY
+    week2 = MONDAY + dt.timedelta(days=7)
+
+    def ingest_slot(plan_date, side_name):
+        resp = client.post(
+            "/api/ingest/weekly-menu",
+            json={
+                "rows": [
+                    {
+                        "plan_date": plan_date.isoformat(),
+                        "meal_type": "중식",
+                        "corner_name": "한식",
+                        "menu_name": "제육볶음",
+                        "menu_role": "메인",
+                        "source_row_raw": f"제육볶음\n{side_name}",
+                    },
+                    {
+                        "plan_date": plan_date.isoformat(),
+                        "meal_type": "중식",
+                        "corner_name": "한식",
+                        "menu_name": side_name,
+                        "menu_role": "부찬",
+                        "source_row_raw": f"제육볶음\n{side_name}",
+                    },
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+
+    ingest_slot(week1, "계란찜")
+    ingest_slot(week2, "김치")
+
+    for i in range(3):
+        _ingest_meal_log(client, f"W1_{i}", "맛남", eaten_date=week1, menu_name="제육볶음", corner_name="한식")
+    for i in range(3):
+        _ingest_meal_log(client, f"W2_{i}", "개선", eaten_date=week2, menu_name="제육볶음", corner_name="한식")
+
+    _set_food_vector(db_session, "제육볶음", [0.5] * 10)
+    _set_food_vector(db_session, "계란찜", [0.1] * 10)
+    _set_food_vector(db_session, "김치", [0.9] * 10)
+
+    resp = client.get(
+        "/api/analysis/menu-combinations/제육볶음",
+        params={"period_start": week1.isoformat(), "period_end": week2.isoformat()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["menu_name"] == "제육볶음"
+    combos = body["combos"]
+    assert len(combos) == 2
+    # 맛남(5점)이 개선(1점)보다 만족도가 높으므로 계란찜 조합이 먼저 나와야 함
+    assert combos[0]["sides"] == ["계란찜"]
+    assert combos[0]["avg_satisfaction"] == 5.0
+    assert combos[0]["day_count"] == 1
+    assert combos[1]["sides"] == ["김치"]
+    assert combos[1]["avg_satisfaction"] == 1.0
+    assert combos[0]["nutrition_profile"]["매운맛"] == 0.3  # (0.5+0.1)/2
+
+
+def test_menu_side_combinations_unknown_menu_returns_404(client):
+    resp = client.get(
+        "/api/analysis/menu-combinations/존재하지않는메뉴",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 404
+
+
+def test_reclassify_weekly_menu_roles_endpoint_no_op_when_llm_unconfigured(client):
+    _ingest_weekly_menu(client)
+
+    resp = client.post(
+        "/api/analysis/weekly-menu/reclassify-roles-with-llm",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    # 사내 LLM 미설정 환경에서는 모의 응답이 "메인: OO" 형식으로 파싱되지 않으므로 0건
+    assert resp.json()["reclassified_slots"] == 0
 
 
 def test_dashboard_weekly_summary_classifies_days(client):
@@ -467,6 +776,157 @@ def test_simulation_what_if_returns_all_corners(client):
     body = resp.json()
     assert body["classification"] == "평일"
     assert any(c["corner_name"] == "한식" for c in body["corners"])
+
+
+def test_congestion_forecast_adjusts_for_planned_menu_popularity(client, db_session):
+    def eat(employee_id, corner_name, menu_name):
+        r = client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(11, 50)).isoformat(),
+                        "employee_id": employee_id,
+                        "meal_type": "중식",
+                        "corner_name": corner_name,
+                        "menu_name": menu_name,
+                        "taste_score": "맛남",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+
+    # 한식: 인기메뉴A(8명) vs 비인기메뉴B(2명), 일품: 메뉴C(10명) — 전체 20명
+    # share(A)=8/20=0.4, share(B)=2/20=0.1, 한식 평균share=(0.4+0.1)/2=0.25
+    # → A가 계획되면 배수 0.4/0.25=1.6
+    for i in range(8):
+        eat(f"A{i}", "한식", "인기메뉴A")
+    for i in range(2):
+        eat(f"B{i}", "한식", "비인기메뉴B")
+    for i in range(10):
+        eat(f"C{i}", "일품", "메뉴C")
+
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    resp = client.post(
+        "/api/analysis/menu-performance/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    from app.models.master import MenuMaster
+
+    menu_a = db_session.query(MenuMaster).filter_by(menu_name="인기메뉴A").one()
+
+    # 미래 평일(다음 주 화요일)에 인기메뉴A가 한식 코너 메인으로 계획됨
+    future_date = MONDAY + dt.timedelta(days=8)
+    resp = client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                {
+                    "plan_date": future_date.isoformat(),
+                    "meal_type": "중식",
+                    "corner_name": "한식",
+                    "menu_name": "인기메뉴A",
+                    "menu_role": "메인",
+                    "source_row_raw": "인기메뉴A",
+                }
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+
+    resp = client.get(
+        "/api/simulation/congestion-forecast",
+        params={"target_date": future_date.isoformat(), "meal_type": "중식"},
+    )
+    assert resp.status_code == 200
+    hansik = next(c for c in resp.json()["corners"] if c["corner_name"] == "한식")
+    assert hansik["planned_menu_id"] == menu_a.menu_id
+    assert hansik["menu_popularity_multiplier"] == 1.6
+    # 코너 baseline(A+B 합계 10명) * 1.6배 = 16.0
+    assert hansik["predicted_headcount"] == 16.0
+
+    ilpum = next(c for c in resp.json()["corners"] if c["corner_name"] == "일품")
+    assert ilpum["planned_menu_id"] is None
+    assert ilpum["menu_popularity_multiplier"] is None
+
+
+def test_what_if_uses_quadrant_multiplier_for_planned_menu_with_performance_data(client, db_session):
+    def eat(employee_id, corner_name, menu_name):
+        r = client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(11, 50)).isoformat(),
+                        "employee_id": employee_id,
+                        "meal_type": "중식",
+                        "corner_name": corner_name,
+                        "menu_name": menu_name,
+                        "taste_score": "맛남",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+
+    # 수요 median=10, 평가건수 10 미만이면 표본부족으로 빠지므로 A=12(고수요,
+    # 평가 충분)가 "인기메뉴"(POPULAR, 배수 1.20)로 분류되게 구성.
+    for i in range(12):
+        eat(f"A{i}", "한식", "인기메뉴A")
+    for i in range(2):
+        eat(f"B{i}", "한식", "비인기메뉴B")
+    for i in range(10):
+        eat(f"C{i}", "일품", "메뉴C")
+
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    resp = client.post(
+        "/api/analysis/menu-performance/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    from app.models.master import CornerMaster, MenuMaster
+
+    menu_a = db_session.query(MenuMaster).filter_by(menu_name="인기메뉴A").one()
+    hansik_corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    # 확인: A가 실제로 인기메뉴(POPULAR)로 분류됐는지
+    resp = client.get(
+        "/api/analysis/menu-performance",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    a_row = next(r for r in resp.json() if r["menu_name"] == "인기메뉴A")
+    assert a_row["quadrant"] == "인기메뉴"
+
+    future_date = MONDAY + dt.timedelta(days=8)
+    resp = client.post(
+        "/api/simulation/what-if",
+        json={
+            "target_date": future_date.isoformat(),
+            "meal_type": "중식",
+            "new_menu_corner_id": hansik_corner.corner_id,
+            "planned_menu_id": menu_a.menu_id,
+        },
+    )
+    assert resp.status_code == 200
+    hansik = next(c for c in resp.json()["corners"] if c["corner_name"] == "한식")
+    # baseline(A+B 합계 14명) * 1.20(인기메뉴 배수, 기본 1.15보다 큼) = 16.8
+    assert hansik["baseline_headcount"] == 14.0
+    assert hansik["predicted_headcount"] == 16.8
 
 
 def test_meal_log_ingest_classifies_division_from_company_name(client, db_session):

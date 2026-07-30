@@ -94,12 +94,21 @@ export interface NewMenuEntry {
   corner_name: string | null;
   adjusted_score: number | null;
   evaluation_count: number;
+  days_since_introduction: number;
+  needs_attention: boolean;
 }
 
 export interface MenuHighlightsResponse {
   rising: MenuTrendEntry[];
   falling: MenuTrendEntry[];
   new_menus: NewMenuEntry[];
+}
+
+export interface ImprovementPoint {
+  axis: "congestion" | "satisfaction" | "voe";
+  title: string;
+  detail: string;
+  severity: "warning" | "critical";
 }
 
 export interface CornerTrendRow {
@@ -206,6 +215,46 @@ export interface MenuFoodVectorRow {
   source: FoodVectorSource | null;
 }
 
+export interface WeeklyMenuPlanItem {
+  plan_id: number;
+  menu_id: number;
+  menu_name: string;
+  role_source: FoodVectorSource; // "규칙기반" | "LLM추정" | "관리자수동" — food_vector와 동일한 3값
+}
+
+export interface WeeklyMenuSlot {
+  plan_date: string;
+  corner_id: number;
+  corner_name: string;
+  meal_type: MealType;
+  main: WeeklyMenuPlanItem | null;
+  sides: WeeklyMenuPlanItem[];
+  feedback_deadline: string;
+  is_past_deadline: boolean;
+}
+
+export interface WeeklyMenuFeedbackRow {
+  id: number;
+  plan_date: string;
+  corner_id: number;
+  corner_name: string | null;
+  comment: string;
+  created_at: string;
+}
+
+export interface MenuComboRow {
+  sides: (string | null)[];
+  day_count: number;
+  avg_satisfaction: number | null;
+  nutrition_profile: Record<string, number>;
+}
+
+export interface MenuCombinationsResponse {
+  menu_id: number;
+  menu_name: string;
+  combos: MenuComboRow[];
+}
+
 export interface WhatIfCornerResult {
   corner_id: number;
   corner_name: string;
@@ -226,6 +275,8 @@ export interface CongestionForecastRow {
   predicted_headcount: number;
   avg_peak_throughput_per_min: number | null;
   expected_wait_minutes: number | null;
+  planned_menu_id: number | null;
+  menu_popularity_multiplier: number | null;
 }
 
 export interface CongestionForecastResponse {
@@ -259,6 +310,9 @@ export const api = {
     }),
 
   menuHighlights: () => request<MenuHighlightsResponse>("/dashboard/menu-highlights"),
+
+  improvementPoints: (params: { period_start: string; period_end: string }) =>
+    request<ImprovementPoint[]>(`/dashboard/improvement-points${qs(params)}`),
 
   cornerAnalysis: (params: {
     period_start: string;
@@ -318,6 +372,11 @@ export const api = {
     params: { period_start: string; period_end: string; min_co_count?: number; top_n?: number },
   ) => request<MenuAffinityRow[]>(`/analysis/menu-affinity/${encodeURIComponent(menuName)}${qs(params)}`),
 
+  menuSideCombinations: (menuName: string, params: { period_start: string; period_end: string }) =>
+    request<MenuCombinationsResponse>(
+      `/analysis/menu-combinations/${encodeURIComponent(menuName)}${qs(params)}`,
+    ),
+
   cornerCoreLayerMenuPairs: (
     cornerId: number,
     params: {
@@ -353,6 +412,30 @@ export const api = {
 
   tagMenusWithLlm: () =>
     request<{ tagged_menus: number }>(`/analysis/menus/tag-with-llm`, { method: "POST" }),
+
+  weeklyMenu: (params: { period_start: string; period_end: string }) =>
+    request<WeeklyMenuSlot[]>(`/analysis/weekly-menu${qs(params)}`),
+
+  updateWeeklyMenuRole: (planId: number, menuRole: "메인" | "부찬") =>
+    request<{ plan_id: number; menu_role: string; role_source: FoodVectorSource }>(
+      `/analysis/weekly-menu/${planId}/role`,
+      { method: "PUT", body: JSON.stringify({ menu_role: menuRole }) },
+    ),
+
+  reclassifyWeeklyMenuRolesWithLlm: (params: { period_start: string; period_end: string }) =>
+    request<{ reclassified_slots: number }>(
+      `/analysis/weekly-menu/reclassify-roles-with-llm${qs(params)}`,
+      { method: "POST" },
+    ),
+
+  createWeeklyMenuFeedback: (payload: { plan_date: string; corner_id: number; comment: string }) =>
+    request<WeeklyMenuFeedbackRow>(`/analysis/weekly-menu/feedback`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  weeklyMenuFeedback: (params: { period_start: string; period_end: string }) =>
+    request<WeeklyMenuFeedbackRow[]>(`/analysis/weekly-menu/feedback${qs(params)}`),
 
   whatIf: (payload: {
     target_date: string;

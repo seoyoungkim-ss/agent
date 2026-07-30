@@ -161,8 +161,18 @@ export function SimulationPage() {
             ]}
             rows={forecast.data.corners.map((c) => ({
               corner: c.corner_name,
-              headcount: c.predicted_headcount,
-              throughput: c.avg_peak_throughput_per_min?.toFixed(1) ?? "-",
+              headcount:
+                c.menu_popularity_multiplier != null ? (
+                  <span>
+                    {c.predicted_headcount}
+                    <span className="ml-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                      (계획 메뉴 반영 ×{c.menu_popularity_multiplier.toFixed(2)})
+                    </span>
+                  </span>
+                ) : (
+                  c.predicted_headcount
+                ),
+              throughput: c.avg_peak_throughput_per_min?.toFixed(2) ?? "-",
               wait:
                 c.expected_wait_minutes != null ? (
                   <span style={c.expected_wait_minutes > 15 ? { color: "var(--critical)", fontWeight: 600 } : undefined}>

@@ -6,15 +6,81 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.api.analysis import _corner_id_by_menu_from_meal_log
 from app.db import get_db
-from app.models.enums import MealType
+from app.models.enums import MealType, MenuQuadrant, MenuRole
+from app.models.logs import WeeklyMenuPlan
 from app.models.master import CornerMaster
-from app.models.stats import DailyCornerStats
+from app.models.stats import DailyCornerStats, MenuPerformanceStats
 from app.services.holidays import DayClassification, HolidayService
 
 router = APIRouter(prefix="/simulation", tags=["simulation"])
 
 _HISTORY_WINDOW = 8  # 최근 같은 분류(평일/휴일)·식사구분 N회 평균을 baseline으로 사용
+
+# PRD 7.1 신메뉴 배수의 v0 임의값(기존 1.15)을, 이미 성과 데이터가 있는 계획 메뉴는
+# 4분면(quadrant)에 따라 더 구체적으로 조정한다 — 표본부족(신메뉴라 데이터가 아직
+# 없는 경우)은 기존 신메뉴 가정(1.15)을 그대로 쓴다.
+_MENU_QUADRANT_MULTIPLIER = {
+    MenuQuadrant.POPULAR: 1.20,
+    MenuQuadrant.HIDDEN_GEM: 1.10,
+    MenuQuadrant.NEEDS_IMPROVEMENT: 1.05,
+    MenuQuadrant.REMOVAL_CANDIDATE: 1.00,
+    MenuQuadrant.LOW_SAMPLE: 1.15,
+}
+_DEFAULT_NEW_MENU_MULTIPLIER = 1.15  # 성과 데이터가 아예 없는 메뉴(진짜 신메뉴)
+
+
+def _planned_main_menu_id(
+    db: Session, corner_id: int, meal_type: MealType, target_date: dt.date
+) -> int | None:
+    """그 날짜·코너·식사구분에 weekly_menu_plan으로 계획된 메인 메뉴 — 미입력이면
+    None(폴백은 호출부가 처리, 32절 "meal_log 우선, weekly_menu_plan은 있으면
+    보강" 원칙과 동일)."""
+    row = (
+        db.query(WeeklyMenuPlan.menu_id)
+        .filter(
+            WeeklyMenuPlan.corner_id == corner_id,
+            WeeklyMenuPlan.meal_type == meal_type,
+            WeeklyMenuPlan.plan_date == target_date,
+            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+        )
+        .first()
+    )
+    return row[0] if row else None
+
+
+def _menu_popularity_multiplier(db: Session, corner_id: int, menu_id: int) -> float | None:
+    """그 메뉴의 최근 share_of_traffic이 코너 평균 대비 얼마나 높은지 배수로
+    돌려준다 — 성과 데이터가 없으면(신메뉴 등) None."""
+    menu_stats = (
+        db.query(MenuPerformanceStats)
+        .filter_by(menu_id=menu_id)
+        .order_by(MenuPerformanceStats.period_end.desc())
+        .first()
+    )
+    if menu_stats is None or menu_stats.share_of_traffic is None:
+        return None
+
+    corner_id_by_menu = _corner_id_by_menu_from_meal_log(db, menu_stats.period_start, menu_stats.period_end)
+    corner_menu_ids = {m for m, c in corner_id_by_menu.items() if c == corner_id}
+    if not corner_menu_ids:
+        return None
+    corner_shares = [
+        r.share_of_traffic
+        for r in db.query(MenuPerformanceStats)
+        .filter(
+            MenuPerformanceStats.menu_id.in_(corner_menu_ids),
+            MenuPerformanceStats.period_start == menu_stats.period_start,
+            MenuPerformanceStats.period_end == menu_stats.period_end,
+        )
+        .all()
+        if r.share_of_traffic is not None
+    ]
+    corner_avg_share = statistics.fmean(corner_shares) if corner_shares else 0.0
+    if corner_avg_share <= 0:
+        return None
+    return menu_stats.share_of_traffic / corner_avg_share
 
 
 class Weather(str, Enum):
@@ -38,6 +104,10 @@ class WhatIfRequest(BaseModel):
     meal_type: MealType
     weather: Weather = Weather.SUNNY
     new_menu_corner_id: int | None = None
+    # 이미 성과 데이터가 있는(과거에 한 번이라도 나온) 계획 메뉴 — 있으면 4분면
+    # 기준으로 더 구체적인 배수를 쓴다. 성과 데이터가 없으면(진짜 신메뉴)
+    # new_menu_corner_id와 동일하게 기본 배수(1.15)로 처리한다.
+    planned_menu_id: int | None = None
     has_company_event: bool = False
 
 
@@ -67,6 +137,16 @@ def what_if(payload: WhatIfRequest, db: Session = Depends(get_db)):
     classification = holiday_svc.classify(payload.target_date)
     is_holiday = classification == DayClassification.HOLIDAY
 
+    planned_menu_quadrant: MenuQuadrant | None = None
+    if payload.planned_menu_id is not None:
+        menu_stats = (
+            db.query(MenuPerformanceStats)
+            .filter_by(menu_id=payload.planned_menu_id)
+            .order_by(MenuPerformanceStats.period_end.desc())
+            .first()
+        )
+        planned_menu_quadrant = menu_stats.quadrant_label if menu_stats else None
+
     corners = db.query(CornerMaster).all()
     results = []
     for corner in corners:
@@ -74,8 +154,11 @@ def what_if(payload: WhatIfRequest, db: Session = Depends(get_db)):
         multiplier = _WEATHER_MULTIPLIER[payload.weather]
         if payload.has_company_event:
             multiplier *= 0.90  # 사내 행사가 있으면 카페테리아 이용이 다소 줄어든다는 가정(v0)
-        if payload.new_menu_corner_id == corner.corner_id:
-            multiplier *= 1.15  # 신메뉴 코너는 관심 증가로 일시적 수요 증가 가정(v0)
+        if payload.planned_menu_id is not None and payload.new_menu_corner_id == corner.corner_id:
+            # 성과 데이터가 있는 계획 메뉴면 4분면별 배수, 없으면(진짜 신메뉴) 기본값
+            multiplier *= _MENU_QUADRANT_MULTIPLIER.get(planned_menu_quadrant, _DEFAULT_NEW_MENU_MULTIPLIER)
+        elif payload.new_menu_corner_id == corner.corner_id:
+            multiplier *= _DEFAULT_NEW_MENU_MULTIPLIER  # 신메뉴 코너는 관심 증가로 일시적 수요 증가 가정(v0)
         predicted = baseline * multiplier
         results.append(
             {
@@ -120,18 +203,31 @@ def congestion_forecast(target_date: dt.date, meal_type: MealType, db: Session =
             .all()
         )
         baseline = statistics.fmean([h.headcount for h in history]) if history else 0.0
+
+        planned_menu_id = _planned_main_menu_id(db, corner.corner_id, meal_type, target_date)
+        menu_popularity_multiplier = (
+            _menu_popularity_multiplier(db, corner.corner_id, planned_menu_id)
+            if planned_menu_id is not None
+            else None
+        )
+        predicted_headcount = baseline * menu_popularity_multiplier if menu_popularity_multiplier else baseline
+
         throughputs = [h.peak_throughput_per_min for h in history if h.peak_throughput_per_min]
         avg_throughput = statistics.fmean(throughputs) if throughputs else None
         expected_wait_minutes = (
-            round(baseline / avg_throughput, 1) if avg_throughput and avg_throughput > 0 else None
+            round(predicted_headcount / avg_throughput, 1) if avg_throughput and avg_throughput > 0 else None
         )
         forecasts.append(
             {
                 "corner_id": corner.corner_id,
                 "corner_name": corner.corner_name,
-                "predicted_headcount": round(baseline, 1),
+                "predicted_headcount": round(predicted_headcount, 1),
                 "avg_peak_throughput_per_min": avg_throughput,
                 "expected_wait_minutes": expected_wait_minutes,
+                "planned_menu_id": planned_menu_id,
+                "menu_popularity_multiplier": (
+                    round(menu_popularity_multiplier, 2) if menu_popularity_multiplier else None
+                ),
             }
         )
 

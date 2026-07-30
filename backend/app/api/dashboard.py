@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from app.api.analysis import corner_analysis, menu_performance
 from app.config import get_settings
 from app.db import get_db
 from app.models.enums import TASTE_SCORE_POINTS
@@ -15,6 +16,11 @@ from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import DailyDivisionStats, MenuPerformanceStats, MonthlyVoeCluster
 from app.services.holidays import DayClassification, HolidayService
+from app.services.improvement_points import (
+    select_congestion_points,
+    select_satisfaction_points,
+    select_voe_points,
+)
 from app.services.llm_client import InternalLLMClient
 from app.services.menu_highlights import (
     compute_menu_satisfaction_trends,
@@ -208,13 +214,7 @@ def voe_clusters(period: dt.date, db: Session = Depends(get_db)):
     ]
 
 
-@router.get("/voe-by-category")
-def voe_by_category(period: dt.date, db: Session = Depends(get_db)):
-    """PRD 5.2/5.3: 월간 VOE를 맛/간/위생/서비스 고정 분류로 집계 — 리더 보고용.
-
-    voe_clusters(K-means 자유형 클러스터)와 달리 카테고리가 매달 고정돼 있어
-    한 달씩 비교하기 쉽다. period는 해당 월의 아무 날짜(YYYY-MM-01 권장).
-    """
+def _compute_voe_by_category(db: Session, period: dt.date) -> dict:
     month_start = period.replace(day=1)
     last_day = calendar.monthrange(month_start.year, month_start.month)[1]
     month_end_exclusive = dt.datetime.combine(month_start.replace(day=last_day) + dt.timedelta(days=1), dt.time())
@@ -251,6 +251,16 @@ def voe_by_category(period: dt.date, db: Session = Depends(get_db)):
             for category in [*VOE_CATEGORIES, OTHER_CATEGORY]
         ],
     }
+
+
+@router.get("/voe-by-category")
+def voe_by_category(period: dt.date, db: Session = Depends(get_db)):
+    """PRD 5.2/5.3: 월간 VOE를 맛/간/위생/서비스 고정 분류로 집계 — 리더 보고용.
+
+    voe_clusters(K-means 자유형 클러스터)와 달리 카테고리가 매달 고정돼 있어
+    한 달씩 비교하기 쉽다. period는 해당 월의 아무 날짜(YYYY-MM-01 권장).
+    """
+    return _compute_voe_by_category(db, period)
 
 
 @router.post("/voe-by-category/recompute")
@@ -319,13 +329,17 @@ def menu_highlights(db: Session = Depends(get_db)):
 
     new_menu_window_start = today - dt.timedelta(days=NEW_MENU_WINDOW_DAYS)
     new_menu_rows = (
-        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name, CornerMaster.corner_name)
+        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name, CornerMaster.corner_name, WeeklyMenuPlan.plan_date)
         .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
         .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
         .filter(WeeklyMenuPlan.is_new_menu.is_(True), WeeklyMenuPlan.plan_date >= new_menu_window_start)
         .all()
     )
-    new_menus = {menu_id: (menu_name, corner_name) for menu_id, menu_name, corner_name in new_menu_rows}
+    new_menus: dict[int, tuple[str, str | None, dt.date]] = {}
+    for menu_id, menu_name, corner_name, plan_date in new_menu_rows:
+        existing = new_menus.get(menu_id)
+        first_plan_date = min(plan_date, existing[2]) if existing else plan_date
+        new_menus[menu_id] = (menu_name, corner_name, first_plan_date)
 
     new_menu_reactions = compute_new_menu_reactions(
         new_menus,
@@ -333,6 +347,7 @@ def menu_highlights(db: Session = Depends(get_db)):
         global_avg_score=global_avg_score,
         shrinkage_m=settings.menu_score_shrinkage_m,
         low_sample_threshold=settings.menu_score_low_sample_threshold,
+        today=today,
     )
 
     def _trend(e):
@@ -353,6 +368,8 @@ def menu_highlights(db: Session = Depends(get_db)):
             "corner_name": e.corner_name,
             "adjusted_score": e.adjusted_score,
             "evaluation_count": e.evaluation_count,
+            "days_since_introduction": e.days_since_introduction,
+            "needs_attention": e.days_since_introduction >= 7 and e.evaluation_count == 0,
         }
 
     return {
@@ -360,3 +377,30 @@ def menu_highlights(db: Session = Depends(get_db)):
         "falling": [_trend(e) for e in falling],
         "new_menus": [_new_menu(e) for e in new_menu_reactions],
     }
+
+
+@router.get("/improvement-points")
+def improvement_points(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """홈 현황 "개선 포인트" — 혼잡도/만족도/VOE 세 축에서 지금 손볼 만한 지점.
+
+    전부 이미 계산된 값을 재사용한다: 코너 통계(`analysis.py::corner_analysis`),
+    메뉴 4분면(`analysis.py::menu_performance` — 사전에 recompute가 돼 있어야
+    함), 이번 달/지난 달 VOE 카테고리 집계(`_compute_voe_by_category`).
+    """
+    corners = corner_analysis(period_start=period_start, period_end=period_end, db=db)
+    menu_rows = menu_performance(period_start=period_start, period_end=period_end, db=db)
+
+    current_month = period_end.replace(day=1)
+    prior_month_end = current_month - dt.timedelta(days=1)
+    prior_month = prior_month_end.replace(day=1)
+    current_voe = _compute_voe_by_category(db, current_month)
+    prior_voe = _compute_voe_by_category(db, prior_month) if prior_month != current_month else None
+
+    points = [
+        *select_congestion_points(corners),
+        *select_satisfaction_points(menu_rows),
+        *select_voe_points(current_voe, prior_voe),
+    ]
+    return [
+        {"axis": p.axis, "title": p.title, "detail": p.detail, "severity": p.severity} for p in points
+    ]

@@ -35,6 +35,7 @@ class NewMenuEntry:
     corner_name: str | None
     adjusted_score: float | None
     evaluation_count: int
+    days_since_introduction: int
 
 
 def compute_menu_satisfaction_trends(
@@ -91,15 +92,18 @@ def compute_menu_satisfaction_trends(
 
 
 def compute_new_menu_reactions(
-    new_menus: dict[int, tuple[str, str | None]],
+    new_menus: dict[int, tuple[str, str | None, dt.date]],
     scores_by_menu: dict[int, list[TasteScore]],
     *,
     global_avg_score: float,
     shrinkage_m: int,
     low_sample_threshold: int,
+    today: dt.date,
 ) -> list[NewMenuEntry]:
-    """new_menus: {menu_id: (menu_name, corner_name)} — 최근 도입된 신메뉴 목록.
-    scores_by_menu: {menu_id: [평가 목록]} — 그 메뉴의 (기간 내) 평가."""
+    """new_menus: {menu_id: (menu_name, corner_name, 첫 등장 plan_date)} — 최근
+    도입된 신메뉴 목록. scores_by_menu: {menu_id: [평가 목록]} — 그 메뉴의
+    (기간 내) 평가. days_since_introduction은 도입 후 며칠째인지 — 도입은
+    됐는데 계속 평가가 0건이면(변화가 없으면) 관심 유도가 필요하다는 신호."""
     results = [
         NewMenuEntry(
             menu_id=menu_id,
@@ -114,8 +118,9 @@ def compute_new_menu_reactions(
                 )
             ).adjusted_score,
             evaluation_count=score_result.evaluation_count,
+            days_since_introduction=(today - first_plan_date).days,
         )
-        for menu_id, (menu_name, corner_name) in new_menus.items()
+        for menu_id, (menu_name, corner_name, first_plan_date) in new_menus.items()
     ]
-    results.sort(key=lambda e: e.menu_name)
+    results.sort(key=lambda e: e.days_since_introduction)
     return results

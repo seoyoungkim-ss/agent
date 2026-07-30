@@ -1480,3 +1480,209 @@ period_end&min_day_count=2`(`analysis.py`) — `avg_throughput` 오름차순(느
 **테스트**: 프론트 전용 시각적 변경이라 별도 단위테스트 없음 — Playwright
 스크린샷으로 x축이 "07-27(월)"~"08-02(일)" 순서로 나오고 토/일이 빨간색인
 것을 확인.
+
+---
+
+## 36. 홈 "개선 포인트" 카드 + 주간 식단표(주찬/부찬) 고도화 (2026-07)
+
+식당 관리자 관점에서 "지금 뭘 손봐야 하는지"를 바로 보여주는 홈 카드와,
+주간 식단표(주찬/부찬 구조)를 실제로 검토·수정·활용하는 기능 묶음.
+
+### 36.1 홈 "개선 포인트" 카드 — 혼잡도/만족도/VOE
+
+**파일**: `backend/app/services/improvement_points.py`(신규)
+
+세 함수 모두 **이미 계산된 API 응답을 인자로 받는 순수 함수**다 — 새 DB
+쿼리나 통계 재계산 없이 기존 값을 재해석만 한다:
+```python
+def select_congestion_points(corners: list[dict], *, top_n=2) -> list[ImprovementPoint]
+def select_satisfaction_points(menu_rows: list[dict], *, top_n=2) -> list[ImprovementPoint]
+def select_voe_points(current: dict, prior: dict | None, *, top_n=1) -> list[ImprovementPoint]
+```
+- **혼잡도**: `corner_analysis`(`analysis.py`) 응답에서 `headcount_total`이
+  median 이상인 코너 중 `avg_peak_throughput_per_min`이 median보다 낮은
+  코너를 "혼잡" 후보로 뽑는다 — 4분면 분류(`classify_menu_quadrant`)가
+  쓰는 "전체 median 기준" 사상을 코너 레벨에 그대로 적용.
+- **만족도**: `menu_performance`(`analysis.py`) 응답에서 `quadrant ==
+  "개선시급"`(수요 높은데 만족도 낮음)인 메뉴를 `share_of_traffic`
+  내림차순으로.
+- **VOE**: 이번 달과 지난달의 `_compute_voe_by_category` 결과를 비교해
+  건수 증가폭이 가장 큰 카테고리(지난달 데이터 없으면 이번달 최다
+  카테고리로 대체). "기타"는 원인 진단 근거로 부적합해 제외.
+
+**`dashboard.py`**: 기존 `voe_by_category` 라우트의 내부 로직을
+`_compute_voe_by_category(db, period)`로 분리해(기존 `_compute_weekly_
+summary` 패턴과 동일) 이번달/지난달 두 번 호출할 수 있게 했다. 신규
+`GET /api/dashboard/improvement-points?period_start&period_end`가
+`corner_analysis`/`menu_performance`(둘 다 `analysis.py`에서 직접
+import해 재사용 — 별도 서비스 레이어로 안 뽑고 route 함수를 그대로
+호출)를 db와 함께 직접 호출해 위 세 함수에 넘긴다.
+
+**프론트**: `HomePage.tsx`의 StatTile 행 바로 아래, 가장 먼저 보이는
+자리에 "개선 포인트" 카드 추가 — 항목마다 점(`--warning`/`--critical`)
++ title(굵게) + detail(회색 작은 글씨) 한 줄.
+
+### 36.2 신메뉴 추적 강화 — 도입 후 경과일
+
+**파일**: `backend/app/services/menu_highlights.py::compute_new_menu_reactions`
+
+`NewMenuEntry`에 `days_since_introduction: int` 필드 추가(그 메뉴가
+`weekly_menu_plan`에 처음 나온 `plan_date`부터 오늘까지) — 정렬 기준도
+메뉴명 알파벳순에서 **경과일 오름차순(최신 도입 먼저)**으로 바꿨다.
+`dashboard.py::menu_highlights`가 `_new_menu()` 직렬화에서
+`needs_attention = days_since_introduction >= 7 and evaluation_count ==
+0`을 계산해 함께 내려준다 — 도입 후 일주일이 지나도록 평가가 하나도
+없으면 "반응 없음" 신호.
+
+**프론트**: `HomePage.tsx`의 "신메뉴 반응" 표에 "도입 후 경과일" 컬럼
+추가, `needs_attention`이면 `--warning` 색으로 "N일 · 반응 없음" 강조.
+
+### 36.3 주간 식단표 검토/관리 화면 (2.0)
+
+운영 전제(사용자 확인, 2026-07): 식당에서 주간 식단표를 **2주 전에
+전달**, 관리자는 **1주 전까지** 개선의견을 낼 수 있음. 같은 메인메뉴는
+항상 같은 부찬을 받음(36.4의 조합 분석 전제). 원본 파일이 셀 병합 등으로
+자동 파싱(메인/부찬 위치 추정)이 틀리기 쉬워 **관리자가 직접 확인·수정
+저장하는 기능이 필수**로 요구됨.
+
+**스키마 변경** (`8f3c9a1e5d21_add_role_source_and_weekly_menu_feedback.py`):
+- `WeeklyMenuPlan.role_source` 컬럼 추가 — 신규 enum `MenuRoleSource`
+  (`app/models/enums.py`, `FoodVectorSource`와 완전히 동일한 3값 패턴:
+  `RULE="규칙기반"`/`LLM="LLM추정"`/`MANUAL="관리자수동"`). 기존 행은
+  전부 규칙기반으로 백필.
+- 신규 테이블 `weekly_menu_feedback`(`id, plan_date, corner_id, comment,
+  created_at`) — 관리자가 남기는 개선의견, 마감과 무관하게 항상 저장.
+
+**서비스**: `backend/app/services/weekly_menu_review.py`
+```python
+def feedback_deadline(plan_date: dt.date) -> dt.date:  # plan_date - 7일, 순수 함수
+def group_weekly_menu_rows(rows, *, today) -> list[WeeklyMenuSlot]  # 순수 함수
+def build_weekly_menu_slots(db, period_start, period_end, *, today=None) -> list[WeeklyMenuSlot]
+def set_menu_role(db, plan_id, menu_role) -> WeeklyMenuPlan | None  # role_source="관리자수동"으로 잠금
+def add_feedback(db, plan_date, corner_id, comment) -> WeeklyMenuFeedback
+def list_feedback(db, period_start, period_end) -> list[WeeklyMenuFeedback]
+```
+`group_weekly_menu_rows`는 `(plan_date, corner_id, meal_type)` 단위로
+메인/부찬을 묶는다. ⚠️ **한 슬롯에 MAIN이 두 개 이상 섞이는 데이터
+정합성 문제**가 생기면(방지 로직은 아래 참고), 첫 번째로 만난 MAIN만
+`main`에 남기고 **나머지는 조용히 버리지 않고 `sides`에 넣어 화면에서
+보이게 한다**(데이터 유실 방지 — 테스트로 고정: `test_group_weekly_
+menu_rows_keeps_extra_main_in_sides_instead_of_dropping`).
+
+`set_menu_role`이 어떤 행을 MAIN으로 바꿀 때, **같은 슬롯에 이미 MAIN인
+다른 행이 있으면 자동으로 SIDE로 내린다**(내려간 행도 이 조작의 결과이니
+같이 MANUAL로 표시) — 실사용 검증 중 이 자동 강등이 없으면 "화면엔 새로
+고른 메인이 보이는데 `_planned_main_menu_id`(36.6절)는 여전히 옛날
+메인을 반환하는" 불일치가 실제로 재현됐다(같은 슬롯에 MAIN 행이 2개
+남아 각 쿼리가 서로 다른 행을 먼저 집었기 때문 — 테스트:
+`test_update_weekly_menu_role_to_main_demotes_previous_main`). 위
+`group_weekly_menu_rows`의 "여분 MAIN을 sides로" 처리는 이 자동 강등이
+있어도 혹시 모를 다른 경로(예: LLM 재분류 응답 파싱 오류)로 슬롯에 MAIN이
+2개 남는 경우에 대비한 이중 안전장치다.
+
+**API** (`analysis.py`): `GET /weekly-menu`(슬롯 목록 + 마감/역할출처),
+`PUT /weekly-menu/{plan_id}/role`(수동 수정, MANUAL 잠금 + 기존 메인
+자동 강등),
+`POST /weekly-menu/feedback` + `GET /weekly-menu/feedback`(개선의견
+등록/조회).
+
+**프론트**: `AnalysisPage.tsx`에 새 서브탭 "주간 식단표 관리" 추가.
+주 선택기(`weeklyMondayOf`/`weeklyAddDays`, `HomePage.tsx`의
+`mondayOf`/`addDays`와 동일 패턴을 이 파일에 로컬로 복제 — 기존
+`isoDaysAgo` 중복 컨벤션과 동일) + `CornerCardGrid`(31절)로 코너를 고르면
+날짜별 카드에 메인/부찬 목록(역할 드롭다운으로 즉시 수정 가능,
+"관리자수동" 아니면 "(자동분류·규칙기반)" 같은 옅은 텍스트 표시) + 마감
+배지("D-N" 또는 "마감") + 개선의견 입력창을 보여준다.
+
+### 36.4 LLM 기반 주찬/부찬 일괄 재분류 (2.1)
+
+**파일**: `backend/app/services/weekly_menu_role_llm.py`(신규)
+
+`food_vector_tagging.py`의 "규칙 → LLM 보강" 패턴을 그대로 따른다.
+`source_row_raw`(같은 셀에서 나온 원본 항목들, 메인/부찬 행 전부 동일
+문자열 보관)가 같은 행들을 `(plan_date, corner_id, meal_type,
+source_row_raw)` 기준으로 묶어 LLM에게 "메인: OO / 부찬: OO, OO" 형식
+응답을 요청·파싱한다:
+```python
+async def classify_menu_roles_via_llm(llm_client, menu_names: list[str]) -> dict[str, MenuRole] | None
+async def reclassify_weekly_menu_roles(db, llm_client, period_start, period_end) -> int
+```
+`reclassify_weekly_menu_roles`는 **`role_source != MANUAL`인 행만**
+쿼리에 포함시킨다 — MANUAL 잠긴 행이 그룹에서 빠지면 그룹 크기가
+1이 될 수도 있는데, 그 경우 "재분류할 게 없다"고 보고 건너뛴다(그룹
+최소 2개 필요). 즉 관리자가 고친 행은 간접적으로도 보호된다.
+
+**API**: `POST /analysis/weekly-menu/reclassify-roles-with-llm?
+period_start&period_end` — 36.3 화면의 "일괄 자동 분류(LLM)" 버튼.
+
+### 36.5 부찬 조합별 만족도 비교 + 영양 균형 프록시 (2.2/2.3)
+
+**전제**: 같은 메인메뉴는 항상 같은 부찬을 받는다(확인됨) → `meal_log`는
+개인이 어떤 부찬을 받았는지 모르지만, **날짜 단위로 비교**하면 된다 —
+같은 메인 메뉴가 다른 날 다른 부찬과 나왔을 때 그 날짜의 평균 만족도를
+조합별로 묶어 비교.
+
+**파일**: `backend/app/services/menu_combination.py`(신규)
+```python
+def build_side_combos_for_main_menu(db, main_menu_id, period_start, period_end) -> list[ComboDay]
+    # weekly_menu_plan에서 main_menu_id가 MAIN인 (날짜,코너,식사구분)마다
+    # 같은 슬롯의 SIDE 메뉴들 + 그 날짜 그 코너의 main_menu_id meal_log 평균 만족도
+def compute_combo_satisfaction_summary(days, *, min_day_count=1) -> list[ComboSummary]
+    # 순수 함수 — 부찬 조합(frozenset)별로 그룹핑, 만족도 내림차순(평가 없는 조합은 맨 뒤)
+def compute_combo_nutrition_profile(menu_ids, food_vectors) -> dict[str, float]
+    # 순수 함수 — 조합 메뉴들의 food_vector(7절, 매운맛/단백질/채소 비중 등 0~1
+    # 프록시) 차원별 평균. ⚠️ 실제 칼로리/영양성분 DB가 없으므로 "영양 균형
+    # 추정치"일 뿐 — 실측 아님, 응답에도 이 취지를 설명 문구로 남김.
+```
+**API**: `GET /analysis/menu-combinations/{menu_name}?period_start&
+period_end` — `menu-affinity/{menu_name}`과 같은 이름 기반 경로 컨벤션
+(meal_log 기반 함수들과 달리 이 기능은 menu_id 기준 내부 계산이지만,
+검색 UX를 맞추기 위해 API 경로만 이름으로 노출).
+
+**프론트**: "메뉴 4분면" 탭에 `MenuComboSection` 추가(`MenuAffinitySection`과
+같은 검색창 UI 패턴, 자리는 가깝지만 목적이 달라 — 부찬 조합 vs 개인
+동반 선택 — 별도 섹션 유지) — 메인 메뉴명 검색 → 조합별 카드(부찬 목록,
+등장일수, 평균 만족도, 영양 프로필 태그).
+
+### 36.6 혼잡도 예측에 실제 계획 메뉴 반영 (2.5)
+
+**현재 한계**: `simulation.py`의 `congestion_forecast`/`what_if`는 코너
+단위 과거 평균(`_HISTORY_WINDOW=8`)만 보고 그날 실제로 무슨 메뉴가
+나오는지 전혀 몰랐다. `what_if`의 `new_menu_corner_id`는 "신메뉴가
+있다더라" 수준의 플래그였고 배수는 고정 1.15(v0 임의값).
+
+**신규 헬퍼** (`simulation.py`):
+```python
+def _planned_main_menu_id(db, corner_id, meal_type, target_date) -> int | None
+    # weekly_menu_plan에서 그 날짜·코너·식사구분의 MAIN 메뉴 조회, 없으면 None(폴백)
+def _menu_popularity_multiplier(db, corner_id, menu_id) -> float | None
+    # 그 메뉴의 최근 menu_performance_stats.share_of_traffic ÷ 같은 기간
+    # 그 코너 소속 메뉴들의 평균 share_of_traffic (코너 소속은
+    # analysis.py::_corner_id_by_menu_from_meal_log 재사용 — 32절과 동일 원칙)
+```
+- **`congestion_forecast`**: 코너별로 계획 메뉴를 찾아 `menu_popularity_
+  multiplier`를 baseline(코너 평균 식수)에 곱한다 — `expected_wait_
+  minutes`도 이 보정된 예측치 기준으로 재계산. 계획이 없으면(주간
+  식단표 미입력 기간) 기존처럼 코너 평균만 사용 — **폴백 유지, 에러
+  아님**.
+- **`what_if`**: 신규 선택 필드 `planned_menu_id`. 이미 성과 데이터가
+  있으면(`menu_performance_stats`) 4분면(quadrant)별 배수를 쓴다:
+  ```python
+  _MENU_QUADRANT_MULTIPLIER = {
+      POPULAR: 1.20, HIDDEN_GEM: 1.10, NEEDS_IMPROVEMENT: 1.05,
+      REMOVAL_CANDIDATE: 1.00, LOW_SAMPLE: 1.15,
+  }
+  ```
+  성과 데이터가 아예 없으면(진짜 신메뉴) 기존 고정값(1.15,
+  `_DEFAULT_NEW_MENU_MULTIPLIER`)으로 폴백 — `new_menu_corner_id`만
+  주고 `planned_menu_id`를 안 주면 기존 동작 그대로 유지(하위 호환).
+
+**⚠️ 참고**: 두 엔드포인트 다 `weekly_menu_plan`에 그 날짜(며칠~2주 앞)가
+미리 업로드돼 있어야 효과가 있다 — 과거분만 있으면 계획 메뉴를 못 찾아
+기존 동작과 동일.
+
+**테스트**: `test_congestion_forecast_adjusts_for_planned_menu_
+popularity`, `test_what_if_uses_quadrant_multiplier_for_planned_menu_
+with_performance_data`(둘 다 `test_api_ingest_and_analysis.py`) — 코너
+평균 대비 특정 메뉴의 share_of_traffic 비율로 예측치가 실제로 달라지는지
+숫자로 고정.
