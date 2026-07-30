@@ -24,7 +24,11 @@ class Settings(BaseSettings):
 
     # PRD 6.2: 피크타임 구간 (분석/집계 배치에서 사용)
     peak_time_start: str = "11:40:00"
-    peak_time_end: str = "12:00:00"
+    peak_time_end: str = "12:20:00"
+    # 중식 전체 시간대 — 피크타임이 전체 대비 얼마나 몰리는지(peak_share_ratio)
+    # 실측하는 기준 구간(2026-07, 사용자 확인).
+    meal_period_start: str = "11:20:00"
+    meal_period_end: str = "13:00:00"
 
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 

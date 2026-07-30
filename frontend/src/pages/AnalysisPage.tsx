@@ -1461,6 +1461,12 @@ function daysUntil(iso: string): number {
 
 const WEEKLY_WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
 
+// 일반인도 바로 이해할 수 있는 설명 — "혼잡 예상" 배지가 정확히 뭘 뜻하는지
+// (요약 카드 캡션 + 배지 title 툴팁에서 공유).
+const CONGESTION_EXPLANATION =
+  "혼잡 예상 배지는 피크타임(11:40~12:20)에 처리 가능한 인원보다 예상 식수가 많을 때, " +
+  "그 초과 인원을 처리하는 데 걸리는 예상 추가 시간입니다.";
+
 function weekdayLabel(dateIso: string): string {
   return `${dateIso.slice(5)}(${WEEKLY_WEEKDAY_KO[new Date(dateIso).getDay()]})`;
 }
@@ -1802,6 +1808,7 @@ function WeeklyMenuReviewTab() {
                               <div
                                 className="mt-0.5 text-xs font-medium"
                                 style={{ color: useLightText ? "#fff" : "var(--warning)" }}
+                                title={CONGESTION_EXPLANATION}
                               >
                                 ⚠ 혼잡 예상 · 대기 ~{waitMinutes}분
                               </div>
@@ -1916,6 +1923,9 @@ function WeeklyMenuReviewTab() {
 
       {predictedRows.length > 0 && topPredicted && (
         <Card title="이번 주 예측 요약">
+          <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            {CONGESTION_EXPLANATION}
+          </p>
           <div className="mb-4">
             <StatTile
               label="이번 주 예상 최고 점유율"

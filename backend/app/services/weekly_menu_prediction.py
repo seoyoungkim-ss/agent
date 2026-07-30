@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models.enums import MenuQuadrant, MenuRole
 from app.models.logs import WeeklyMenuPlan
 from app.models.master import CornerMaster, MenuMaster
@@ -31,7 +32,13 @@ from app.services.holidays import HolidayService
 from app.services.llm_client import InternalLLMClient
 from app.services.menu_affinity import build_employee_menu_sets
 from app.services.menu_combination import build_side_combos_for_main_menu, compute_combo_satisfaction_summary
-from app.services.menu_throughput import build_corner_daily_throughput, compute_menu_throughput_summary
+from app.services.menu_throughput import (
+    build_corner_daily_peak_share,
+    build_corner_daily_throughput,
+    compute_menu_throughput_summary,
+    compute_peak_share_ratio,
+    window_minutes,
+)
 
 _HISTORY_WINDOW_DAYS = 180  # menu_performance_stats 롤링 윈도우(6.3절)와 동일 범위
 
@@ -55,6 +62,30 @@ def compute_predicted_share(corner_headcounts: dict[int, float]) -> dict[int, fl
     if total <= 0:
         return {corner_id: 0.0 for corner_id in corner_headcounts}
     return {corner_id: headcount / total for corner_id, headcount in corner_headcounts.items()}
+
+
+def compute_expected_wait_minutes(
+    predicted_headcount: float,
+    effective_throughput: float | None,
+    peak_share_ratio: float | None,
+    peak_window_minutes: float,
+) -> float | None:
+    """순수 함수 — "혼잡 예상" 대기시간.
+
+    예전엔 예상 식수 전체를 피크타임 처리량 하나로 나눠 비현실적으로 큰
+    값(총 서빙 소요시간이지 개인 대기시간이 아님)이 나왔다(2026-07 실사용
+    피드백). 이제는 피크타임(peak_window_minutes) 동안 처리 가능한 인원
+    (= effective_throughput × peak_window_minutes)을 넘는 초과분만 대기로
+    본다 — peak_share_ratio(전체 중식시간대 대비 피크타임에 실제로 몰리는
+    비중, 실측)로 예상 식수 중 피크타임에 도착할 인원을 추정한다. 수요가
+    피크 용량 안에 들면 0, 데이터 부족(처리량/비중 없음)이면 None.
+    """
+    if not effective_throughput or effective_throughput <= 0 or peak_share_ratio is None:
+        return None
+    expected_peak_arrivals = predicted_headcount * peak_share_ratio
+    peak_capacity = effective_throughput * peak_window_minutes
+    overflow = max(0.0, expected_peak_arrivals - peak_capacity)
+    return round(overflow / effective_throughput, 1)
 
 
 @dataclass(frozen=True)
@@ -190,17 +221,29 @@ def compute_predicted_numbers(db: Session, plan_id: int) -> dict | None:
     predicted_headcount = corner_headcounts.get(plan.corner_id, 0.0)
     predicted_share = predicted_shares.get(plan.corner_id, 0.0)
 
-    # 예상 대기시간 — 이 메뉴의 실측 분당 처리량(없으면 코너 전체 평균)으로
-    # 예상 식수를 나눈다. 위에서 배수 합성용으로 이미 구해둔 throughput_entry/
-    # throughput_summary를 그대로 재사용 — 추가 쿼리 없음(사용자 요청,
-    # "피크타임 분당 서브수 고려한 혼잡도 예측", 2026-07).
+    # 예상 대기시간 — 위에서 배수 합성용으로 이미 구해둔 throughput_entry/
+    # throughput_summary를 재사용해 이 메뉴의 실측 분당 처리량(없으면 코너
+    # 전체 평균)을 얻는다. 예상 식수 전체를 그냥 나누면(구버전) "총 서빙
+    # 소요시간"이 나와 비현실적으로 크므로(2026-07 실사용 피드백), 전체
+    # 중식시간대(meal_period) 대비 피크타임(peak_time)에 실제로 몰리는
+    # 비중(peak_share_ratio, 실측)으로 피크 시간대 예상 인원을 추정해 피크
+    # 처리 용량을 넘는 초과분만 대기로 본다.
+    settings = get_settings()
     effective_throughput = (
         throughput_entry.avg_throughput if throughput_entry else throughput_summary.overall_avg_throughput
     )
-    expected_wait_minutes = (
-        round(predicted_headcount / effective_throughput, 1)
-        if effective_throughput and effective_throughput > 0
-        else None
+    peak_count, meal_count = build_corner_daily_peak_share(db, plan.corner_id, period_start, period_end)
+    peak_share_ratio = compute_peak_share_ratio(peak_count, meal_count)
+    if peak_share_ratio is None:
+        # 실측 데이터가 아직 없는 코너(신규 등) — 시간 비례로 폴백(v0)
+        peak_share_ratio = window_minutes(settings.peak_time_start, settings.peak_time_end) / window_minutes(
+            settings.meal_period_start, settings.meal_period_end
+        )
+    expected_wait_minutes = compute_expected_wait_minutes(
+        predicted_headcount,
+        effective_throughput,
+        peak_share_ratio,
+        window_minutes(settings.peak_time_start, settings.peak_time_end),
     )
 
     return {

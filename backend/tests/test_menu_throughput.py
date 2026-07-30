@@ -1,6 +1,11 @@
 import datetime as dt
 
-from app.services.menu_throughput import DayThroughput, compute_menu_throughput_summary
+from app.services.menu_throughput import (
+    DayThroughput,
+    compute_menu_throughput_summary,
+    compute_peak_share_ratio,
+    window_minutes,
+)
 
 
 def test_computes_average_throughput_per_menu_sorted_slowest_first():
@@ -51,3 +56,20 @@ def test_empty_days_returns_no_baseline_and_no_menus():
     summary = compute_menu_throughput_summary([])
     assert summary.overall_avg_throughput is None
     assert summary.menus == []
+
+
+def test_window_minutes_computes_duration_between_two_times():
+    assert window_minutes("11:40:00", "12:20:00") == 40.0
+    assert window_minutes("11:20:00", "13:00:00") == 100.0
+
+
+def test_window_minutes_floors_at_one_minute():
+    assert window_minutes("12:00:00", "12:00:00") == 1.0
+
+
+def test_compute_peak_share_ratio_divides_peak_by_meal_total():
+    assert compute_peak_share_ratio(20, 100) == 0.2
+
+
+def test_compute_peak_share_ratio_none_when_no_meal_data():
+    assert compute_peak_share_ratio(0, 0) is None

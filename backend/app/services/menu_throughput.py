@@ -23,6 +23,12 @@ def _parse_time(value: str) -> dt.time:
     return dt.datetime.strptime(value, "%H:%M:%S").time()
 
 
+def window_minutes(start: str, end: str) -> float:
+    """순수 함수 — 'HH:MM:SS' 두 문자열 사이의 분(minute) 길이."""
+    start_t, end_t = _parse_time(start), _parse_time(end)
+    return max((dt.datetime.combine(dt.date.min, end_t) - dt.datetime.combine(dt.date.min, start_t)).total_seconds() / 60, 1)
+
+
 @dataclass(frozen=True)
 class DayThroughput:
     date: dt.date
@@ -73,7 +79,7 @@ def build_corner_daily_throughput(
     for date, day_rows in by_date.items():
         peak_start = dt.datetime.combine(date, _parse_time(settings.peak_time_start))
         peak_end = dt.datetime.combine(date, _parse_time(settings.peak_time_end))
-        peak_minutes = max((peak_end - peak_start).total_seconds() / 60, 1)
+        peak_minutes = window_minutes(settings.peak_time_start, settings.peak_time_end)
         peak_count = sum(1 for r in day_rows if peak_start <= r.eaten_at < peak_end)
         throughput = peak_count / peak_minutes
 
@@ -111,3 +117,54 @@ def compute_menu_throughput_summary(
     entries.sort(key=lambda e: e.avg_throughput)
 
     return MenuThroughputSummary(overall_avg_throughput=overall_avg, menus=entries)
+
+
+def build_corner_daily_peak_share(
+    db: Session,
+    corner_id: int,
+    period_start: dt.date,
+    period_end: dt.date,
+    settings: Settings | None = None,
+) -> tuple[int, int]:
+    """그 코너의 기간 내 (피크타임 건수, 전체 중식시간대 건수) 합계.
+
+    "혼잡 예상" 계산이 예전엔 예상 식수 전체를 피크타임 처리량 하나로 나눠
+    비현실적으로 큰 숫자가 나왔다(2026-07 실사용 피드백) — 전체 중식시간대
+    (settings.meal_period_start~end) 대비 피크타임에 실제로 얼마나 몰리는지
+    실측 비율을 구해서 보정하기 위한 원자료. `build_corner_daily_throughput`과
+    같은 방식(전체 행을 가져와 파이썬에서 시각 비교)으로 DB 방언에 무관하게 만든다.
+    """
+    settings = settings or get_settings()
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+
+    rows = (
+        db.query(MealLog.eaten_at)
+        .filter(
+            MealLog.corner_id == corner_id,
+            MealLog.eaten_at >= period_start_dt,
+            MealLog.eaten_at < period_end_exclusive,
+        )
+        .all()
+    )
+
+    peak_start_t = _parse_time(settings.peak_time_start)
+    peak_end_t = _parse_time(settings.peak_time_end)
+    meal_start_t = _parse_time(settings.meal_period_start)
+    meal_end_t = _parse_time(settings.meal_period_end)
+
+    peak_count = 0
+    meal_count = 0
+    for (eaten_at,) in rows:
+        t = eaten_at.time()
+        if meal_start_t <= t < meal_end_t:
+            meal_count += 1
+            if peak_start_t <= t < peak_end_t:
+                peak_count += 1
+
+    return peak_count, meal_count
+
+
+def compute_peak_share_ratio(peak_count: int, meal_count: int) -> float | None:
+    """순수 함수 — 전체 중식시간대 대비 피크타임 비중(실측). 데이터 없으면 None."""
+    return peak_count / meal_count if meal_count > 0 else None

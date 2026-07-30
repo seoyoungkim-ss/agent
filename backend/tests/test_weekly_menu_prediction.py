@@ -1,6 +1,7 @@
 from app.services.weekly_menu_prediction import (
     combine_menu_multiplier,
     compute_core_layer_menu_signal,
+    compute_expected_wait_minutes,
     compute_predicted_share,
 )
 
@@ -47,3 +48,27 @@ def test_compute_core_layer_menu_signal_counts_eaters_each_side():
     assert signal.core_menu_eaters == 1
     assert signal.non_core_employee_count == 3
     assert signal.non_core_menu_eaters == 1
+
+
+def test_compute_expected_wait_minutes_zero_when_demand_fits_peak_capacity():
+    # 피크 40분 동안 분당 1명씩(=40명) 처리 가능한데, 피크에 몰릴 것으로
+    # 추정되는 인원(예상 식수 80명 중 50%인 40명)이 딱 그만큼이라 대기 없음.
+    wait = compute_expected_wait_minutes(
+        predicted_headcount=80.0, effective_throughput=1.0, peak_share_ratio=0.5, peak_window_minutes=40.0
+    )
+    assert wait == 0.0
+
+
+def test_compute_expected_wait_minutes_positive_when_demand_exceeds_peak_capacity():
+    # 피크 용량은 40명(분당 1명×40분)인데, 피크에 몰릴 것으로 추정되는 인원은
+    # 100명×0.6=60명 — 초과 20명을 분당 1명으로 마저 처리하려면 20분 더 걸림.
+    wait = compute_expected_wait_minutes(
+        predicted_headcount=100.0, effective_throughput=1.0, peak_share_ratio=0.6, peak_window_minutes=40.0
+    )
+    assert wait == 20.0
+
+
+def test_compute_expected_wait_minutes_none_without_throughput_or_ratio():
+    assert compute_expected_wait_minutes(50.0, None, 0.5, 40.0) is None
+    assert compute_expected_wait_minutes(50.0, 0.0, 0.5, 40.0) is None
+    assert compute_expected_wait_minutes(50.0, 1.0, None, 40.0) is None

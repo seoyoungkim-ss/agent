@@ -1918,3 +1918,64 @@ None 확인 추가.
 날짜 코너 구성으로 바뀌는지(예: 07-28은 일품 96.78%/한식 3.22%처럼 그
 날 실제 비율과 일치), 추이 라인차트에 코너별 선이 나오는지, 헤드라인
 StatTile이 실제 최고 점유율 행을 가리키는지 확인.
+
+### 37.6 혼잡 예상 대기시간 — "총 서빙시간"에서 "피크 초과분"으로 재설계 (2026-07)
+
+37.5의 "혼잡 예상 · 대기 ~N분"이 `predicted_headcount ÷ 피크타임 분당
+처리량`으로 계산됐는데, 사용자가 "어떤 로직인지 모르겠다"고 지적했다 —
+실제로는 "그 코너 전체 예상 식수를 쭉 서빙하는 데 걸리는 총 시간"이라
+비현실적으로 큰 값(예: 66분)이 나왔다. 개인이 줄 서서 기다리는 시간이
+아니었던 것.
+
+**사용자가 확정한 파라미터**: 피크타임을 11:40~12:00(20분)에서
+**11:40~12:20(40분)**으로 늘리고, **중식 전체 시간대는 11:20~13:00
+(100분)**이라고 알려줬다 — 이 두 구간이 있으면 "피크타임에 실제로 얼마나
+몰리는지"를 실측할 수 있다.
+
+**새 공식** — "피크타임 처리 용량을 넘는 초과분만 대기로 본다":
+```
+peak_share_ratio = 그 코너의 (피크타임 취식 건수 합) ÷ (중식 전체시간대 취식 건수 합)   # 실측
+expected_peak_arrivals = predicted_headcount × peak_share_ratio   # 예상 식수 중 피크에 몰릴 인원
+peak_capacity = effective_throughput × peak_window_minutes(40분)  # 피크타임 처리 가능 인원
+overflow = max(0, expected_peak_arrivals − peak_capacity)
+expected_wait_minutes = overflow ÷ effective_throughput
+```
+수요가 피크 용량 안에 들면 0분(혼잡 없음), 넘치면 그 초과분을 마저
+처리하는 데 걸리는 시간만 나와 훨씬 직관적이다. `peak_share_ratio`를
+실측할 데이터가 아직 없는 코너(신규 등)는 시간 비례
+(`peak_window_minutes ÷ meal_window_minutes` = 40/100 = 0.4)로 폴백한다(v0,
+문서화).
+
+**파일**:
+- `backend/app/config.py`: `peak_time_end` "12:00:00"→"12:20:00", 신규
+  `meal_period_start`("11:20:00")/`meal_period_end`("13:00:00").
+- `backend/app/services/menu_throughput.py`: `window_minutes(start, end)`
+  (순수함수 — 기존 `build_corner_daily_throughput`의 인라인 `peak_minutes`
+  계산도 이걸로 교체해 중복 제거), `build_corner_daily_peak_share`(신규 —
+  기존 `build_corner_daily_throughput`과 같은 "전체 행을 가져와 파이썬에서
+  시각 비교" 방식으로 코너의 (피크 건수, 전체 중식시간대 건수) 합계를 센다
+  — 새 SQL 시간추출 방식 안 씀), `compute_peak_share_ratio`(순수함수).
+- `backend/app/services/weekly_menu_prediction.py`: `compute_expected_
+  wait_minutes`(신규 순수함수, 위 공식)로 기존 나눗셈 한 줄을 교체.
+  `compute_predicted_numbers`가 이미 구해둔 `effective_throughput`은 그대로
+  재사용, `peak_share_ratio`만 추가로 계산(추가 쿼리 1건).
+
+**프론트**: 계산 로직 자체는 그대로 소비(`prediction.expected_wait_
+minutes` 필드 의미 불변, 히트맵/배지 렌더링 로직 안 건드림) — 사용자가
+"일반인도 알아듣기 쉽게 표기해달라"고 요청해 `CONGESTION_EXPLANATION`
+상수(1문장, "혼잡 예상 배지는 피크타임에 처리 가능한 인원보다 예상 식수가
+많을 때 그 초과 인원을 처리하는 데 걸리는 예상 추가 시간입니다")를
+"이번 주 예측 요약" 카드 캡션과 격자 배지의 `title` 툴팁 양쪽에 공유해서
+표시한다.
+
+**회귀 확인**: `peak_time_end`를 12:00→12:20으로 늘려도 기존 테스트 중
+그 사이 시각에 걸린 assertion이 없어(13시·11:52 등만 사용) 195개 전체
+테스트 그대로 통과.
+
+**테스트**: `test_menu_throughput.py`에 `window_minutes`/`compute_peak_
+share_ratio` 단위테스트 추가. `test_weekly_menu_prediction.py`에
+`compute_expected_wait_minutes`의 핵심 3케이스(용량 안=0, 초과=양수 정확한
+값, 데이터 없음=None)를 직접 고정 — 이 공식은 여러 신호가 얽혀 있어
+엔드투엔드 픽스처로 특정 초과 시나리오를 억지로 만들기보다 순수함수
+단위테스트로 정확히 검증하는 쪽을 택했다(기존 엔드포인트 테스트는 배선만
+확인하도록 `> 0` → `>= 0`으로 완화, 0도 유효한 결과이므로).
