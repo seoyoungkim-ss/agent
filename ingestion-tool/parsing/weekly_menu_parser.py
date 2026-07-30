@@ -28,6 +28,7 @@ from models import MealType, MenuRole, ParsedMenuRow
 
 _MEAL_TYPE_VALUES = {m.value for m in MealType}
 _WEEKDAY_LABELS = ["월", "화", "수", "목", "금", "토"]  # 일요일은 식당 미운영이라 없음
+_WEEKDAY_BY_PYTHON_INDEX = ["월", "화", "수", "목", "금", "토", "일"]  # dt.date.weekday(): 월=0
 _ITEM_SPLIT_PATTERN = re.compile(r"[\n\r]+|[,/·]")
 _SPECIAL_TAG_PATTERN = re.compile(r"^\[.+\]$")  # 예: "[한상차림]" — 메뉴명이 아니라 태그
 _INGREDIENT_ANNOTATION_PATTERN = re.compile(r"^\(.+:.+\)$")  # 예: "(우육:호주산)" — 버림
@@ -41,6 +42,21 @@ def _clean(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _weekday_label(value: Any) -> str:
+    """헤더 셀에서 요일 라벨을 뽑아낸다.
+
+    "7/6(월)"처럼 날짜서식이 입혀진 셀은 엑셀 화면에는 그렇게 보여도 실제
+    값은 문자열이 아니라 datetime일 수 있다(xlwings가 셀 서식이 아니라
+    값을 그대로 돌려줌) — 이 경우 str()로 바꾸면 요일 글자가 사라지므로,
+    날짜 객체면 요일을 직접 계산해서 라벨을 만든다.
+    """
+    if isinstance(value, dt.datetime):
+        value = value.date()
+    if isinstance(value, dt.date):
+        return _WEEKDAY_BY_PYTHON_INDEX[value.weekday()]
+    return _clean(value)
 
 
 def find_header_row(
@@ -58,14 +74,15 @@ def find_header_row(
 
     실제 파일은 헤더 셀에 "7/6(월)"처럼 날짜가 요일과 함께 들어있어(사용자
     확인, 2026-07) 정확히 일치하지 않으므로, 요일 글자가 셀 텍스트 안에
-    포함돼 있는지로 판단한다.
+    포함돼 있는지로 판단한다. 셀 값이 datetime이면 _weekday_label이 요일을
+    직접 계산해준다.
     """
     threshold = max(1, num_days - 2)  # 기존 "7개 중 5개" 비율(≈71%)을 유지
     for row_idx, row in enumerate(grid):
         labels = []
         for day_offset in range(num_days):
             col = first_day_col + day_offset * day_col_span
-            labels.append(_clean(row[col]) if col < len(row) else "")
+            labels.append(_weekday_label(row[col]) if col < len(row) else "")
         matches = sum(1 for label, expected in zip(labels, _WEEKDAY_LABELS) if expected in label)
         if matches >= threshold:
             return row_idx

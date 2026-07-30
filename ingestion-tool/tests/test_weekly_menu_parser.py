@@ -46,6 +46,25 @@ def test_find_header_row_matches_date_prefixed_weekday_label():
     assert find_header_row(grid) == 1
 
 
+def test_find_header_row_matches_datetime_valued_header_cells():
+    # 날짜서식이 입혀진 셀은 화면엔 "7/6(월)"로 보여도 xlwings가 문자열이
+    # 아니라 datetime을 돌려주는 경우가 있음 — str()로 바꾸면 요일 글자가
+    # 사라지므로, 요일을 직접 계산해서 인식해야 한다.
+    grid = [
+        [None] * 15,
+        [
+            "구분", "코너", None,
+            dt.datetime(2026, 7, 6), None,
+            dt.datetime(2026, 7, 7), None,
+            dt.datetime(2026, 7, 8), None,
+            dt.datetime(2026, 7, 9), None,
+            dt.datetime(2026, 7, 10), None,
+            dt.datetime(2026, 7, 11), None,
+        ],
+    ]
+    assert find_header_row(grid) == 1
+
+
 def test_split_cell_into_items_newline():
     assert split_cell_into_items("제육볶음\n계란후라이\n김치") == ["제육볶음", "계란후라이", "김치"]
 
