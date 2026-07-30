@@ -1861,3 +1861,60 @@ fallback_comment`는 리팩터링 후에도 그대로 통과(응답 스키마 �
 **검증**: Playwright로 격자표가 배지 없이 코너×요일로 보이는지, 셀 클릭
 시 하단에 수정/예측 상세 패널이 뜨고 기존 역할 수정이 그대로 되는지,
 "전체 예측 비교" 클릭 시 격자 각 셀에 점유율이 한 번에 채워지는지 확인.
+
+### 37.5 "전체 예측 비교" 가시화 — 히트맵/도넛/추이차트/헤드라인/혼잡 배지 (2026-07)
+
+37.4의 "전체 예측 비교"가 셀에 작은 텍스트만 얹어 눈에 잘 안 띈다는 피드백 +
+"식단표 밑에 점유율 도넛 그래프 같은 걸 고민해달라"는 요청. dataviz 스킬을
+로드해 이미 이 코드베이스에 있는 전례를 그대로 재사용했다(새 색 규칙을
+만들지 않음):
+
+- **격자 히트맵**: `TasteClusterSection`의 `SEQUENTIAL_BLUE_RAMP`(단일 색상
+  3-스톱, sequential magnitude 인코딩)를 그대로 가져와 `shareToBackground
+  (share, maxShare)`(순수 함수, 선형보간)로 셀 배경을 칠한다 — 그 주
+  `predicted_share` 최댓값 기준 정규화. 배경이 진해지면(정규화 값 > 0.55)
+  텍스트를 흰색으로 전환해 대비를 지킨다. 점유율 숫자 텍스트는 그대로 유지
+  (배경 추가일 뿐 정보 손실 없음 — 스킬의 "표/범례 병행" 원칙과 같은 취지).
+- **요일 선택형 도넛**: `CornerAnalysisTab`의 `shareOption`(`type:"pie",
+  radius:["45%","70%"]`)과 `cornerColor`(코너를 `corner_id` 오름차순으로
+  `var(--series-N)` 고정 배정 — "색은 순위가 아니라 개체를 따라간다")를
+  그대로 재사용. `SegmentedControl`(`components/ui.tsx`)로 월~토 하나를
+  고르면 그 날짜의 `predictedByPlanId` 항목들을 코너별로 묶어 도넛 슬라이스로
+  그린다.
+- **요일별 점유율 추이 라인차트**: 같은 `cornerColor`를 시리즈 색으로 재사용,
+  x축은 월~토, 코너별 1개 시리즈 — 시리즈 2개 이상은 범례 필수(스킬 규칙)라
+  범례를 켰다. 그 코너가 안 나온 날은 `null`로 끊어(`connectNulls:false`)
+  실제로 계획이 없는 날과 점유율 0을 혼동하지 않게 했다.
+- **이번 주 예상 인기 메뉴 헤드라인**: `predictedByPlanId` 중
+  `predicted_share` 최댓값 행을 `StatTile`(`components/ui.tsx`)로 표시 —
+  "단일 헤드라인" job(스킬의 폼 선택 기준)이라 차트가 아니라 숫자 하나로
+  처리.
+- **혼잡 예상 코너 하이라이트 배지**: 사용자가 "피크타임 분당 서브수
+  고려한 혼잡도 예측도 해달라"고 추가 요청 — `weekly_menu_prediction.py::
+  compute_predicted_numbers`가 배수 합성용으로 이미 계산해두던
+  `throughput_entry`(이 메뉴의 평균 분당 처리량)/`throughput_summary.
+  overall_avg_throughput`(코너 전체 평균, 메뉴별 데이터 없을 때 폴백)을
+  그대로 재사용해 `expected_wait_minutes = predicted_headcount ÷ 실효
+  처리량`을 추가 쿼리 없이 계산했다(`prediction` dict에 필드 추가).
+  프론트는 그 주 전체 `expected_wait_minutes`의 **중앙값**보다 높은 셀에
+  `--warning` 색 라벨("⚠ 혼잡 예상 · 대기 ~N분")을 붙인다 — 색만이 아니라
+  아이콘+텍스트 포함(스킬의 status color 규칙), 임계치는 그 주 데이터
+  기준 상대값이라 별도 설정 없이 맥락에 맞게 움직인다. `PredictedImpact
+  Panel`(상세 패널)에도 "예상 대기시간" 한 줄을 추가했다.
+
+**파일**: `backend/app/services/weekly_menu_prediction.py`(필드 1개 추가,
+쿼리 추가 없음), `frontend/src/pages/AnalysisPage.tsx`(`shareToBackground`/
+`hexToRgb` 신규 헬퍼, 기존 `median` 재사용, 격자 셀 스타일링, "이번 주
+예측 요약" 카드 신규).
+
+**테스트**: `test_predicted_impact_computes_expected_wait_minutes_from_
+peak_time_throughput`(과거 이틀치 피크타임 취식기록 + daily-stats
+recompute로 baseline을 만든 뒤 `expected_wait_minutes > 0` 확인),
+기존 두 predicted-impact 테스트에 `expected_wait_minutes` 필드 존재/기본값
+None 확인 추가.
+
+**검증**: Playwright로 "전체 예측 비교" 클릭 후 격자 셀 배경이 점유율에
+따라 진해지고 진한 셀은 흰 텍스트로 바뀌는지, 요일을 바꾸면 도넛이 그
+날짜 코너 구성으로 바뀌는지(예: 07-28은 일품 96.78%/한식 3.22%처럼 그
+날 실제 비율과 일치), 추이 라인차트에 코너별 선이 나오는지, 헤드라인
+StatTile이 실제 최고 점유율 행을 가리키는지 확인.

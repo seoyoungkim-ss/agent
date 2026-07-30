@@ -279,6 +279,7 @@ interface PredictedNumbers {
     menu_share_of_traffic: number | null;
     corner_avg_share_of_traffic: number | null;
     throughput_ratio: number | null;
+    expected_wait_minutes: number | null;
   };
 }
 

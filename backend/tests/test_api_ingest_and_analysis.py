@@ -369,6 +369,8 @@ def test_weekly_menu_predicted_impact_returns_prediction_and_fallback_comment(cl
     assert body["main_menu"]["menu_name"] == "제육볶음"
     assert isinstance(body["prediction"]["predicted_headcount"], (int, float))
     assert isinstance(body["prediction"]["predicted_share"], (int, float))
+    # 이 픽스처엔 과거 처리량 데이터가 없어 None(계산은 되지만 근거가 없다는 뜻)
+    assert body["prediction"]["expected_wait_minutes"] is None
     assert "사내 LLM 미설정" in body["summary_comment"]  # 테스트 환경엔 사내 LLM 미설정
 
     # 메인이 아닌(부찬) plan_id로는 예측을 못 만든다
@@ -398,7 +400,38 @@ def test_weekly_menu_predicted_impact_summary_returns_numbers_without_llm_call(c
     assert row["meal_type"] == "중식"
     assert isinstance(row["prediction"]["predicted_headcount"], (int, float))
     assert isinstance(row["prediction"]["predicted_share"], (int, float))
+    assert "expected_wait_minutes" in row["prediction"]
     assert "summary_comment" not in row  # LLM 호출 없이 숫자만
+
+
+def test_predicted_impact_computes_expected_wait_minutes_from_peak_time_throughput(client):
+    _ingest_weekly_menu(client)  # 제육볶음(메인)/계란후라이(부찬), 한식, MONDAY
+    # 과거 두 날짜에 피크타임(11:40~12:00, _ingest_meal_log 기본 취식시각 11:52)
+    # 취식 기록을 남겨 이 메뉴의 처리량 데이터를 만든다(min_day_count=2 충족).
+    for offset_days in (14, 7):
+        eaten_date = MONDAY - dt.timedelta(days=offset_days)
+        for i in range(3):
+            _ingest_meal_log(
+                client, f"T{offset_days}_{i}", "맛남", eaten_date=eaten_date, menu_name="제육볶음", corner_name="한식"
+            )
+    # _baseline_headcount는 daily_corner_stats(집계 테이블)를 보므로, 예상
+    # 식수가 0이 아니려면 그 두 날짜분을 집계해둬야 한다.
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": (MONDAY - dt.timedelta(days=14)).isoformat(), "period_end": (MONDAY - dt.timedelta(days=7)).isoformat()},
+    )
+    assert resp.status_code == 200
+
+    resp = client.get(
+        "/api/analysis/weekly-menu", params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()}
+    )
+    main_plan_id = next(s for s in resp.json() if s["corner_name"] == "한식")["main"]["plan_id"]
+
+    resp = client.get(f"/api/analysis/weekly-menu/{main_plan_id}/predicted-impact")
+    assert resp.status_code == 200, resp.text
+    expected_wait = resp.json()["prediction"]["expected_wait_minutes"]
+    assert expected_wait is not None
+    assert expected_wait > 0
 
 
 def test_new_menu_status_unknown_menu_name_404s(client):

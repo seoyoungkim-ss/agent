@@ -190,6 +190,19 @@ def compute_predicted_numbers(db: Session, plan_id: int) -> dict | None:
     predicted_headcount = corner_headcounts.get(plan.corner_id, 0.0)
     predicted_share = predicted_shares.get(plan.corner_id, 0.0)
 
+    # 예상 대기시간 — 이 메뉴의 실측 분당 처리량(없으면 코너 전체 평균)으로
+    # 예상 식수를 나눈다. 위에서 배수 합성용으로 이미 구해둔 throughput_entry/
+    # throughput_summary를 그대로 재사용 — 추가 쿼리 없음(사용자 요청,
+    # "피크타임 분당 서브수 고려한 혼잡도 예측", 2026-07).
+    effective_throughput = (
+        throughput_entry.avg_throughput if throughput_entry else throughput_summary.overall_avg_throughput
+    )
+    expected_wait_minutes = (
+        round(predicted_headcount / effective_throughput, 1)
+        if effective_throughput and effective_throughput > 0
+        else None
+    )
+
     return {
         "plan_id": plan.id,
         "plan_date": plan.plan_date,
@@ -224,6 +237,7 @@ def compute_predicted_numbers(db: Session, plan_id: int) -> dict | None:
                 else None
             ),
             "throughput_ratio": round(throughput_ratio, 2) if throughput_ratio else None,
+            "expected_wait_minutes": expected_wait_minutes,
         },
     }
 

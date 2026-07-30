@@ -23,6 +23,7 @@ import {
   QuadrantBadge,
   resolveColor,
   SegmentedControl,
+  StatTile,
   Table,
   quadrantColor,
   useChartTheme,
@@ -180,6 +181,30 @@ function DivisionAnalysisSection() {
 
 // 히트맵 값(0~1)이 낮음→높음으로 진해지는 단일 색상(blue) 시퀀셜 램프.
 const SEQUENTIAL_BLUE_RAMP = ["#cde2fb", "#5598e7", "#0d366b"];
+
+function hexToRgb(hex: string): [number, number, number] {
+  const v = hex.replace("#", "");
+  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+}
+
+// share/maxShare를 0~1로 정규화해 SEQUENTIAL_BLUE_RAMP를 선형보간한다 — 주간
+// 식단표 격자의 "전체 예측 비교" 배경 히트맵용(TasteClusterSection과 같은 램프,
+// dataviz 스킬: sequential은 단일 색상 하나로만).
+function shareToBackground(share: number, maxShare: number): string | undefined {
+  if (maxShare <= 0 || share <= 0) return undefined;
+  const t = Math.max(0, Math.min(1, share / maxShare));
+  const stops = SEQUENTIAL_BLUE_RAMP.map(hexToRgb);
+  const scaled = t * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(scaled));
+  const localT = scaled - i;
+  const [r1, g1, b1] = stops[i];
+  const [r2, g2, b2] = stops[i + 1];
+  const r = Math.round(r1 + (r2 - r1) * localT);
+  const g = Math.round(g1 + (g2 - g1) * localT);
+  const b = Math.round(b1 + (b2 - b1) * localT);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 
 function TasteClusterSection() {
   const chartTheme = useChartTheme();
@@ -1506,6 +1531,9 @@ function PredictedImpactPanel({ planId }: { planId: number }) {
           <div>
             예상 식수: {query.data.prediction.predicted_headcount.toFixed(1)}명 · 예상 점유율:{" "}
             {(query.data.prediction.predicted_share * 100).toFixed(1)}%
+            {query.data.prediction.expected_wait_minutes != null && query.data.prediction.expected_wait_minutes > 0 && (
+              <> · 예상 대기시간: 약 {query.data.prediction.expected_wait_minutes}분</>
+            )}
           </div>
           <div className="rounded p-2" style={{ background: "var(--surface)", color: "var(--ink-secondary)" }}>
             {query.data.summary_comment}
@@ -1517,6 +1545,7 @@ function PredictedImpactPanel({ planId }: { planId: number }) {
 }
 
 function WeeklyMenuReviewTab() {
+  const chartTheme = useChartTheme();
   const [selectedMonday, setSelectedMonday] = useState(weeklyMondayOf(new Date()));
   const sunday = weeklyAddDays(selectedMonday, 6);
   const weekdayDates = Array.from({ length: 6 }, (_, i) => weeklyAddDays(selectedMonday, i)); // 월~토(일요일 미운영)
@@ -1526,6 +1555,7 @@ function WeeklyMenuReviewTab() {
   const [showPrediction, setShowPrediction] = useState(false);
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
   const [predictedByPlanId, setPredictedByPlanId] = useState<Record<number, PredictedNumbersRow>>({});
+  const [donutDay, setDonutDay] = useState(weekdayDates[0]);
 
   const selectSlot = (key: string) => {
     setSelectedSlotKey((cur) => (cur === key ? null : key));
@@ -1570,6 +1600,90 @@ function WeeklyMenuReviewTab() {
     .slice()
     .sort((a, b) => a[0].localeCompare(b[0]));
   const selectedSlot = slots.find((s) => `${s.plan_date}_${s.corner_id}` === selectedSlotKey) ?? null;
+  const effectiveDonutDay = weekdayDates.includes(donutDay) ? donutDay : weekdayDates[0];
+
+  // dataviz 스킬: "색은 순위가 아니라 개체를 따라간다" — corner_id 고정 순서로
+  // 배정(CornerAnalysisTab의 cornerColor와 동일 컨벤션), 도넛/추이 차트가 공유.
+  const cornerList = cornerRows
+    .map(([cornerName, items]) => ({ corner_id: items[0].corner_id, corner_name: cornerName }))
+    .sort((a, b) => a.corner_id - b.corner_id);
+  const cornerColor = new Map(cornerList.map((c, i) => [c.corner_id, `var(--series-${(i % 8) + 1})`]));
+
+  const predictedRows = Object.values(predictedByPlanId);
+  const maxShare = predictedRows.reduce((m, r) => Math.max(m, r.prediction.predicted_share), 0);
+  const waitValues = predictedRows
+    .map((r) => r.prediction.expected_wait_minutes)
+    .filter((w): w is number => w != null && w > 0);
+  const medianWait = median(waitValues);
+  const topPredicted =
+    predictedRows.length > 0
+      ? predictedRows.reduce((a, b) => (b.prediction.predicted_share > a.prediction.predicted_share ? b : a))
+      : null;
+  const shareByCornerDate = new Map(predictedRows.map((r) => [`${r.corner_id}_${r.plan_date}`, r.prediction.predicted_share]));
+
+  const donutRows = predictedRows.filter((r) => r.plan_date === effectiveDonutDay);
+  const donutOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    tooltip: { trigger: "item" as const, formatter: "{b}: {d}%" },
+    series: [
+      {
+        type: "pie" as const,
+        radius: ["45%", "70%"],
+        avoidLabelOverlap: true,
+        itemStyle: { borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
+        label: { color: chartTheme.text, formatter: "{b}\n{d}%" },
+        labelLine: { lineStyle: { color: chartTheme.axis } },
+        data: donutRows.map((r) => ({
+          name: r.corner_name ?? "-",
+          value: r.prediction.predicted_share,
+          itemStyle: { color: resolveColor(cornerColor.get(r.corner_id) ?? "var(--series-1)") },
+        })),
+      },
+    ],
+  };
+
+  const trendOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 16, top: 32, bottom: 40 },
+    legend: { top: 0, textStyle: { color: chartTheme.text } },
+    tooltip: {
+      trigger: "axis" as const,
+      formatter: (params: { axisValueLabel?: string; marker: string; seriesName: string; value: number | null }[]) => {
+        const header = params[0]?.axisValueLabel ?? "";
+        const lines = params
+          .filter((p) => p.value != null)
+          .map((p) => `${p.marker}${p.seriesName}: ${((p.value as number) * 100).toFixed(1)}%`);
+        return [header, ...lines].join("<br/>");
+      },
+    },
+    xAxis: {
+      type: "category" as const,
+      data: weekdayDates.map(weekdayLabel),
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value" as const,
+      name: "점유율",
+      axisLabel: { color: chartTheme.text, formatter: (v: number) => `${(v * 100).toFixed(0)}%` },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: cornerList.map((c) => ({
+      name: c.corner_name,
+      type: "line" as const,
+      symbol: "circle",
+      symbolSize: 8,
+      connectNulls: false,
+      lineStyle: { width: 2, color: resolveColor(cornerColor.get(c.corner_id) ?? "var(--series-1)") },
+      itemStyle: {
+        color: resolveColor(cornerColor.get(c.corner_id) ?? "var(--series-1)"),
+        borderColor: resolveColor("var(--surface)"),
+        borderWidth: 2,
+      },
+      data: weekdayDates.map((d) => shareByCornerDate.get(`${c.corner_id}_${d}`) ?? null),
+    })),
+  };
 
   return (
     <div className="space-y-4">
@@ -1647,6 +1761,11 @@ function WeeklyMenuReviewTab() {
                         const key = `${slot.plan_date}_${slot.corner_id}`;
                         const isSelected = key === selectedSlotKey;
                         const predicted = slot.main ? predictedByPlanId[slot.main.plan_id] : undefined;
+                        const share = predicted?.prediction.predicted_share;
+                        const heatBg = share != null ? shareToBackground(share, maxShare) : undefined;
+                        const useLightText = share != null && maxShare > 0 && share / maxShare > 0.55;
+                        const waitMinutes = predicted?.prediction.expected_wait_minutes;
+                        const isCongested = waitValues.length > 1 && waitMinutes != null && waitMinutes > medianWait;
                         return (
                           <td
                             key={d}
@@ -1656,19 +1775,35 @@ function WeeklyMenuReviewTab() {
                             onKeyDown={(e) => e.key === "Enter" && selectSlot(key)}
                             className="cursor-pointer py-2 px-3 align-top"
                             style={{
-                              background: isSelected ? "var(--surface-2)" : undefined,
+                              background: isSelected ? "var(--surface-2)" : heatBg,
                               boxShadow: isSelected ? "inset 2px 0 0 var(--accent)" : undefined,
                             }}
                           >
-                            <div className="font-medium">{slot.main ? slot.main.menu_name : "미배정"}</div>
+                            <div className="font-medium" style={{ color: useLightText ? "#fff" : undefined }}>
+                              {slot.main ? slot.main.menu_name : "미배정"}
+                            </div>
                             {slot.sides.length > 0 && (
-                              <div className="mt-0.5 text-xs" style={{ color: "var(--ink-muted)" }}>
+                              <div
+                                className="mt-0.5 text-xs"
+                                style={{ color: useLightText ? "rgba(255,255,255,0.85)" : "var(--ink-muted)" }}
+                              >
                                 {slot.sides.map((s) => s.menu_name).join(", ")}
                               </div>
                             )}
-                            {predicted && (
-                              <div className="mt-0.5 text-xs" style={{ color: "var(--ink-secondary)" }}>
-                                점유율 {(predicted.prediction.predicted_share * 100).toFixed(1)}%
+                            {predicted && share != null && (
+                              <div
+                                className="mt-0.5 text-xs"
+                                style={{ color: useLightText ? "rgba(255,255,255,0.9)" : "var(--ink-secondary)" }}
+                              >
+                                점유율 {(share * 100).toFixed(1)}%
+                              </div>
+                            )}
+                            {isCongested && (
+                              <div
+                                className="mt-0.5 text-xs font-medium"
+                                style={{ color: useLightText ? "#fff" : "var(--warning)" }}
+                              >
+                                ⚠ 혼잡 예상 · 대기 ~{waitMinutes}분
                               </div>
                             )}
                           </td>
@@ -1778,6 +1913,45 @@ function WeeklyMenuReviewTab() {
             );
           })()}
       </Card>
+
+      {predictedRows.length > 0 && topPredicted && (
+        <Card title="이번 주 예측 요약">
+          <div className="mb-4">
+            <StatTile
+              label="이번 주 예상 최고 점유율"
+              value={`${topPredicted.corner_name ?? "-"} · ${topPredicted.menu_name ?? "-"}`}
+              sub={`${weekdayLabel(topPredicted.plan_date)} · 점유율 ${(topPredicted.prediction.predicted_share * 100).toFixed(1)}%`}
+            />
+          </div>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                  요일별 코너 점유율 구성
+                </p>
+                <SegmentedControl
+                  value={effectiveDonutDay}
+                  options={weekdayDates.map((d) => ({ label: weekdayLabel(d), value: d }))}
+                  onChange={setDonutDay}
+                />
+              </div>
+              {donutRows.length > 0 ? (
+                <ReactECharts option={donutOption} style={{ height: 280 }} />
+              ) : (
+                <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                  이 날짜엔 예측 데이터가 없습니다.
+                </p>
+              )}
+            </div>
+            <div>
+              <p className="mb-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                요일별 점유율 추이
+              </p>
+              <ReactECharts option={trendOption} style={{ height: 280 }} />
+            </div>
+          </div>
+        </Card>
+      )}
 
       <Card title="등록된 개선의견">
         {feedbackQuery.isLoading && <LoadingState />}
