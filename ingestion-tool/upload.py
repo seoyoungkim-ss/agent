@@ -2,6 +2,13 @@
 
 원본 파일(엑셀)은 이 과정에서 서버로 전송하지 않는다 — 이미 파싱된 구조화 데이터만
 보낸다.
+
+**프록시 우회(2026-07 실사용 확인)**: 사내망에는 pip 설치 등을 위해 HTTP_PROXY/
+HTTPS_PROXY 환경변수가 걸려있는 경우가 있는데, httpx는 기본(trust_env=True)으로
+이 환경변수를 그대로 읽어 backend_base_url(사내 전용 서버)행 요청까지 그 프록시로
+보내려다 프록시가 403을 돌려주는 문제가 있었다(llm_client.py에서 먼저 발견된 것과
+동일한 원인). 아래 클라이언트도 trust_env=False로 이 환경변수를 무시하고 직접
+접속한다.
 """
 
 import time
@@ -90,7 +97,7 @@ def upload_meal_log(
 def _upload(rows: list, to_dict, url: str, api_token: str, timeout: float, verify_ssl: bool = True) -> int:
     sent = 0
     headers = {"Authorization": f"Bearer {api_token}"}
-    with httpx.Client(headers=headers, timeout=timeout, verify=verify_ssl) as client:
+    with httpx.Client(headers=headers, timeout=timeout, verify=verify_ssl, trust_env=False) as client:
         for batch in _chunks(rows, _BATCH_SIZE):
             payload = {"rows": [to_dict(r) for r in batch]}
             _post_with_retry(client, url, payload)
