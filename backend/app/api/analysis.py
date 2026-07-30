@@ -39,7 +39,7 @@ from app.services.menu_combination import (
 from app.services.menu_throughput import build_corner_daily_throughput, compute_menu_throughput_summary
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
-from app.services.weekly_menu_prediction import compute_predicted_impact
+from app.services.weekly_menu_prediction import compute_predicted_impact, compute_predicted_numbers_for_period
 from app.services.weekly_menu_review import (
     add_feedback,
     build_weekly_menu_slots,
@@ -637,6 +637,17 @@ async def reclassify_weekly_menu_roles_endpoint(
     return {"reclassified_slots": reclassified}
 
 
+def _serialize_predicted_numbers(numbers: dict) -> dict:
+    """compute_predicted_numbers(_for_period)가 돌려주는 dict의 plan_date/
+    meal_type만 JSON 직렬화 가능한 값으로 바꾼다 — 서비스 계층은 원본 파이썬
+    타입(date/enum)을 그대로 쓰고, API 계층에서 변환하는 이 레포의 관례."""
+    return {
+        **numbers,
+        "plan_date": numbers["plan_date"].isoformat(),
+        "meal_type": numbers["meal_type"].value,
+    }
+
+
 @router.get("/weekly-menu/{plan_id}/predicted-impact")
 async def weekly_menu_predicted_impact(plan_id: int, db: Session = Depends(get_db)):
     """PRD 7: 이 슬롯(메인메뉴)의 기존 성적 + 예상 점유율/식수 + LLM 정성 코멘트.
@@ -648,7 +659,17 @@ async def weekly_menu_predicted_impact(plan_id: int, db: Session = Depends(get_d
     result = await compute_predicted_impact(db, client, plan_id)
     if result is None:
         raise HTTPException(status_code=404, detail="메인메뉴로 지정된 주간 식단표 항목을 찾을 수 없습니다")
-    return result
+    return _serialize_predicted_numbers(result)
+
+
+@router.get("/weekly-menu/predicted-impact-summary")
+def weekly_menu_predicted_impact_summary(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """PRD 7: 그 기간 전체 메인메뉴 슬롯의 예상 점유율/식수를 LLM 없이 한 번에
+    계산한다 — 주간 식단표 격자표의 "전체 예측 비교" 버튼용(2026-07). 슬롯이
+    많아 상세(LLM 코멘트)보다는 무겁지만, 이것도 버튼 클릭 시에만 호출한다.
+    """
+    numbers_list = compute_predicted_numbers_for_period(db, period_start, period_end)
+    return [_serialize_predicted_numbers(n) for n in numbers_list]
 
 
 @router.get("/menu-affinity/{menu_name}")

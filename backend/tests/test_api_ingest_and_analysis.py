@@ -379,6 +379,28 @@ def test_weekly_menu_predicted_impact_returns_prediction_and_fallback_comment(cl
     assert resp.status_code == 404
 
 
+def test_weekly_menu_predicted_impact_summary_returns_numbers_without_llm_call(client):
+    _ingest_weekly_menu(client)  # 제육볶음(메인)/계란후라이(부찬), 한식, MONDAY
+    for i in range(3):
+        _ingest_meal_log(client, f"P{i}", "맛남", menu_name="제육볶음", corner_name="한식")
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/predicted-impact-summary",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert len(rows) == 1  # 이 기간엔 메인메뉴 슬롯이 하나(제육볶음)뿐
+    row = rows[0]
+    assert row["menu_name"] == "제육볶음"
+    assert row["corner_name"] == "한식"
+    assert row["plan_date"] == MONDAY.isoformat()
+    assert row["meal_type"] == "중식"
+    assert isinstance(row["prediction"]["predicted_headcount"], (int, float))
+    assert isinstance(row["prediction"]["predicted_share"], (int, float))
+    assert "summary_comment" not in row  # LLM 호출 없이 숫자만
+
+
 def test_new_menu_status_unknown_menu_name_404s(client):
     resp = client.put(
         "/api/analysis/menus/new-menu-status", json={"menu_name": "존재안함", "is_new": True}

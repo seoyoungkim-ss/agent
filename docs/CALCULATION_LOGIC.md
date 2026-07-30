@@ -1728,18 +1728,14 @@ menu_name만 들고 있는 지점이 있어 그 컨벤션을 그대로 재사용
 `test_new_menu_status_unknown_menu_name_404s`(모두
 `test_api_ingest_and_analysis.py`).
 
-### 37.2 주간 식단표 슬롯 카드 — 메인 강조 + 부찬 요약
+### 37.2 주간 식단표 슬롯 카드 — 메인 강조 + 부찬 요약 (37.4에서 격자표로 재작성됨)
 
-**프론트만 변경** (`frontend/src/pages/AnalysisPage.tsx`,
-`WeeklyMenuReviewTab`): 슬롯 카드 헤더 아래에 메인메뉴명을 배경이 있는
-칩으로 굵게 강조하고, 부찬은 "부찬: OO, OO, OO" 한 줄로 압축했다. 기존
-역할 수정(드롭다운, `role_source` 표시, LLM 일괄재분류)은 API/로직을 전혀
-안 건드리고 "수정" 토글 뒤로 접었다 — 평소엔 깔끔한 요약만 보이고, 고칠
-때만 펼친다. `CornerCardGrid`도 "{n}개 메뉴"라는 라벨이 실제로는 그 주의
-날짜(슬롯) 개수를 세고 있어 오해 소지가 있었는데("메뉴 4분면" 탭에서는
-`MenuPerformanceRow` 개수라 맞는 라벨이지만 재사용 컴포넌트라 그대로
-가져다 씀), 이 탭 호출부에만 `countLabel="일치 식단"`을 넘겨 문구만
-고쳤다(다른 탭은 기본값 "개 메뉴" 그대로).
+최초 버전은 슬롯 카드 헤더 아래에 메인메뉴명을 배경 칩으로 강조하고
+`CornerCardGrid`(코너 카드 클릭 → 그 주 날짜별 카드가 세로로 쌓임)를 그대로
+썼다. 실사용 피드백(2026-07): 카드 배지 스타일이 과하고("촌스럽다"), 코너를
+클릭해야만 그 주 날짜별 카드를 볼 수 있어 요일 간 비교가 안 됨 — 이 구조는
+37.4에서 코너×요일 격자표로 전면 교체됐다. 역할 수정 기능을 "수정" 토글
+뒤로 접는 아이디어 자체는 격자표에서도 유지된다(37.4 참고).
 
 ### 37.3 예측 패널 — 버튼 클릭 시에만 계산
 
@@ -1808,3 +1804,60 @@ id에 대한 404 확인).
 메인 강조 칩 + 부찬 요약으로 보이고 "수정" 토글로 기존 정정 기능이 그대로
 동작함, "예측 보기" 클릭 시에만 쿼리+LLM(미설정 시 폴백 문장)이 실행되고
 기존 만족도/조합 이력/예상 식수·점유율이 표시됨.
+
+### 37.4 주간 식단표 — 코너×요일 격자표로 재구성 + 전체 예측 비교 (2026-07)
+
+37.2/37.3 배포 직후 실사용 피드백: (1) 카드 배지("N개 메뉴"류) 스타일이
+과하다, (2) 코너 카드를 클릭해야 그 주 날짜별 카드가 세로로 쌓이는 구조라
+"이번 주 전체를 한눈에" 보거나 요일 간 비교가 안 된다, (3) 예측(점유율/식수)도
+슬롯 하나씩 클릭해야 해서 요일별 비교가 불가능하다. 화면 구조 자체를
+코너×요일 격자표(스프레드시트)로 바꿨다.
+
+**프론트** (`frontend/src/pages/AnalysisPage.tsx`, `WeeklyMenuReviewTab`
+전면 재작성): `CornerCardGrid` + 클릭-확장 대신 직접 그리는 `<table>` —
+행은 코너(이름 가나다순), 열은 `selectedMonday`부터 6일(월~토, 일요일
+없음 — ingestion-tool의 6일 운영 전제와 동일). 각 셀은 그 코너·그 날짜의
+메인메뉴명(중간 굵기 텍스트)과 부찬 한 줄(작은 회색 텍스트)만 보여준다 —
+색 배경 배지 없이 타이포그래피 위계로만 구분해 37.2의 "촌스럽다" 피드백을
+반영. 셀을 클릭하면 그 슬롯이 선택되고(표 아래 하나의 상세 패널만
+렌더링), 다른 셀을 클릭하면 선택이 바뀌면서 "수정"/"예측 보기" 상태는
+자동으로 닫힌다 — 그렇지 않으면 셀을 옮겨 다닐 때마다 이전 슬롯의 LLM
+상세 호출이 새 슬롯에 대해 재발화되는 문제가 생긴다. 상세 패널의 역할
+수정(`WeeklyMenuRoleRow`)과 예측 보기(`PredictedImpactPanel`)는 컴포넌트를
+그대로 재사용 — API/로직 변경 없음.
+
+**"전체 예측 비교" 버튼** — `GET /api/analysis/weekly-menu/predicted-impact-
+summary?period_start&period_end`를 한 번 호출해 그 주 전체 메인메뉴 슬롯의
+예상 점유율/식수를 받아 `plan_id → 결과` 맵으로 저장하고, 격자의 각 셀에
+메뉴명 아래 "점유율 42.9%" 같은 작은 보조 텍스트로 얹는다 — 요일 간·코너
+간 점유율을 격자 전체에서 한 번에 비교할 수 있다. 버튼을 안 누르면 기존과
+동일(메뉴명만 보임), LLM 코멘트가 들어간 상세는 여전히 셀 클릭 후 "예측
+보기"를 눌러야만 나온다(37.3과 동일 원칙 — 격자 전체에 LLM을 다 돌리면
+느려짐).
+
+**백엔드** (`backend/app/services/weekly_menu_prediction.py`): 기존
+`compute_predicted_impact` 하나가 숫자 계산 + LLM 호출을 다 하던 걸
+`compute_predicted_numbers(db, plan_id)`(LLM 없이 기존 만족도/식수, 조합
+이력, 예상 점유율/식수 + `plan_id`/`plan_date`/`corner_id`/`corner_name`/
+`menu_id`/`menu_name` 식별 필드까지 계산)와 `compute_predicted_impact(db,
+llm_client, plan_id)`(위 함수를 호출한 뒤 코어층/경쟁 사실 수집 + LLM
+코멘트만 얹음, `{**numbers, "summary_comment": ...}`)로 분리했다. 신규
+`compute_predicted_numbers_for_period(db, period_start, period_end)`는 그
+기간의 메인메뉴 슬롯 전체에 대해 `compute_predicted_numbers`를 반복
+호출한다(LLM 없어 상대적으로 빠름, 그래도 버튼 클릭 시에만 실행). 상세
+엔드포인트(`GET /weekly-menu/{plan_id}/predicted-impact`)의 응답 스키마는
+그대로라(단, `plan_id`/`plan_date` 등 식별 필드가 최상위에 추가됨) 기존
+프론트 상세 패널·테스트에 영향 없음. `plan_date`/`meal_type`은 서비스
+계층에선 원본 파이썬 타입(date/enum)을 반환하고, `analysis.py`의
+`_serialize_predicted_numbers` 헬퍼가 두 엔드포인트(상세/요약) 공통으로
+JSON 직렬화한다(이 레포의 서비스/API 계층 분리 컨벤션).
+
+**테스트**: `test_weekly_menu_predicted_impact_summary_returns_numbers_
+without_llm_call`(`test_api_ingest_and_analysis.py`) — 요약 엔드포인트가
+`summary_comment` 없이 숫자만(plan_date/meal_type 직렬화 포함) 돌려주는지
+확인. 기존 `test_weekly_menu_predicted_impact_returns_prediction_and_
+fallback_comment`는 리팩터링 후에도 그대로 통과(응답 스키마 하위호환).
+
+**검증**: Playwright로 격자표가 배지 없이 코너×요일로 보이는지, 셀 클릭
+시 하단에 수정/예측 상세 패널이 뜨고 기존 역할 수정이 그대로 되는지,
+"전체 예측 비교" 클릭 시 격자 각 셀에 점유율이 한 번에 채워지는지 확인.

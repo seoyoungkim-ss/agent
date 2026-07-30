@@ -1,5 +1,11 @@
-"""주간 식단표 슬롯(메인메뉴)의 예상 영향 — 버튼 클릭 시에만 계산한다(2026-07,
-사용자 확인 — 슬롯 펼칠 때마다 자동으로 돌면 쿼리+LLM 호출이 몰려 느려짐).
+"""주간 식단표 슬롯(메인메뉴)의 예상 영향.
+
+숫자 계산(`compute_predicted_numbers`)과 LLM 코멘트(`compute_predicted_impact`)를
+분리했다 — 격자표 전체(코너×요일)를 한 번에 비교하려면 슬롯 수만큼 반복
+계산해야 하는데, 슬롯마다 LLM을 호출하면 느려진다(2026-07 사용자 확인).
+숫자만 필요한 "전체 예측 비교"는 `compute_predicted_numbers_for_period`로
+빠르게 일괄 계산하고, LLM 코멘트가 들어간 상세 패널은 슬롯 하나를 클릭했을
+때만 `compute_predicted_impact`를 호출한다.
 
 기존 만족도/식수(menu_performance_stats), 이 조합(메인+부찬)의 과거 성적
 (menu_combination.py), 예상 점유율/식수(코너 baseline × 메뉴 인기도 배수 ×
@@ -100,9 +106,12 @@ def _fallback_summary(facts: dict[str, str]) -> str:
     )
 
 
-async def compute_predicted_impact(db: Session, llm_client: InternalLLMClient, plan_id: int) -> dict | None:
-    """오케스트레이션 — plan_id(메인메뉴 행)의 예측 패널 데이터 전체를 조립한다.
-    plan_id가 없거나 그 행이 메인메뉴가 아니면 None(호출부가 404/400 처리)."""
+def compute_predicted_numbers(db: Session, plan_id: int) -> dict | None:
+    """LLM 없이 계산 가능한 부분만 조립한다 — 기존 만족도/식수, 이 조합(메인+
+    부찬)의 과거 성적, 예상 점유율/식수. plan_id가 없거나 그 행이 메인메뉴가
+    아니면 None. `plan_date`/`meal_type`은 원본 파이썬 타입(date/enum) 그대로
+    반환하므로, API 계층에서 JSON 직렬화 시 변환한다(이 레포의 서비스/API
+    계층 분리 컨벤션과 동일 — weekly_menu_review.py도 동일한 방식)."""
     plan = db.get(WeeklyMenuPlan, plan_id)
     if plan is None or plan.menu_role != MenuRole.MAIN:
         return None
@@ -139,7 +148,7 @@ async def compute_predicted_impact(db: Session, llm_client: InternalLLMClient, p
 
     # 3) 예상 점유율/식수 — simulation.py의 baseline/배수 로직 재사용.
     # 지연 임포트: simulation.py가 analysis.py의 헬퍼를 가져다 쓰는데(_corner_id_
-    # by_menu_from_meal_log), 이 파일은 analysis.py의 신규 엔드포인트에서 호출되므로
+    # by_menu_from_meal_log), 이 파일은 analysis.py의 엔드포인트에서 호출되므로
     # 모듈 최상단에서 임포트하면 analysis → 이 파일 → simulation → analysis로
     # 순환 임포트가 생긴다. 함수 안에서 임포트하면 호출 시점엔 세 모듈 다 이미
     # 로드가 끝난 뒤라 문제없다.
@@ -181,87 +190,14 @@ async def compute_predicted_impact(db: Session, llm_client: InternalLLMClient, p
     predicted_headcount = corner_headcounts.get(plan.corner_id, 0.0)
     predicted_share = predicted_shares.get(plan.corner_id, 0.0)
 
-    # 4) 코어층/경쟁 사실 수집 (숫자 공식화 안 함 — LLM 프롬프트용 사실만)
-    employee_corner_counts = build_employee_corner_counts(db, period_start, period_end)
-    core_layer_employees = {
-        r.employee_id for r in classify_corner_core_layer(employee_corner_counts, plan.corner_id)
-    }
-    employee_menus = build_employee_menu_sets(db, period_start, period_end)
-    core_signal = compute_core_layer_menu_signal(
-        core_layer_employees,
-        set(employee_corner_counts.keys()),
-        employee_menus,
-        menu.menu_name if menu else "",
-    )
-
-    competing_rows = (
-        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name, CornerMaster.corner_name)
-        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
-        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
-        .filter(
-            WeeklyMenuPlan.plan_date == plan.plan_date,
-            WeeklyMenuPlan.meal_type == plan.meal_type,
-            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
-            WeeklyMenuPlan.corner_id != plan.corner_id,
-        )
-        .all()
-    )
-    competing_popular = []
-    for other_menu_id, other_menu_name, other_corner_name in competing_rows:
-        other_stats = (
-            db.query(MenuPerformanceStats)
-            .filter_by(menu_id=other_menu_id)
-            .order_by(MenuPerformanceStats.period_end.desc())
-            .first()
-        )
-        if other_stats and other_stats.quadrant_label == MenuQuadrant.POPULAR:
-            competing_popular.append(f"{other_corner_name}의 {other_menu_name}(인기메뉴)")
-
-    # 5) LLM 코멘트 — 위에서 모은 사실을 문장으로 정리해 프롬프트에 넣는다
-    existing_satisfaction_text = (
-        f"{menu_stats.adjusted_score:.2f}"
-        if menu_stats and menu_stats.adjusted_score is not None
-        else "이력 없음"
-    )
-    existing_headcount_text = f"{menu_stats.total_headcount}" if menu_stats else "이력 없음"
-    combo_history_text = (
-        f"이 조합으로 {combo_match.day_count}일 등장, 평균 만족도 {combo_match.avg_satisfaction:.2f}, "
-        f"평균 식수 {combo_match.avg_headcount:.1f}명"
-        if combo_match and combo_match.avg_satisfaction is not None
-        else (
-            f"이 조합으로 {combo_match.day_count}일 등장했으나 평가 없음"
-            if combo_match
-            else "이 정확한 부찬 조합의 과거 이력 없음"
-        )
-    )
-    prediction_headcount_text = f"{predicted_headcount:.1f}명"
-    prediction_share_text = f"{predicted_share * 100:.1f}%"
-    core_layer_text = (
-        f"코어층 {core_signal.core_employee_count}명 중 {core_signal.core_menu_eaters}명, "
-        f"비코어층 {core_signal.non_core_employee_count}명 중 {core_signal.non_core_menu_eaters}명이 "
-        "이 메뉴를 먹어본 적 있음"
-    )
-    competition_text = ", ".join(competing_popular) if competing_popular else "같은 날 인기메뉴로 경쟁하는 코너 없음"
-
-    facts = {
-        "corner_name": corner.corner_name if corner else "",
-        "menu_name": menu.menu_name if menu else "",
-        "existing_satisfaction": existing_satisfaction_text,
-        "existing_headcount": existing_headcount_text,
-        "combo_history": combo_history_text,
-        "prediction": f"식수 {prediction_headcount_text}, 점유율 {prediction_share_text}",
-        "prediction_headcount_text": prediction_headcount_text,
-        "prediction_share_text": prediction_share_text,
-        "core_layer": core_layer_text,
-        "competition": competition_text,
-    }
-
-    if llm_client.is_configured:
-        summary_comment = await llm_client.chat_complete([{"role": "user", "content": _build_summary_prompt(facts)}])
-    else:
-        summary_comment = _fallback_summary(facts)
-
     return {
+        "plan_id": plan.id,
+        "plan_date": plan.plan_date,
+        "meal_type": plan.meal_type,
+        "corner_id": plan.corner_id,
+        "corner_name": corner.corner_name if corner else None,
+        "menu_id": plan.menu_id,
+        "menu_name": menu.menu_name if menu else None,
         "main_menu": {
             "menu_id": plan.menu_id,
             "menu_name": menu.menu_name if menu else None,
@@ -289,5 +225,124 @@ async def compute_predicted_impact(db: Session, llm_client: InternalLLMClient, p
             ),
             "throughput_ratio": round(throughput_ratio, 2) if throughput_ratio else None,
         },
-        "summary_comment": summary_comment.strip(),
     }
+
+
+def compute_predicted_numbers_for_period(db: Session, period_start: dt.date, period_end: dt.date) -> list[dict]:
+    """그 기간의 메인메뉴 슬롯 전체(모든 코너×요일)에 대해
+    `compute_predicted_numbers`를 반복 호출한다 — LLM 호출이 없어 슬롯 수만큼
+    반복해도 상대적으로 빠르지만, "전체 예측 비교" 버튼을 눌렀을 때만 호출한다
+    (자동 실행 아님)."""
+    plan_ids = [
+        row[0]
+        for row in db.query(WeeklyMenuPlan.id)
+        .filter(
+            WeeklyMenuPlan.plan_date.between(period_start, period_end),
+            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+        )
+        .all()
+    ]
+    results = []
+    for plan_id in plan_ids:
+        numbers = compute_predicted_numbers(db, plan_id)
+        if numbers is not None:
+            results.append(numbers)
+    return results
+
+
+async def compute_predicted_impact(db: Session, llm_client: InternalLLMClient, plan_id: int) -> dict | None:
+    """오케스트레이션 — `compute_predicted_numbers` 위에 코어층/경쟁 사실 +
+    LLM 정성 코멘트를 얹는다. plan_id가 없거나 메인메뉴가 아니면 None."""
+    numbers = compute_predicted_numbers(db, plan_id)
+    if numbers is None:
+        return None
+
+    plan_date: dt.date = numbers["plan_date"]
+    meal_type = numbers["meal_type"]
+    corner_id: int = numbers["corner_id"]
+    corner_name = numbers["corner_name"] or ""
+    menu_name = numbers["menu_name"] or ""
+
+    period_end = plan_date - dt.timedelta(days=1)
+    period_start = period_end - dt.timedelta(days=_HISTORY_WINDOW_DAYS)
+
+    # 코어층/경쟁 사실 수집 (숫자 공식화 안 함 — LLM 프롬프트용 사실만)
+    employee_corner_counts = build_employee_corner_counts(db, period_start, period_end)
+    core_layer_employees = {r.employee_id for r in classify_corner_core_layer(employee_corner_counts, corner_id)}
+    employee_menus = build_employee_menu_sets(db, period_start, period_end)
+    core_signal = compute_core_layer_menu_signal(
+        core_layer_employees, set(employee_corner_counts.keys()), employee_menus, menu_name
+    )
+
+    competing_rows = (
+        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name, CornerMaster.corner_name)
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
+        .filter(
+            WeeklyMenuPlan.plan_date == plan_date,
+            WeeklyMenuPlan.meal_type == meal_type,
+            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+            WeeklyMenuPlan.corner_id != corner_id,
+        )
+        .all()
+    )
+    competing_popular = []
+    for other_menu_id, other_menu_name, other_corner_name in competing_rows:
+        other_stats = (
+            db.query(MenuPerformanceStats)
+            .filter_by(menu_id=other_menu_id)
+            .order_by(MenuPerformanceStats.period_end.desc())
+            .first()
+        )
+        if other_stats and other_stats.quadrant_label == MenuQuadrant.POPULAR:
+            competing_popular.append(f"{other_corner_name}의 {other_menu_name}(인기메뉴)")
+
+    # LLM 코멘트 — compute_predicted_numbers가 이미 계산한 숫자를 문장으로 정리
+    main_menu = numbers["main_menu"]
+    combo_history = numbers["combo_history"]
+    prediction = numbers["prediction"]
+
+    existing_satisfaction_text = (
+        f"{main_menu['adjusted_score']:.2f}" if main_menu["adjusted_score"] is not None else "이력 없음"
+    )
+    existing_headcount_text = (
+        f"{main_menu['total_headcount']}" if main_menu["total_headcount"] is not None else "이력 없음"
+    )
+    combo_history_text = (
+        f"이 조합으로 {combo_history['day_count']}일 등장, 평균 만족도 {combo_history['avg_satisfaction']:.2f}, "
+        f"평균 식수 {combo_history['avg_headcount']:.1f}명"
+        if combo_history and combo_history["avg_satisfaction"] is not None
+        else (
+            f"이 조합으로 {combo_history['day_count']}일 등장했으나 평가 없음"
+            if combo_history
+            else "이 정확한 부찬 조합의 과거 이력 없음"
+        )
+    )
+    prediction_headcount_text = f"{prediction['predicted_headcount']:.1f}명"
+    prediction_share_text = f"{prediction['predicted_share'] * 100:.1f}%"
+    core_layer_text = (
+        f"코어층 {core_signal.core_employee_count}명 중 {core_signal.core_menu_eaters}명, "
+        f"비코어층 {core_signal.non_core_employee_count}명 중 {core_signal.non_core_menu_eaters}명이 "
+        "이 메뉴를 먹어본 적 있음"
+    )
+    competition_text = ", ".join(competing_popular) if competing_popular else "같은 날 인기메뉴로 경쟁하는 코너 없음"
+
+    facts = {
+        "corner_name": corner_name,
+        "menu_name": menu_name,
+        "existing_satisfaction": existing_satisfaction_text,
+        "existing_headcount": existing_headcount_text,
+        "combo_history": combo_history_text,
+        "prediction": f"식수 {prediction_headcount_text}, 점유율 {prediction_share_text}",
+        "prediction_headcount_text": prediction_headcount_text,
+        "prediction_share_text": prediction_share_text,
+        "core_layer": core_layer_text,
+        "competition": competition_text,
+    }
+
+    if llm_client.is_configured:
+        summary_comment = await llm_client.chat_complete([{"role": "user", "content": _build_summary_prompt(facts)}])
+    else:
+        summary_comment = _fallback_summary(facts)
+
+    return {**numbers, "summary_comment": summary_comment.strip()}

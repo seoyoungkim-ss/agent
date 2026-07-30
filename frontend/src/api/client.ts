@@ -257,7 +257,14 @@ export interface MenuCombinationsResponse {
   combos: MenuComboRow[];
 }
 
-export interface PredictedImpactResponse {
+interface PredictedNumbers {
+  plan_id: number;
+  plan_date: string;
+  meal_type: MealType;
+  corner_id: number;
+  corner_name: string | null;
+  menu_id: number;
+  menu_name: string | null;
   main_menu: {
     menu_id: number;
     menu_name: string | null;
@@ -273,6 +280,11 @@ export interface PredictedImpactResponse {
     corner_avg_share_of_traffic: number | null;
     throughput_ratio: number | null;
   };
+}
+
+export type PredictedNumbersRow = PredictedNumbers;
+
+export interface PredictedImpactResponse extends PredictedNumbers {
   summary_comment: string;
 }
 
@@ -451,6 +463,9 @@ export const api = {
 
   weeklyMenuPredictedImpact: (planId: number) =>
     request<PredictedImpactResponse>(`/analysis/weekly-menu/${planId}/predicted-impact`),
+
+  weeklyMenuPredictedImpactSummary: (params: { period_start: string; period_end: string }) =>
+    request<PredictedNumbersRow[]>(`/analysis/weekly-menu/predicted-impact-summary${qs(params)}`),
 
   reclassifyWeeklyMenuRolesWithLlm: (params: { period_start: string; period_end: string }) =>
     request<{ reclassified_slots: number }>(
