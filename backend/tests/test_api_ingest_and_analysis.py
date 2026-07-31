@@ -1,6 +1,8 @@
 import datetime as dt
 import io
 
+import pytest
+
 from app.config import get_settings
 
 AUTH_HEADERS = {"Authorization": f"Bearer {get_settings().ingest_api_token}"}
@@ -299,6 +301,38 @@ def test_menu_highlights_flags_new_menu_needing_attention_when_unevaluated(clien
     assert entry["needs_attention"] is True
 
 
+def test_menu_highlights_excludes_side_dish_from_new_menus(client):
+    # 신메뉴는 메인메뉴만 의미가 있다 — 같은 날 부찬으로 처음 등장한 메뉴는
+    # is_new_menu=True로 찍혀도 하이라이트에 안 떠야 한다.
+    resp = client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                {
+                    "plan_date": MONDAY.isoformat(),
+                    "meal_type": "중식",
+                    "corner_name": "한식",
+                    "menu_name": "신메뉴부찬",
+                    "menu_role": "부찬",
+                    "source_row_raw": "신메뉴부찬",
+                }
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    assert resp.status_code == 200
+    assert "신메뉴부찬" not in {r["menu_name"] for r in resp.json()["new_menus"]}
+
+    # 관리자가 이 부찬을 수동으로 신메뉴 지정해도 하이라이트엔 안 떠야 한다.
+    resp = client.put("/api/analysis/menus/new-menu-status", json={"menu_name": "신메뉴부찬", "is_new": True})
+    assert resp.status_code == 200, resp.text
+    resp = client.get("/api/dashboard/menu-highlights")
+    assert "신메뉴부찬" not in {r["menu_name"] for r in resp.json()["new_menus"]}
+
+
 def test_new_menu_status_manual_add_bypasses_auto_window(client):
     # meal-log만으로 생긴 메뉴는 weekly_menu_plan.is_new_menu가 전혀 안 찍히므로
     # 자동판정으로는 "신메뉴 반응"에 절대 안 뜬다 — 관리자가 직접 등록하면 떠야 함.
@@ -525,6 +559,10 @@ def test_improvement_points_surfaces_congestion_satisfaction_voe(client):
     assert "비인기저조메뉴" in satisfaction["title"]
     voe = next(p for p in points if p["axis"] == "voe")
     assert "위생" in voe["title"]
+    # 테스트 환경엔 사내 LLM이 설정돼 있지 않으므로 폴백 요약(원문 예시)이 붙는다 —
+    # 건수만이 아니라 실제 코멘트 내용도 함께 보여줘야 한다는 요청(2026-07)에 대응.
+    assert "voe_summary" in voe
+    assert "위생" in voe["voe_summary"]
 
 
 def test_list_weekly_menu_groups_main_and_sides_with_deadline(client):
@@ -1481,6 +1519,50 @@ def test_corner_core_layer_menu_pairs_excludes_take_out_placeholder_menus(client
     assert "선택형 Take out" not in pair_menu_names
 
 
+def test_corner_core_layer_menu_pairs_surfaces_cross_corner_pairs(client, db_session):
+    # 코어층(한식)이 매번 떡볶이(한식)와 스테이크(양식)를 함께 먹는다 — 같은
+    # 코너 조합이 워낙 흔해 top_pairs에는 안 잡혀도, 다른 코너 조합 전용
+    # 목록(cross_corner_pairs)에는 이 쌍이 코너 태그와 함께 잡혀야 한다.
+    for emp in ["E1", "E2", "E3"]:
+        for day_offset in range(4):
+            _ingest_meal_log(
+                client,
+                emp,
+                "맛남",
+                eaten_date=MONDAY + dt.timedelta(days=day_offset),
+                menu_name="떡볶이",
+                corner_name="한식",
+            )
+            _ingest_meal_log(
+                client,
+                emp,
+                "맛남",
+                eaten_date=MONDAY + dt.timedelta(days=day_offset),
+                menu_name="스테이크",
+                corner_name="양식",
+            )
+
+    from app.models.master import CornerMaster
+
+    corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    resp = client.get(
+        f"/api/analysis/corners/{corner.corner_id}/core-layer-menu-pairs",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=10)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    cross_pairs = body["core_layer"]["cross_corner_pairs"]
+    target = frozenset({"떡볶이", "스테이크"})
+    entry = next(p for p in cross_pairs if frozenset((p["menu_a"], p["menu_b"])) == target)
+    assert entry["corner_a"] != entry["corner_b"]
+    assert {entry["corner_a"], entry["corner_b"]} == {"한식", "양식"}
+
+
 def test_corner_core_layer_menu_pairs_unknown_corner_returns_404(client):
     resp = client.get(
         "/api/analysis/corners/999999/core-layer-menu-pairs",
@@ -1599,3 +1681,32 @@ def test_voe_by_category_recompute_falls_back_to_rules_when_llm_unconfigured(cli
 
     log = db_session.query(MealLog).filter_by(employee_id="E1").one()
     assert log.voe_categories == ["맛"]
+
+
+def test_average_menu_food_vector_uses_only_main_menus(client, db_session):
+    _ingest_weekly_menu(client)  # 제육볶음(메인)/계란후라이(부찬), 한식, MONDAY
+
+    from app.models.master import MenuMaster
+    from app.services.food_vector import FOOD_VECTOR_DIM
+
+    main = db_session.query(MenuMaster).filter_by(menu_name="제육볶음").one()
+    side = db_session.query(MenuMaster).filter_by(menu_name="계란후라이").one()
+    main.food_vector = [0.9] + [0.5] * (FOOD_VECTOR_DIM - 1)
+    side.food_vector = [0.1] + [0.5] * (FOOD_VECTOR_DIM - 1)  # 부찬 — 평균에서 제외돼야 함
+    db_session.commit()
+
+    resp = client.get("/api/analysis/menus/food-vectors/average")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sample_size"] == 1
+    assert body["average"][0] == pytest.approx(0.9, abs=1e-4)
+    assert body["dimensions"] == list(body["labels_ko"].keys())
+    assert body["bias_description"] is not None
+
+
+def test_average_menu_food_vector_empty_when_no_tagged_main_menus(client):
+    resp = client.get("/api/analysis/menus/food-vectors/average")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sample_size"] == 0
+    assert body["bias_description"] is None

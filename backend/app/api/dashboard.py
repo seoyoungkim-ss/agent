@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.analysis import _corner_id_by_menu_from_meal_log, corner_analysis, menu_performance
 from app.config import get_settings
 from app.db import get_db
-from app.models.enums import TASTE_SCORE_POINTS
+from app.models.enums import TASTE_SCORE_POINTS, MenuRole
 from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import DailyDivisionStats, MenuPerformanceStats, MonthlyVoeCluster
@@ -20,6 +20,7 @@ from app.services.improvement_points import (
     select_congestion_points,
     select_satisfaction_points,
     select_voe_points,
+    summarize_voe_comments,
 )
 from app.services.llm_client import InternalLLMClient
 from app.services.menu_highlights import (
@@ -327,12 +328,17 @@ def menu_highlights(db: Session = Depends(get_db)):
         low_sample_threshold=settings.menu_score_low_sample_threshold,
     )
 
+    # 신메뉴 하이라이트는 메인메뉴만 의미가 있다(부찬은 "신메뉴"로 취급 안 함).
     new_menu_window_start = today - dt.timedelta(days=NEW_MENU_WINDOW_DAYS)
     new_menu_rows = (
         db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name, CornerMaster.corner_name, WeeklyMenuPlan.plan_date)
         .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
         .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
-        .filter(WeeklyMenuPlan.is_new_menu.is_(True), WeeklyMenuPlan.plan_date >= new_menu_window_start)
+        .filter(
+            WeeklyMenuPlan.is_new_menu.is_(True),
+            WeeklyMenuPlan.plan_date >= new_menu_window_start,
+            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+        )
         .all()
     )
     new_menus: dict[int, tuple[str, str | None, dt.date]] = {}
@@ -350,10 +356,18 @@ def menu_highlights(db: Session = Depends(get_db)):
     if override_rows:
         corner_id_by_menu = _corner_id_by_menu_from_meal_log(db)
         corner_name_by_id = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+        # 식단표(weekly_menu_plan)에 부찬으로만 등장한 메뉴는 관리자가 수동
+        # 지정해도 하이라이트에서 뺀다. 식단표에 아예 등장한 적 없는 메뉴
+        # (취식기록으로만 존재)는 역할을 판단할 근거가 없으니 그대로 둔다.
+        plan_role_rows = db.query(WeeklyMenuPlan.menu_id, WeeklyMenuPlan.menu_role).distinct().all()
+        main_menu_ids = {menu_id for menu_id, role in plan_role_rows if role == MenuRole.MAIN}
+        side_only_menu_ids = {menu_id for menu_id, _role in plan_role_rows} - main_menu_ids
         for menu in override_rows:
             if menu.new_menu_override is False:
                 new_menus.pop(menu.menu_id, None)
                 continue
+            if menu.menu_id in side_only_menu_ids:
+                continue  # 부찬으로만 쓰인 메뉴는 수동 지정해도 하이라이트에 안 뜬다
             marked_on = menu.new_menu_marked_on or today
             corner_id = corner_id_by_menu.get(menu.menu_id)
             corner_name = corner_name_by_id.get(corner_id) if corner_id is not None else None
@@ -400,12 +414,16 @@ def menu_highlights(db: Session = Depends(get_db)):
 
 
 @router.get("/improvement-points")
-def improvement_points(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+async def improvement_points(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
     """홈 현황 "개선 포인트" — 혼잡도/만족도/VOE 세 축에서 지금 손볼 만한 지점.
 
     전부 이미 계산된 값을 재사용한다: 코너 통계(`analysis.py::corner_analysis`),
     메뉴 4분면(`analysis.py::menu_performance` — 사전에 recompute가 돼 있어야
     함), 이번 달/지난 달 VOE 카테고리 집계(`_compute_voe_by_category`).
+
+    VOE 포인트에는 해당 카테고리의 원문 코멘트 일부를 사내 LLM에 보내 만든
+    1~2문장 요약(voe_summary)을 덧붙인다 — 건수만으로는 "무슨 내용인지"를
+    알 수 없다는 피드백(2026-07)에 따른 것.
     """
     corners = corner_analysis(period_start=period_start, period_end=period_end, db=db)
     menu_rows = menu_performance(period_start=period_start, period_end=period_end, db=db)
@@ -421,6 +439,19 @@ def improvement_points(period_start: dt.date, period_end: dt.date, db: Session =
         *select_satisfaction_points(menu_rows),
         *select_voe_points(current_voe, prior_voe),
     ]
-    return [
-        {"axis": p.axis, "title": p.title, "detail": p.detail, "severity": p.severity} for p in points
-    ]
+
+    comments_by_category = {
+        c["category"]: [entry["comment"] for entry in c["comments"]] for c in current_voe.get("categories", [])
+    }
+    settings = get_settings()
+    llm_client = InternalLLMClient(settings)
+
+    results = []
+    for p in points:
+        entry = {"axis": p.axis, "title": p.title, "detail": p.detail, "severity": p.severity}
+        if p.axis == "voe" and p.voe_category:
+            entry["voe_summary"] = await summarize_voe_comments(
+                llm_client, p.voe_category, comments_by_category.get(p.voe_category, [])
+            )
+        results.append(entry)
+    return results

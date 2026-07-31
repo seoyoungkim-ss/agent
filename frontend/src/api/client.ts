@@ -110,6 +110,7 @@ export interface ImprovementPoint {
   title: string;
   detail: string;
   severity: "warning" | "critical";
+  voe_summary?: string | null;
 }
 
 export interface CornerTrendRow {
@@ -174,6 +175,8 @@ export interface MenuPairRow {
   menu_b: string;
   co_count: number;
   lift: number;
+  corner_a?: string | null;
+  corner_b?: string | null;
 }
 
 export interface CornerCoreLayerMenuPairsResponse {
@@ -184,10 +187,12 @@ export interface CornerCoreLayerMenuPairsResponse {
     min_visit_count: number;
     min_share: number;
     top_pairs: MenuPairRow[];
+    cross_corner_pairs: MenuPairRow[];
   };
   non_core: {
     employee_count: number;
     top_pairs: MenuPairRow[];
+    cross_corner_pairs: MenuPairRow[];
   };
 }
 
@@ -214,6 +219,14 @@ export interface MenuFoodVectorRow {
   food_vector: number[] | null;
   dimensions: string[];
   source: FoodVectorSource | null;
+}
+
+export interface AverageFoodVectorResponse {
+  dimensions: string[];
+  labels_ko: Record<string, string>;
+  average: number[];
+  sample_size: number;
+  bias_description: string | null;
 }
 
 export interface WeeklyMenuPlanItem {
@@ -437,6 +450,8 @@ export const api = {
 
   menuFoodVectors: (params: { untagged_only?: boolean } = {}) =>
     request<MenuFoodVectorRow[]>(`/analysis/menus/food-vectors${qs(params)}`),
+
+  averageMenuFoodVector: () => request<AverageFoodVectorResponse>("/analysis/menus/food-vectors/average"),
 
   updateMenuFoodVector: (menuId: number, vector: number[]) =>
     request<{ menu_id: number; food_vector: number[]; dimensions: string[]; source: FoodVectorSource }>(

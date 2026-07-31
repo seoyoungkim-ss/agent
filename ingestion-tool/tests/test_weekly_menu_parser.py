@@ -81,6 +81,20 @@ def test_split_cell_into_items_keeps_ampersand_joined_name_whole():
     assert split_cell_into_items("함박스테이크&소스") == ["함박스테이크&소스"]
 
 
+def test_split_cell_into_items_strips_trailing_origin_annotation():
+    # "(우육:호주산)"이 별도 셀이 아니라 메뉴명 끝에 바로 붙어 들어오는 경우 —
+    # 취식기록/맛평가에는 원산지 정보가 없어 매칭이 깨지므로 제거해야 한다.
+    assert split_cell_into_items("우삼겹구이(우육:호주산)") == ["우삼겹구이"]
+
+
+def test_split_cell_into_items_merges_ampersand_fragment_split_by_newline():
+    # "제육볶음&미니우동"이 줄바꿈으로 감싸져 "제육볶음\n&미니우동"처럼 들어오면
+    # 줄바꿈 분리 때문에 "&미니우동"이 조각난 별도 항목이 되면 안 된다 — 원래
+    # 하나의 메인메뉴명("제육볶음&미니우동")으로 다시 이어붙여야 한다.
+    assert split_cell_into_items("제육볶음\n&미니우동") == ["제육볶음&미니우동"]
+    assert split_cell_into_items("제육볶음\n&미니우동\n김치") == ["제육볶음&미니우동", "김치"]
+
+
 def test_main_dish_is_block_first_item_side_dishes_are_rest():
     rows = parse_weekly_menu_grid(_sample_grid(), MONDAY)
     mon_hansik = [r for r in rows if r.plan_date == MONDAY and r.corner_name == "한식"]

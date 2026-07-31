@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
+import clsx from "clsx";
 import {
   api,
   type Classification,
@@ -18,7 +19,6 @@ import {
   Button,
   Card,
   ErrorState,
-  Legend,
   LoadingState,
   QuadrantBadge,
   resolveColor,
@@ -851,6 +851,20 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
   const pairRows = (rows: MenuPairRow[]) =>
     rows.map((r) => ({ pair: `${r.menu_a} + ${r.menu_b}`, co_count: r.co_count, lift: r.lift.toFixed(2) }));
 
+  const crossPairColumns = [
+    { key: "pair", label: "메뉴 쌍" },
+    { key: "corners", label: "코너 조합" },
+    { key: "co_count", label: "동반 인원", align: "right" as const },
+    { key: "lift", label: "연관도(lift, 그룹 내부 기준)", align: "right" as const },
+  ];
+  const crossPairRows = (rows: MenuPairRow[]) =>
+    rows.map((r) => ({
+      pair: `${r.menu_a} + ${r.menu_b}`,
+      corners: `${r.corner_a ?? "-"} ↔ ${r.corner_b ?? "-"}`,
+      co_count: r.co_count,
+      lift: r.lift.toFixed(2),
+    }));
+
   if (corners.length === 0) return null;
 
   return (
@@ -960,6 +974,23 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
                     />
                   </>
                 )}
+                <div className="mt-4">
+                  <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                    다른 코너 조합 Top {cornerQuery.data.core_layer.cross_corner_pairs.length} — 같은 코너
+                    조합에 묻히지 않게 따로 모았습니다
+                  </p>
+                  {cornerQuery.data.core_layer.cross_corner_pairs.length === 0 ? (
+                    <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                      표본 부족
+                    </p>
+                  ) : (
+                    <Table
+                      columns={crossPairColumns}
+                      rows={crossPairRows(cornerQuery.data.core_layer.cross_corner_pairs)}
+                      rowKey={(r) => r.pair as string}
+                    />
+                  )}
+                </div>
               </div>
               <div>
                 <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
@@ -986,6 +1017,23 @@ function CornerCoreLayerSection({ corners }: { corners: { corner_id: number; cor
                     />
                   </>
                 )}
+                <div className="mt-4">
+                  <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                    다른 코너 조합 Top {cornerQuery.data.non_core.cross_corner_pairs.length} — 같은 코너
+                    조합에 묻히지 않게 따로 모았습니다
+                  </p>
+                  {cornerQuery.data.non_core.cross_corner_pairs.length === 0 ? (
+                    <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                      표본 부족
+                    </p>
+                  ) : (
+                    <Table
+                      columns={crossPairColumns}
+                      rows={crossPairRows(cornerQuery.data.non_core.cross_corner_pairs)}
+                      rowKey={(r) => r.pair as string}
+                    />
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -1057,9 +1105,72 @@ function CornerCardGrid({
   );
 }
 
+const QUADRANT_LABELS = ["인기메뉴", "숨은강자", "개선시급", "퇴출후보", "표본부족"] as const;
+
+type MenuQuadrantMetrics = MenuPerformanceRow & {
+  demand: number;
+  satisfaction: number;
+  isLowSample: boolean;
+  effectiveQuadrant: string;
+};
+
+// 백엔드 classify_menu_quadrant(app/services/menu_performance.py)와 동일한 규칙을
+// 프론트에서 재현한다 — 표본부족 판정(evaluation_count 기준)은 조절 대상이
+// 아니므로 서버가 내려준 값을 그대로 쓰고, 수요/만족도 기준값만 화면에서 바꾼다.
+function classifyQuadrantClient(
+  demand: number,
+  satisfaction: number,
+  isLowSample: boolean,
+  demandThreshold: number,
+  scoreThreshold: number,
+): string {
+  if (isLowSample) return "표본부족";
+  const highDemand = demand >= demandThreshold;
+  const highSatisfaction = satisfaction >= scoreThreshold;
+  if (highDemand && highSatisfaction) return "인기메뉴";
+  if (highDemand && !highSatisfaction) return "개선시급";
+  if (!highDemand && highSatisfaction) return "숨은강자";
+  return "퇴출후보";
+}
+
+type SortKey = "menu" | "appearance" | "count" | "score";
+
+function SortableHeader({
+  label,
+  active,
+  dir,
+  align,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: "asc" | "desc";
+  align?: "left" | "right";
+  onClick: () => void;
+}) {
+  return (
+    <th
+      className={clsx(
+        "cursor-pointer select-none border-b py-2 pr-4 font-medium",
+        align === "right" && "text-right",
+      )}
+      style={{ borderColor: "var(--border-strong)", color: "var(--ink-muted)" }}
+      onClick={onClick}
+    >
+      {label}
+      <span style={{ color: active ? "var(--ink-secondary)" : "transparent" }}> {dir === "asc" ? "▲" : "▼"}</span>
+    </th>
+  );
+}
+
 function MenuQuadrantTab() {
   const chartTheme = useChartTheme();
   const [expandedCorner, setExpandedCorner] = useState<string | null>(null);
+  const [demandThresholdOverride, setDemandThresholdOverride] = useState<number | null>(null);
+  const [scoreThresholdOverride, setScoreThresholdOverride] = useState<number | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("appearance");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [visibleQuadrants, setVisibleQuadrants] = useState<Set<string>>(new Set(QUADRANT_LABELS));
   const query = useQuery({
     queryKey: ["menu-performance", PERIOD_START, PERIOD_END],
     queryFn: () => api.menuPerformance({ period_start: PERIOD_START, period_end: PERIOD_END }),
@@ -1067,15 +1178,51 @@ function MenuQuadrantTab() {
   const recompute = () => api.recomputeMenuPerformance({ period_start: PERIOD_START, period_end: PERIOD_END });
 
   const rows = query.data ?? [];
-  const demandThreshold = median(rows.map((r) => r.total_headcount / Math.max(r.appearance_count, 1)));
-  const scoreThreshold = median(rows.map((r) => r.adjusted_score ?? 0));
-  const cornerGroups = groupByCorner(rows);
-
-  const scatterData = rows.map((r) => ({
-    name: r.menu_name,
-    value: [r.total_headcount / Math.max(r.appearance_count, 1), r.adjusted_score ?? 0],
-    itemStyle: { color: resolveColor(quadrantColor(r.quadrant)) },
+  const metrics: MenuQuadrantMetrics[] = rows.map((r) => ({
+    ...r,
+    demand: r.total_headcount / Math.max(r.appearance_count, 1),
+    satisfaction: r.adjusted_score ?? 0,
+    isLowSample: r.quadrant === "표본부족",
+    effectiveQuadrant: "",
   }));
+
+  const autoDemandThreshold = median(metrics.map((r) => r.demand));
+  const autoScoreThreshold = median(metrics.map((r) => r.satisfaction));
+  const demandThreshold = demandThresholdOverride ?? autoDemandThreshold;
+  const scoreThreshold = scoreThresholdOverride ?? autoScoreThreshold;
+  const maxDemand = Math.max(1, ...metrics.map((r) => r.demand));
+
+  const classified: MenuQuadrantMetrics[] = metrics.map((r) => ({
+    ...r,
+    effectiveQuadrant: classifyQuadrantClient(r.demand, r.satisfaction, r.isLowSample, demandThreshold, scoreThreshold),
+  }));
+  const cornerGroups = groupByCorner(classified);
+
+  function toggleQuadrant(label: string) {
+    setVisibleQuadrants((cur) => {
+      const next = new Set(cur);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  }
+
+  const scatterData = classified
+    .filter((r) => visibleQuadrants.has(r.effectiveQuadrant))
+    .map((r) => ({
+      name: r.menu_name,
+      value: [r.demand, r.satisfaction],
+      itemStyle: { color: resolveColor(quadrantColor(r.effectiveQuadrant)) },
+    }));
 
   const option = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
@@ -1114,18 +1261,46 @@ function MenuQuadrantTab() {
     ],
   };
 
+  const expandedRows = (cornerGroups.find(([c]) => c === expandedCorner)?.[1] ?? []).filter((r) =>
+    visibleQuadrants.has(r.effectiveQuadrant),
+  );
+  const sortedExpandedRows = [...expandedRows].sort((a, b) => {
+    let cmp = 0;
+    if (sortKey === "menu") cmp = a.menu_name.localeCompare(b.menu_name, "ko");
+    else if (sortKey === "appearance") cmp = a.appearance_count - b.appearance_count;
+    else if (sortKey === "count") cmp = a.evaluation_count - b.evaluation_count;
+    else if (sortKey === "score") cmp = a.satisfaction - b.satisfaction;
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
   return (
     <Card title="메뉴 4분면 — 인기메뉴 / 숨은강자 / 개선시급 / 퇴출후보">
-      <div className="mb-3 flex items-center justify-between">
-        <Legend
-          items={[
-            { label: "인기메뉴", color: "var(--good)" },
-            { label: "숨은강자", color: "var(--series-1)" },
-            { label: "개선시급", color: "var(--warning)" },
-            { label: "퇴출후보", color: "var(--critical)" },
-            { label: "표본부족", color: "var(--ink-muted)" },
-          ]}
-        />
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        가로축(1회 제공당 평균 식수)과 세로축(만족도)이 각각 기준값보다 큰지 작은지로
+        네 가지로 나눕니다. 기준값은 기본적으로 전체 메뉴의 중앙값이며, 아래 슬라이더로
+        직접 조절할 수 있습니다(표본부족 판정은 평가건수 기준으로 별도 처리되어 조절
+        대상이 아닙니다). 아래 범례를 클릭하면 보고 싶은 분류만 골라 볼 수 있습니다.
+      </p>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-4 text-xs">
+          {QUADRANT_LABELS.map((label) => {
+            const active = visibleQuadrants.has(label);
+            return (
+              <button
+                key={label}
+                onClick={() => toggleQuadrant(label)}
+                className="inline-flex items-center gap-1.5 rounded px-1 py-0.5 transition-opacity"
+                style={{ color: "var(--ink-secondary)", opacity: active ? 1 : 0.35 }}
+              >
+                <span
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ background: resolveColor(quadrantColor(label)) }}
+                />
+                {label}
+              </button>
+            );
+          })}
+        </div>
         <Button
           variant="secondary"
           onClick={async () => {
@@ -1135,6 +1310,52 @@ function MenuQuadrantTab() {
         >
           재계산
         </Button>
+      </div>
+      <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div>
+          <div className="mb-1 flex items-center justify-between text-xs" style={{ color: "var(--ink-muted)" }}>
+            <span>수요 기준값 (1회 제공당 평균 식수)</span>
+            <span>
+              {demandThreshold.toFixed(1)}명
+              {demandThresholdOverride !== null && (
+                <button className="ml-2 underline" onClick={() => setDemandThresholdOverride(null)}>
+                  초기화
+                </button>
+              )}
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={maxDemand}
+            step={maxDemand > 20 ? 1 : 0.1}
+            value={demandThreshold}
+            onChange={(e) => setDemandThresholdOverride(Number(e.target.value))}
+            className="w-full"
+          />
+        </div>
+        <div>
+          <div className="mb-1 flex items-center justify-between text-xs" style={{ color: "var(--ink-muted)" }}>
+            <span>만족도 기준값 (5점 만점)</span>
+            <span>
+              {scoreThreshold.toFixed(2)}점
+              {scoreThresholdOverride !== null && (
+                <button className="ml-2 underline" onClick={() => setScoreThresholdOverride(null)}>
+                  초기화
+                </button>
+              )}
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={5}
+            step={0.1}
+            value={scoreThreshold}
+            onChange={(e) => setScoreThresholdOverride(Number(e.target.value))}
+            className="w-full"
+          />
+        </div>
       </div>
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
@@ -1152,26 +1373,64 @@ function MenuQuadrantTab() {
             onSelect={(c) => setExpandedCorner((cur) => (cur === c ? null : c))}
           />
           {expandedCorner && (
-            <div className="mt-4">
-              <Table
-                columns={[
-                  { key: "menu", label: "메뉴" },
-                  { key: "appearance", label: "등장횟수", align: "right" },
-                  { key: "count", label: "평가건수", align: "right" },
-                  { key: "score", label: "만족도", align: "right" },
-                  { key: "quadrant", label: "4분면" },
-                ]}
-                rows={(cornerGroups.find(([c]) => c === expandedCorner)?.[1] ?? []).map(
-                  (r: MenuPerformanceRow) => ({
-                    menu: r.menu_name,
-                    appearance: r.appearance_count,
-                    count: r.evaluation_count,
-                    score: r.adjusted_score?.toFixed(2) ?? "-",
-                    quadrant: <QuadrantBadge label={r.quadrant} />,
-                  }),
-                )}
-                rowKey={(r) => r.menu as string}
-              />
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-[13px]" style={{ color: "var(--ink)" }}>
+                <thead>
+                  <tr>
+                    <SortableHeader
+                      label="메뉴"
+                      active={sortKey === "menu"}
+                      dir={sortDir}
+                      onClick={() => toggleSort("menu")}
+                    />
+                    <SortableHeader
+                      label="등장횟수"
+                      active={sortKey === "appearance"}
+                      dir={sortDir}
+                      align="right"
+                      onClick={() => toggleSort("appearance")}
+                    />
+                    <SortableHeader
+                      label="평가건수"
+                      active={sortKey === "count"}
+                      dir={sortDir}
+                      align="right"
+                      onClick={() => toggleSort("count")}
+                    />
+                    <SortableHeader
+                      label="만족도"
+                      active={sortKey === "score"}
+                      dir={sortDir}
+                      align="right"
+                      onClick={() => toggleSort("score")}
+                    />
+                    <th
+                      className="border-b py-2 pr-4 font-medium"
+                      style={{ borderColor: "var(--border-strong)", color: "var(--ink-muted)" }}
+                    >
+                      4분면
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedExpandedRows.map((r) => (
+                    <tr key={r.menu_name} className="border-b" style={{ borderColor: "var(--border)" }}>
+                      <td className="py-2 pr-4">{r.menu_name}</td>
+                      <td className="py-2 pr-4 text-right">{r.appearance_count}</td>
+                      <td className="py-2 pr-4 text-right">{r.evaluation_count}</td>
+                      <td className="py-2 pr-4 text-right">{r.adjusted_score?.toFixed(2) ?? "-"}</td>
+                      <td className="py-2 pr-4">
+                        <QuadrantBadge label={r.effectiveQuadrant} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {sortedExpandedRows.length === 0 && (
+                <p className="py-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                  선택한 분류에 해당하는 메뉴가 없습니다.
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -1292,6 +1551,83 @@ function MenuFoodVectorEditor({ row, onSaved }: { row: MenuFoodVectorRow; onSave
         </div>
       )}
     </div>
+  );
+}
+
+function CampusAverageFoodVectorSection() {
+  const chartTheme = useChartTheme();
+  const query = useQuery({
+    queryKey: ["menu-food-vectors-average"],
+    queryFn: () => api.averageMenuFoodVector(),
+  });
+
+  const data = query.data;
+  const labels = data ? data.dimensions.map((d) => data.labels_ko[d] ?? d) : [];
+  const accentColor = resolveColor("var(--accent)");
+
+  const option = data && {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    tooltip: {},
+    legend: {
+      bottom: 0,
+      textStyle: { color: chartTheme.text },
+      data: ["캠퍼스 평균", "중립 기준(0.5)"],
+    },
+    radar: {
+      indicator: labels.map((name) => ({ name, min: 0, max: 1 })),
+      axisName: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+      splitArea: { show: false },
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+    },
+    series: [
+      {
+        type: "radar",
+        data: [
+          {
+            name: "캠퍼스 평균",
+            value: data.average,
+            areaStyle: { color: accentColor, opacity: 0.25 },
+            lineStyle: { color: accentColor, width: 2 },
+            itemStyle: { color: accentColor },
+          },
+          {
+            name: "중립 기준(0.5)",
+            value: data.dimensions.map(() => 0.5),
+            lineStyle: { type: "dashed" as const, color: chartTheme.axis },
+            itemStyle: { color: chartTheme.axis },
+            areaStyle: { opacity: 0 },
+          },
+        ],
+      },
+    ],
+  };
+
+  return (
+    <Card title="캠퍼스 메인메뉴 평균 음식벡터 — 어떤 맛으로 쏠려 있는가">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+        현재 음식벡터가 태깅된 메인메뉴 전체를 축별로 평균 낸 값입니다(부찬은 제외). 점선(중립 기준
+        0.5)보다 바깥으로 나온 축이 캠퍼스 메뉴 구성이 쏠려 있는 방향입니다.
+      </p>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {data && data.sample_size === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          태깅된 메인메뉴 음식벡터가 아직 없습니다.
+        </p>
+      )}
+      {data && data.sample_size > 0 && option && (
+        <>
+          <p className="mb-2 text-[13px]" style={{ color: "var(--ink)" }}>
+            {data.bias_description}
+            <span className="ml-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+              (메인메뉴 {data.sample_size}개 기준)
+            </span>
+          </p>
+          <ReactECharts option={option} style={{ height: 360 }} />
+        </>
+      )}
+    </Card>
   );
 }
 
@@ -2020,6 +2356,7 @@ export function AnalysisPage() {
         <div className="space-y-4">
           <MenuQuadrantTab />
           <MenuComboSection />
+          <CampusAverageFoodVectorSection />
           <MenuFoodVectorAdminSection />
         </div>
       )}

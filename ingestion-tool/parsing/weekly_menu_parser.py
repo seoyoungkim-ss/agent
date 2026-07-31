@@ -32,6 +32,9 @@ _WEEKDAY_BY_PYTHON_INDEX = ["월", "화", "수", "목", "금", "토", "일"]  # 
 _ITEM_SPLIT_PATTERN = re.compile(r"[\n\r]+|[,/·]")
 _SPECIAL_TAG_PATTERN = re.compile(r"^\[.+\]$")  # 예: "[한상차림]" — 메뉴명이 아니라 태그
 _INGREDIENT_ANNOTATION_PATTERN = re.compile(r"^\(.+:.+\)$")  # 예: "(우육:호주산)" — 버림
+# 메뉴명 끝에 재료/원산지 주석이 붙어있는 경우(예: "우삼겹구이(우육:호주산)") —
+# 취식기록/맛평가에는 원산지 정보가 없어 그대로 두면 매칭이 깨지므로 제거한다.
+_TRAILING_ORIGIN_ANNOTATION_PATTERN = re.compile(r"\s*\([^()]*:[^()]*\)\s*$")
 
 
 class WeeklyMenuParseError(ValueError):
@@ -91,16 +94,37 @@ def find_header_row(
     )
 
 
+def _strip_origin_annotation(name: str) -> str:
+    """메뉴명 끝에 붙은 "(재료:원산지)" 주석을 제거해 메인메뉴명만 남긴다."""
+    while True:
+        stripped = _TRAILING_ORIGIN_ANNOTATION_PATTERN.sub("", name).strip()
+        if stripped == name:
+            return stripped
+        name = stripped
+
+
 def split_cell_into_items(raw_text: str) -> list[str]:
     """셀 텍스트를 메뉴 항목 목록으로 분리한다.
 
     "&"로 이어진 이름(예: "함박스테이크&소스")은 하나의 메뉴명으로 취급하고
-    쪼개지 않는다 — 분리 패턴에 "&"가 없으므로 자연히 유지된다.
+    쪼개지 않는다 — 분리 패턴에 "&"가 없으므로 대부분 자연히 유지된다. 다만
+    셀 안에서 "제육볶음&미니우동"이 줄바꿈으로 감싸져
+    "제육볶음\n&미니우동"처럼 들어오면 줄바꿈 분리 때문에 "&미니우동"이라는
+    조각난 항목이 생기므로, "&"로 시작하는 조각은 독립 항목으로 보지 않고
+    바로 앞 항목에 다시 이어붙인다. 이름 끝에 붙은 원산지 주석(예:
+    "우삼겹구이(우육:호주산)")은 제거한다.
     """
     if not raw_text.strip():
         return []
-    parts = [p.strip() for p in _ITEM_SPLIT_PATTERN.split(raw_text)]
-    return [p for p in parts if p]
+    parts = [_strip_origin_annotation(p.strip()) for p in _ITEM_SPLIT_PATTERN.split(raw_text)]
+    parts = [p for p in parts if p]
+    items: list[str] = []
+    for part in parts:
+        if part.startswith("&") and items:
+            items[-1] = items[-1] + part
+        else:
+            items.append(part)
+    return items
 
 
 def _forward_fill_column(grid: Sequence[Sequence[Any]], col: int, start_row: int) -> list[str]:

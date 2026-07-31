@@ -25,6 +25,10 @@ TAKE_OUT_ALIASES = {"Take Out R", "Take Out M", "Take Out L", "선택형 Take ou
 PLACEHOLDER_MENU_NAMES = {"선택형 Take out", "(포장)메디쏠라"}
 
 _TRAILING_DOT_ZERO = re.compile(r"^(\d+)\.0$")
+# 메뉴명 끝에 "(재료:원산지)" 같은 주석이 붙어 들어오는 경로를 방어한다(파싱
+# 단계에서 이미 제거하지만, 취식기록/맛평가 쪽은 원산지 정보가 없으므로 여기서도
+# 한 번 더 정규화해 두 경로의 메뉴명이 항상 같은 MenuMaster row로 모이게 한다).
+_TRAILING_ORIGIN_ANNOTATION = re.compile(r"\s*\([^()]*:[^()]*\)\s*$")
 
 
 def normalize_employee_id(employee_id: str) -> str:
@@ -39,6 +43,14 @@ def normalize_employee_id(employee_id: str) -> str:
 
 def _normalize_corner_name(corner_name: str) -> str:
     return TAKE_OUT_CORNER_NAME if corner_name in TAKE_OUT_ALIASES else corner_name
+
+
+def _normalize_menu_name(menu_name: str) -> str:
+    while True:
+        stripped = _TRAILING_ORIGIN_ANNOTATION.sub("", menu_name).strip()
+        if stripped == menu_name:
+            return stripped
+        menu_name = stripped
 
 
 def get_or_create_corner(db: Session, corner_name: str) -> tuple[CornerMaster, bool]:
@@ -60,6 +72,7 @@ def get_or_create_menu(db: Session, menu_name: str) -> tuple[MenuMaster, bool]:
     규칙이 아무것도 못 잡으면 food_vector를 NULL로 남겨 이후 LLM 배치/관리자 수동
     조정을 기다린다.
     """
+    menu_name = _normalize_menu_name(menu_name)
     menu = db.query(MenuMaster).filter_by(menu_name=menu_name).one_or_none()
     if menu is None:
         vector, matched_any = tag_food_vector_from_name(menu_name)

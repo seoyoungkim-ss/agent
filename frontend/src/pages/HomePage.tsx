@@ -75,13 +75,15 @@ export function HomePage() {
   const [exportEnd, setExportEnd] = useState(isoDaysAgo(0));
   const [selectedMonday, setSelectedMonday] = useState(mondayOf(new Date()));
   const [selectedVoeCategory, setSelectedVoeCategory] = useState<string | null>(null);
-  const sundayOfSelected = addDays(selectedMonday, 6);
+  // 식당은 일요일에 운영하지 않으므로 월~토 6일만 조회한다.
+  const saturdayOfSelected = addDays(selectedMonday, 5);
 
   const weekly = useQuery({
-    queryKey: ["weekly-summary", selectedMonday, classification],
+    queryKey: ["weekly-summary", selectedMonday, saturdayOfSelected, classification],
     queryFn: () =>
       api.weeklySummary({
         start_date: selectedMonday,
+        end_date: saturdayOfSelected,
         classification: classification === "전체" ? undefined : classification,
       }),
   });
@@ -102,16 +104,16 @@ export function HomePage() {
   });
 
   const cornerSummary = useQuery({
-    queryKey: ["corner-summary", selectedMonday, sundayOfSelected],
-    queryFn: () => api.cornerAnalysis({ period_start: selectedMonday, period_end: sundayOfSelected }),
+    queryKey: ["corner-summary", selectedMonday, saturdayOfSelected],
+    queryFn: () => api.cornerAnalysis({ period_start: selectedMonday, period_end: saturdayOfSelected }),
   });
 
   const cornerTrend = useQuery({
-    queryKey: ["corner-weekly-trend", selectedMonday, sundayOfSelected, classification],
+    queryKey: ["corner-weekly-trend", selectedMonday, saturdayOfSelected, classification],
     queryFn: () =>
       api.cornerAnalysisTrend({
         period_start: selectedMonday,
-        period_end: sundayOfSelected,
+        period_end: saturdayOfSelected,
         granularity: "daily",
         classification: classification === "전체" ? undefined : classification,
       }),
@@ -233,7 +235,7 @@ export function HomePage() {
     })),
   };
 
-  const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${selectedMonday}${
+  const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${selectedMonday}&end_date=${saturdayOfSelected}${
     classification !== "전체" ? `&classification=${encodeURIComponent(classification)}` : ""
   }`;
 
@@ -245,7 +247,7 @@ export function HomePage() {
         <div>
           <h1 className="text-lg font-semibold">카페테리아 현황</h1>
           <p className="mt-0.5 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            {selectedMonday} ~ {sundayOfSelected}
+            {selectedMonday} ~ {saturdayOfSelected}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -306,6 +308,14 @@ export function HomePage() {
                   <div className="text-xs" style={{ color: "var(--ink-muted)" }}>
                     {p.detail}
                   </div>
+                  {p.voe_summary && (
+                    <div
+                      className="mt-1 rounded border-l-2 pl-2 text-xs italic"
+                      style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+                    >
+                      "{p.voe_summary}"
+                    </div>
+                  )}
                 </div>
               </li>
             ))}

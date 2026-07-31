@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_db
 from app.models.enums import FoodVectorSource, MenuRole
-from app.models.logs import MealLog
+from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import (
     DailyCornerStats,
@@ -21,7 +21,12 @@ from app.models.stats import (
 )
 from app.services.aggregation import aggregate_daily_stats, aggregate_menu_performance, diagnose_menu_decline
 from app.services.corner_core_layer import build_employee_corner_counts, classify_corner_core_layer
-from app.services.food_vector import FOOD_VECTOR_DIMENSIONS
+from app.services.food_vector import (
+    FOOD_VECTOR_DIMENSIONS,
+    FOOD_VECTOR_LABELS_KO,
+    compute_average_food_vector,
+    describe_average_bias,
+)
 from app.services.food_vector_tagging import run_llm_food_vector_tagging
 from app.services.holidays import DayClassification
 from app.services.llm_client import InternalLLMClient
@@ -243,11 +248,40 @@ def corner_core_layer_menu_pairs(
     core_menus = {e: m for e, m in employee_menus.items() if e in core_employee_ids}
     non_core_menus = {e: m for e, m in employee_menus.items() if e in non_core_employee_ids}
 
+    # 동반선택쌍의 각 메뉴가 어느 코너 소속인지 붙여준다 — "다른 코너 조합"을
+    # 화면에서 구분해 보여주려는 목적(취식기록 기준 최빈 코너, weekly_menu_plan은
+    # 누락되기 쉬워 안 씀 — _corner_id_by_menu_from_meal_log 관례와 동일).
+    corner_id_by_menu_id = _corner_id_by_menu_from_meal_log(db, period_start, period_end)
+    menu_id_by_name = {name: mid for mid, name in db.query(MenuMaster.menu_id, MenuMaster.menu_name).all()}
+    corner_name_by_id = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+
+    def _corner_name_for_menu(menu_name: str) -> str | None:
+        menu_id = menu_id_by_name.get(menu_name)
+        corner_id = corner_id_by_menu_id.get(menu_id) if menu_id is not None else None
+        return corner_name_by_id.get(corner_id) if corner_id is not None else None
+
     def _serialize(pairs):
         return [
-            {"menu_a": p.menu_a, "menu_b": p.menu_b, "co_count": p.co_count, "lift": p.lift}
+            {
+                "menu_a": p.menu_a,
+                "menu_b": p.menu_b,
+                "co_count": p.co_count,
+                "lift": p.lift,
+                "corner_a": _corner_name_for_menu(p.menu_a),
+                "corner_b": _corner_name_for_menu(p.menu_b),
+            }
             for p in pairs
         ]
+
+    def _cross_corner_top_pairs(employee_menus_subset: dict[str, set[str]]):
+        # top_n 안에서만 자르면 같은 코너 조합이 워낙 흔해 다른 코너 조합이 거의
+        # 안 보이므로, 후보 풀을 넉넉히 넓혀 계산한 뒤 다른 코너 조합만 걸러
+        # top_n을 뽑는다.
+        candidates = _serialize(
+            compute_top_menu_pairs(employee_menus_subset, min_co_count=min_co_count, top_n=max(top_n * 20, 200))
+        )
+        cross = [p for p in candidates if p["corner_a"] and p["corner_b"] and p["corner_a"] != p["corner_b"]]
+        return cross[:top_n]
 
     return {
         "corner_id": corner_id,
@@ -259,12 +293,14 @@ def corner_core_layer_menu_pairs(
             "top_pairs": _serialize(
                 compute_top_menu_pairs(core_menus, min_co_count=min_co_count, top_n=top_n)
             ),
+            "cross_corner_pairs": _cross_corner_top_pairs(core_menus),
         },
         "non_core": {
             "employee_count": len(non_core_employee_ids),
             "top_pairs": _serialize(
                 compute_top_menu_pairs(non_core_menus, min_co_count=min_co_count, top_n=top_n)
             ),
+            "cross_corner_pairs": _cross_corner_top_pairs(non_core_menus),
         },
     }
 
@@ -470,6 +506,33 @@ def list_menu_food_vectors(untagged_only: bool = False, db: Session = Depends(ge
         }
         for m in menus
     ]
+
+
+@router.get("/menus/food-vectors/average")
+def average_menu_food_vector(db: Session = Depends(get_db)):
+    """캠퍼스 내 전체 메인메뉴의 평균 food_vector — 어떤 맛 편향으로 쏠려 있는지
+    한눈에 보려는 용도(음식벡터 관리 화면 상단 레이더 차트).
+
+    메인메뉴만 대상으로 한다(부찬은 메뉴 성향을 대표하지 않음) — weekly_menu_plan에
+    MAIN으로 한 번이라도 등장한 menu_id만 고른다.
+    """
+    main_menu_ids = {
+        row.menu_id
+        for row in db.query(WeeklyMenuPlan.menu_id).filter(WeeklyMenuPlan.menu_role == MenuRole.MAIN).distinct().all()
+    }
+    vectors = [
+        [float(x) for x in m.food_vector]
+        for m in db.query(MenuMaster).filter(MenuMaster.food_vector.isnot(None)).all()
+        if m.menu_id in main_menu_ids
+    ]
+    average = compute_average_food_vector(vectors)
+    return {
+        "dimensions": FOOD_VECTOR_DIMENSIONS,
+        "labels_ko": FOOD_VECTOR_LABELS_KO,
+        "average": average,
+        "sample_size": len(vectors),
+        "bias_description": describe_average_bias(average) if vectors else None,
+    }
 
 
 class FoodVectorUpdateRequest(BaseModel):

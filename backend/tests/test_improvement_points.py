@@ -1,8 +1,13 @@
+import pytest
+
+from app.config import Settings
 from app.services.improvement_points import (
     select_congestion_points,
     select_satisfaction_points,
     select_voe_points,
+    summarize_voe_comments,
 )
+from app.services.llm_client import InternalLLMClient
 
 
 def test_select_congestion_points_flags_high_traffic_low_throughput_corner():
@@ -41,6 +46,7 @@ def test_select_voe_points_prefers_largest_month_over_month_increase():
     assert len(points) == 1
     assert "위생" in points[0].title
     assert "9건" in points[0].detail
+    assert points[0].voe_category == "위생"  # summarize_voe_comments 호출에 쓰는 카테고리 키
 
 
 def test_select_voe_points_falls_back_to_top_count_without_prior_month():
@@ -48,7 +54,22 @@ def test_select_voe_points_falls_back_to_top_count_without_prior_month():
     points = select_voe_points(current, None)
     assert len(points) == 1
     assert "위생" in points[0].title
+    assert points[0].voe_category == "위생"
 
 
 def test_select_voe_points_empty_when_no_comments():
     assert select_voe_points({"categories": []}, None) == []
+
+
+@pytest.mark.asyncio
+async def test_summarize_voe_comments_returns_none_without_comments():
+    llm_client = InternalLLMClient(Settings())
+    assert await summarize_voe_comments(llm_client, "위생", []) is None
+
+
+@pytest.mark.asyncio
+async def test_summarize_voe_comments_falls_back_to_sample_quote_when_llm_unconfigured():
+    llm_client = InternalLLMClient(Settings(internal_llm_base_url=""))
+    summary = await summarize_voe_comments(llm_client, "위생", ["위생이 너무 안 좋아요"])
+    assert "위생" in summary
+    assert "위생이 너무 안 좋아요" in summary

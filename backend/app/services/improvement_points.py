@@ -9,6 +9,8 @@ import statistics
 from dataclasses import dataclass
 from typing import Literal
 
+from app.services.llm_client import InternalLLMClient
+
 
 @dataclass(frozen=True)
 class ImprovementPoint:
@@ -16,6 +18,7 @@ class ImprovementPoint:
     title: str  # "한식 코너 피크타임 혼잡" 같은 한 줄 제목
     detail: str  # 근거 수치를 담은 설명 문장
     severity: Literal["warning", "critical"]
+    voe_category: str | None = None  # axis="voe"일 때만 채워짐 — 원문 코멘트 요약에 쓴다
 
 
 def select_congestion_points(corners: list[dict], *, top_n: int = 2) -> list[ImprovementPoint]:
@@ -102,6 +105,7 @@ def select_voe_points(current: dict, prior: dict | None, *, top_n: int = 1) -> l
                 title=f"'{cat}' 관련 의견 증가",
                 detail=f"이번 달 {count}건 — 지난달 대비 {delta}건 늘었습니다.",
                 severity="warning",
+                voe_category=cat,
             )
             for cat, count, delta in rising
         ]
@@ -113,5 +117,39 @@ def select_voe_points(current: dict, prior: dict | None, *, top_n: int = 1) -> l
             title=f"'{cat}' 관련 의견이 가장 많음",
             detail=f"이번 달 {count}건 — 가장 많이 언급된 카테고리입니다.",
             severity="warning",
+            voe_category=cat,
         )
     ]
+
+
+_VOE_SUMMARY_SAMPLE_SIZE = 10
+
+
+def _build_voe_summary_prompt(category: str, comments: list[str]) -> str:
+    joined = "\n".join(f"- {c}" for c in comments)
+    return (
+        "당신은 구내식당 운영을 돕는 분석가입니다. 아래는 이번 달 VOE(주관식 의견) 중 "
+        f"'{category}' 카테고리로 분류된 코멘트 원문 일부입니다. 이 코멘트들의 주된 내용을 "
+        "1~2문장으로 요약하세요. 코멘트에 없는 내용을 지어내지 마세요.\n\n"
+        f"{joined}"
+    )
+
+
+def _fallback_voe_summary(category: str, comments: list[str]) -> str:
+    sample = comments[0] if comments else ""
+    return f"'{category}' 관련 코멘트 예시: \"{sample}\" 등 (사내 LLM 미설정 — 원문 예시만 표시)"
+
+
+async def summarize_voe_comments(
+    llm_client: InternalLLMClient, category: str, comments: list[str]
+) -> str | None:
+    """오케스트레이션 — VOE 카테고리의 원문 코멘트 중 일부를 LLM에 보내 주된
+    내용을 1~2문장으로 요약한다. 코멘트가 없으면 None(호출부가 필드 자체를 뺀다)."""
+    if not comments:
+        return None
+    sample = comments[:_VOE_SUMMARY_SAMPLE_SIZE]
+    if llm_client.is_configured:
+        prompt = _build_voe_summary_prompt(category, sample)
+        summary = await llm_client.chat_complete([{"role": "user", "content": prompt}])
+        return summary.strip()
+    return _fallback_voe_summary(category, sample)

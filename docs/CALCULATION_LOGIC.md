@@ -1979,3 +1979,148 @@ share_ratio` 단위테스트 추가. `test_weekly_menu_prediction.py`에
 엔드투엔드 픽스처로 특정 초과 시나리오를 억지로 만들기보다 순수함수
 단위테스트로 정확히 검증하는 쪽을 택했다(기존 엔드포인트 테스트는 배선만
 확인하도록 `> 0` → `>= 0`으로 완화, 0도 유효한 결과이므로).
+
+---
+
+## 38. 실사용 버그·개선 9건 일괄 처리 (2026-07)
+
+실제로 화면을 쓰면서 나온 버그 신고/개선 요청 9가지를 한 라운드에 처리했다.
+서로 독립적인 항목이라 하나씩 정리한다.
+
+### 38.1 홈 화면 일요일 제외
+
+`HomePage.tsx`가 `sundayOfSelected = addDays(selectedMonday, 6)`(월~일 7일)
+범위로 `weeklySummary`/`cornerAnalysisTrend`를 호출했는데, `end_date`를 안
+넘기면 백엔드 `_compute_weekly_summary`(`dashboard.py`)가 `start_date+6일`을
+기본값으로 써서 일요일도 `headcount:0`으로 채워 반환했다 — 식당이 일요일에
+운영을 안 하는데도 차트에 0건짜리 막대가 노출됨. `saturdayOfSelected =
+addDays(selectedMonday, 5)`(월~토 6일)로 바꾸고 `end_date`를 명시적으로
+넘기도록 수정(주간 식단표 관리 탭은 이미 6일이라 손 안 댐). 백엔드는 범용
+범위 순회라 변경 없음.
+
+### 38.2 신메뉴 하이라이트 — 메인메뉴만
+
+`dashboard.py::menu_highlights`가 신메뉴 판정 시 `WeeklyMenuPlan.menu_role`
+필터가 없어 부찬도 섞여 나왔다. 자동판정 쿼리에 `menu_role == MenuRole.MAIN`
+조건 추가. 관리자 수동 override(`MenuMaster.new_menu_override`)는
+`weekly_menu_plan`에 한 번도 MAIN으로 등장한 적 없는 메뉴(=부찬으로만 쓰인
+메뉴)만 걸러낸다 — `weekly_menu_plan`에 아예 등장한 적 없는 메뉴(취식기록
+으로만 존재, 예: 관리자가 POS 신메뉴를 손으로 등록하는 경우)는 역할을 판단할
+근거가 없으므로 그대로 통과시킨다(기존 테스트 `test_new_menu_status_
+manual_add_bypasses_auto_window`가 이 케이스를 이미 검증).
+
+### 38.3 원산지 정보 제거 — 메인메뉴명만으로 매칭
+
+`(우육:호주산)`이 셀 전체가 아니라 `"우삼겹구이(우육:호주산)"`처럼 메뉴명에
+바로 붙어 들어오면 기존 `_INGREDIENT_ANNOTATION_PATTERN`(셀 전체 일치만
+봄)이 못 걸렀다. 취식기록/맛평가에는 원산지 정보가 없어 이런 이름은 절대
+매칭이 안 됐다.
+- `ingestion-tool/parsing/weekly_menu_parser.py`: `_strip_origin_annotation`
+  (순수함수, `\s*\([^()]*:[^()]*\)\s*$` 반복 제거)을 `split_cell_into_items`
+  안에서 각 항목에 적용.
+- `backend/app/services/master_data.py::get_or_create_menu`: 같은 정규화를
+  한 번 더 방어적으로 적용(`_normalize_menu_name`) — 파싱 경로가 아닌 다른
+  경로로 원산지 붙은 이름이 들어와도 항상 같은 `MenuMaster` row로 모이게
+  한다.
+- **범위**: 앞으로 새로 업로드하는 주간 식단표부터 정상 동작. 이미 DB에
+  들어간 과거 중복 메뉴(원산지 붙은 것과 안 붙은 것 두 row)는 이번엔 정리
+  안 함(재업로드 시 자연히 새 이름으로 정리됨).
+
+### 38.4 `&미니우동` 코너 미배정 버그
+
+`"제육볶음&미니우동"`이 셀 안에서 줄바꿈으로 감싸져
+`"제육볶음\n&미니우동"`처럼 들어오면, 줄바꿈 분리 패턴(`_ITEM_SPLIT_
+PATTERN`)이 이를 두 항목으로 쪼개 `"&미니우동"`이라는 조각난 메뉴명이
+별도(부찬) 항목으로 생성됐다 — 이 이름은 취식기록의 실제 메뉴명과 절대
+안 맞아 "코너 미배정"으로 떨어짐. `split_cell_into_items`에서 분리 후
+후처리: `&`로 시작하는 조각은 독립 항목으로 안 보고 바로 앞 항목에
+이어붙인다(`items[-1] += part`). 마찬가지로 과거 오염 데이터는 이번엔 정리
+안 함.
+
+### 38.5 메뉴 4분면 — 분류 기준 설명 + 화면에서 조절
+
+기존엔 백엔드가 `statistics.median()`으로 계산한 수요/만족도 기준값을
+그대로 받아 쓰기만 했다(조절 지점 없음, 기준이 뭔지 설명도 없음). 사용자
+결정: **화면에서만** 조절(백엔드/DB 안 건드림). `frontend/src/pages/
+AnalysisPage.tsx::MenuQuadrantTab`에 두 슬라이더(수요/만족도 기준값, 초기값
+= 서버가 준 median)를 추가해 `classifyQuadrantClient()`(백엔드
+`classify_menu_quadrant`와 동일한 규칙을 프론트에서 재현)로 **클라이언트
+사이드 재분류**를 한다. 단, 표본부족(`evaluation_count < low_sample_
+threshold`) 판정은 서버 값을 그대로 쓴다 — 조절 대상이 아님. 산점도
+markLine과 확장 테이블의 4분면 배지 둘 다 이 재분류 결과를 쓴다. 상단에
+"가로축/세로축이 기준값보다 큰지 작은지로 네 가지로 나눈다"는 설명 캡션도
+추가.
+
+### 38.6 코너 확장 테이블 — 정렬 + 4분면 체크 필터
+
+같은 `MenuQuadrantTab`의 코너 클릭 확장 테이블(메뉴/등장횟수/평가건수/
+만족도)에 정렬이 전혀 없었다. 4개 컬럼 헤더 클릭 시 오름/내림차순 토글
+(`sortKey`/`sortDir` 로컬 state)을 추가. 4분면 범례를 클릭-토글 가능한
+체크박스처럼 바꿔(`visibleQuadrants: Set<string>`) 선택된 분류만 산점도와
+테이블에 보이게 필터링 — 38.5의 클라이언트 재분류 결과와 자연스럽게
+연동된다.
+
+### 38.7 코너별 분석 — 다른 코너 동반선택쌍 별도 섹션
+
+`/corners/{corner_id}/core-layer-menu-pairs`는 원래도 코너 무관하게 코어층
+전체 메뉴 집합에서 쌍을 계산했다(버그 아님) — 문제는 같은 코너 조합과
+다른 코너 조합이 화면에서 구분 없이 섞여 나와, 같은 코너 조합이 워낙 흔해
+다른 코너 조합이 top_n 안에 거의 안 잡혔다는 것. 각 페어 메뉴에
+`corner_a`/`corner_b`(취식기록 최빈 코너, `_corner_id_by_menu_from_meal_
+log` 재사용)를 붙이고, 후보 풀을 `top_n × 20`(최소 200)으로 넉넉히 넓혀
+계산한 뒤 `corner_a != corner_b`인 것만 걸러 별도 `cross_corner_pairs`
+필드로 반환(기존 `top_pairs` 필드는 그대로 — 하위호환). 프론트
+`CornerCoreLayerSection`에 "다른 코너 조합 Top N" 표를 코어층/나머지 각각
+아래에 추가, 코너 조합을 `A ↔ B` 태그로 표시.
+
+### 38.8 음식벡터 관리 — 캠퍼스 메인메뉴 평균 레이더 차트 (신규 기능)
+
+`food_vector`의 10차원(매운맛/단맛/짠맛/신맛/기름진맛/단백질/탄수화물/
+튀김/국물/채소)은 사람이 이름 붙인 해석 가능한 속성이라, 임의 임베딩과
+달리 차원축소 없이 레이더 차트로 바로 보여줄 수 있다.
+- `backend/app/services/food_vector.py`: `compute_average_food_vector`
+  (순수함수, 축별 산술평균), `describe_average_bias`(순수함수 —
+  `taste_clustering.py::generate_cluster_label`과 같은 "중립값(0.5) 대비
+  뚜렷이 튀는 차원 1~2개 추출" 방식, 임계값 0.12 동일하게 재사용해 "매운맛·
+  국물 쪽으로 치우쳐 있습니다" 같은 한 줄 설명을 만든다).
+- `backend/app/api/analysis.py`: `GET /menus/food-vectors/average` — `weekly_
+  menu_plan`에 MAIN으로 한 번이라도 등장한 menu_id만(부찬 제외)
+  `food_vector IS NOT NULL`인 것을 모아 평균·설명·표본수 반환.
+- 프론트: "음식벡터 관리" 탭 최상단에 `CampusAverageFoodVectorSection`
+  신규 — ECharts radar(평균 벡터 vs 중립 기준 0.5 두 시리즈 겹쳐 그림) +
+  편향 설명 캡션.
+
+### 38.9 홈 개선포인트 — VOE 주관식 주된 내용 요약
+
+기존 `select_voe_points`(순수함수)는 카테고리별 **건수**만 보고 "어떤
+카테고리가 늘었다/많다"는 제목만 만들었다 — 무슨 내용인지는 알 수 없었다.
+`ImprovementPoint`에 `voe_category` 필드를 추가(선택된 카테고리를 그대로
+들고 다님, 여전히 순수함수 — DB/LLM 접근 없음). DB 오케스트레이션 레이어
+(`dashboard.py::improvement_points`, 이제 `async def`)에서 그 카테고리의
+원문 코멘트(`_compute_voe_by_category`가 이미 모아둔 `comments`)를 최대 10건
+뽑아 신규 `summarize_voe_comments(llm_client, category, comments)`
+(`improvement_points.py`, `weekly_menu_prediction.py`의 `_build_summary_
+prompt`/`_fallback_summary` 패턴 재사용)에 넘겨 1~2문장 요약을 만들고,
+`voe_summary` 필드로 응답에 붙인다. LLM 미설정 시 폴백은 원문 예시 한 건을
+그대로 인용(`"'위생' 관련 코멘트 예시: "..." 등 (사내 LLM 미설정 — 원문
+예시만 표시)"`). 프론트 `HomePage.tsx`는 `voe_summary`가 있으면 인용구
+스타일로 detail 아래에 덧붙여 보여준다.
+
+**파일 요약**:
+
+| 항목 | 파일 |
+|---|---|
+| 38.1 | `frontend/src/pages/HomePage.tsx` |
+| 38.2 | `backend/app/api/dashboard.py` |
+| 38.3 | `ingestion-tool/parsing/weekly_menu_parser.py`, `backend/app/services/master_data.py` |
+| 38.4 | `ingestion-tool/parsing/weekly_menu_parser.py` |
+| 38.5, 38.6 | `frontend/src/pages/AnalysisPage.tsx` (`MenuQuadrantTab`) |
+| 38.7 | `backend/app/api/analysis.py`, `frontend/src/api/client.ts`, `frontend/src/pages/AnalysisPage.tsx` |
+| 38.8 | `backend/app/services/food_vector.py`, `backend/app/api/analysis.py`, `frontend/src/api/client.ts`, `frontend/src/pages/AnalysisPage.tsx` |
+| 38.9 | `backend/app/services/improvement_points.py`, `backend/app/api/dashboard.py`, `frontend/src/api/client.ts`, `frontend/src/pages/HomePage.tsx` |
+
+**검증**: 신규/변경 pytest 전부 통과(백엔드 206개, ingestion-tool 78개),
+프론트 `tsc -b && vite build` 클린, uvicorn+vite 띄운 뒤 Playwright로 실
+데이터 기준 스크린샷 확인(일요일 미노출, 슬라이더로 4분면 재분류·정렬·
+필터 동작, 레이더 차트 렌더, VOE 요약 인용구 노출, 다른 코너 조합 섹션
+노출).
