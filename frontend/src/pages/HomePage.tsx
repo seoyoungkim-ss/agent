@@ -71,10 +71,15 @@ const CLASSIFICATION_OPTIONS: { label: string; value: Classification | "전체" 
   { label: "전체", value: "전체" },
   { label: "평일", value: "평일" },
   { label: "주말+공휴일", value: "주말+공휴일" },
+  { label: "패밀리데이", value: "패밀리데이" },
 ];
 
 export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) {
   const [classification, setClassification] = useState<Classification | "전체">("전체");
+  // 토요일은 평일과 식수 규모가 달라 같은 추이 라인에 섞으면 오해하기 쉽다 —
+  // 기본은 숨기고 버튼으로 켜서 볼 수 있게 한다("주간 식수 추이"/"코너별 주간
+  // 식수 추이" 두 차트 공용 토글, 2026-07).
+  const [showSaturday, setShowSaturday] = useState(false);
   const [menuName, setMenuName] = useState("");
   const [searchedMenu, setSearchedMenu] = useState<string | null>(null);
   const [exportStart, setExportStart] = useState(isoDaysAgo(30));
@@ -152,10 +157,14 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
     (sum, c) => sum + c.predicted_headcount,
     0,
   );
-  const topCongestedCorner = (congestionForecast.data?.corners ?? []).reduce<CongestionForecastRow | null>(
-    (max, c) => (max === null || c.expected_peak_headcount > max.expected_peak_headcount ? c : max),
-    null,
-  );
+  // Take Out은 착석 취식이 아니라 "혼잡"(줄서서 기다림) 개념과 안 맞아 제외한다
+  // (corner_analysis의 exclude_take_out과 같은 이유, 여기선 이 카드 하나만 해당).
+  const topCongestedCorner = (congestionForecast.data?.corners ?? [])
+    .filter((c) => c.corner_name !== "Take Out")
+    .reduce<CongestionForecastRow | null>(
+      (max, c) => (max === null || c.expected_peak_headcount > max.expected_peak_headcount ? c : max),
+      null,
+    );
 
   // 금주 메뉴 과거 VOE — 이번 주 메인메뉴 중 과거 평가 이력(evaluation_count>0)이
   // 있는 메뉴 수. 이번 주 메뉴 수가 적어(보통 5~15개) 병렬 개별 호출로 v0 구현.
@@ -179,12 +188,29 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   const chartTheme = useChartTheme();
   const seriesWeekday = resolveColor("var(--series-1)");
   const seriesHoliday = resolveColor("var(--series-2)");
+  const seriesFamilyDay = resolveColor("var(--series-3)");
   const holidayColor = resolveColor("var(--critical)");
-  const classificationByDate = new Map((weekly.data ?? []).map((d) => [d.date, d.classification]));
+  const familyDayColor = resolveColor("var(--series-3)");
+  // "주간 식수 추이"/"코너별 주간 식수 추이" 두 차트 전용 — 토요일 토글이 꺼져
+  // 있으면 두 차트에서만 토요일을 뺀다(누적 식수 스탯 타일은 영향 없음).
+  const chartWeeklyData = showSaturday
+    ? (weekly.data ?? [])
+    : (weekly.data ?? []).filter((d) => new Date(d.date).getDay() !== 6);
+  const classificationByDate = new Map(chartWeeklyData.map((d) => [d.date, d.classification]));
   const weekdayAxisLabel = {
-    color: (value: string) => (classificationByDate.get(value) === "주말+공휴일" ? holidayColor : chartTheme.text),
+    color: (value: string) => {
+      const cls = classificationByDate.get(value);
+      if (cls === "주말+공휴일") return holidayColor;
+      if (cls === "패밀리데이") return familyDayColor;
+      return chartTheme.text;
+    },
     formatter: (value: string) => weekdayLabel(value),
   };
+  function pointColorForClassification(cls: string): string {
+    if (cls === "주말+공휴일") return seriesHoliday;
+    if (cls === "패밀리데이") return seriesFamilyDay;
+    return seriesWeekday;
+  }
 
   const chartOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
@@ -192,7 +218,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
     tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
     xAxis: {
       type: "category",
-      data: weekly.data?.map((d) => d.date) ?? [],
+      data: chartWeeklyData.map((d) => d.date),
       axisLine: { lineStyle: { color: chartTheme.axis } },
       axisLabel: weekdayAxisLabel,
       axisTick: { show: false },
@@ -209,9 +235,9 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
         symbol: "circle",
         symbolSize: 8,
         lineStyle: { width: 2, color: seriesWeekday },
-        data: (weekly.data ?? []).map((d) => ({
+        data: chartWeeklyData.map((d) => ({
           value: d.headcount,
-          itemStyle: { color: d.classification === "주말+공휴일" ? seriesHoliday : seriesWeekday },
+          itemStyle: { color: pointColorForClassification(d.classification) },
         })),
       },
     ],
@@ -222,7 +248,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   // 백엔드에서 그린미트 항상 마지막 정렬로 온다(analysis.py::corner_analysis).
   const stableHomeCorners = [...(cornerSummary.data ?? [])].sort((a, b) => a.corner_id - b.corner_id);
   const homeCornerColor = new Map(stableHomeCorners.map((c, i) => [c.corner_id, `var(--series-${(i % 8) + 1})`]));
-  const cornerTrendDays = weekly.data?.map((d) => d.date) ?? [];
+  const cornerTrendDays = chartWeeklyData.map((d) => d.date);
   const trendByCornerHome = new Map<string, Map<string, number>>();
   for (const row of cornerTrend.data ?? []) {
     if (!trendByCornerHome.has(row.corner_name)) trendByCornerHome.set(row.corner_name, new Map());
@@ -307,6 +333,9 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
             </Button>
           </div>
           <SegmentedControl value={classification} options={CLASSIFICATION_OPTIONS} onChange={setClassification} />
+          <Button variant="secondary" onClick={() => setShowSaturday((v) => !v)}>
+            {showSaturday ? "토요일 숨기기" : "토요일 포함 보기"}
+          </Button>
           <a href={exportUrl} download>
             <Button variant="secondary">엑셀 다운로드</Button>
           </a>
@@ -382,6 +411,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
             items={[
               { label: "평일", color: "var(--series-1)" },
               { label: "주말+공휴일", color: "var(--series-2)" },
+              { label: "패밀리데이", color: "var(--series-3)" },
             ]}
           />
         </div>

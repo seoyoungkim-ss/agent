@@ -27,7 +27,7 @@ function qs(params: Record<string, string | number | boolean | undefined | null>
 // ---- 타입 (backend/app/schemas, models.enums와 대응) ----
 
 export type MealType = "조식" | "중식" | "석식";
-export type Classification = "평일" | "주말+공휴일";
+export type Classification = "평일" | "주말+공휴일" | "패밀리데이";
 export type Quadrant = "인기메뉴" | "숨은강자" | "개선시급" | "퇴출후보" | "표본부족";
 export type Weather = "맑음" | "비" | "폭염" | "한파";
 
@@ -190,6 +190,13 @@ export interface MenuPairRow {
   corner_a?: string | null;
   corner_b?: string | null;
   is_obvious_pair?: boolean | null;
+}
+
+export interface CornerCoreLayerSummaryRow {
+  corner_id: number;
+  corner_name: string;
+  core_employee_count: number;
+  non_core_employee_count: number;
 }
 
 export interface CornerCoreLayerMenuPairsResponse {
@@ -421,6 +428,9 @@ export const api = {
   menuPerformance: (params: { period_start: string; period_end: string }) =>
     request<MenuPerformanceRow[]>(`/analysis/menu-performance${qs(params)}`),
 
+  menuPerformanceByMealType: (params: { period_start: string; period_end: string; meal_type: MealType }) =>
+    request<MenuPerformanceRow[]>(`/analysis/menu-performance/by-meal-type${qs(params)}`),
+
   recomputeMenuPerformance: (params: { period_start: string; period_end: string }) =>
     request<{ updated_menus: number }>(`/analysis/menu-performance/recompute${qs(params)}`, {
       method: "POST",
@@ -453,6 +463,13 @@ export const api = {
     request<MenuCombinationsResponse>(
       `/analysis/menu-combinations/${encodeURIComponent(menuName)}${qs(params)}`,
     ),
+
+  cornerCoreLayerSummary: (params: {
+    period_start: string;
+    period_end: string;
+    min_visit_count?: number;
+    min_share?: number;
+  }) => request<CornerCoreLayerSummaryRow[]>(`/analysis/corners/core-layer-summary${qs(params)}`),
 
   cornerCoreLayerMenuPairs: (
     cornerId: number,

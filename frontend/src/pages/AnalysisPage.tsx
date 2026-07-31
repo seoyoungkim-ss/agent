@@ -8,6 +8,7 @@ import {
   type CornerMenuThroughputResponse,
   type CornerTrendRow,
   type Granularity,
+  type MealType,
   type MenuFoodVectorRow,
   type MenuPairRow,
   type MenuPerformanceRow,
@@ -54,6 +55,29 @@ function axisTooltipFormatter(
   const lines = params.map((p) => {
     const value = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
     return `${p.marker}${p.seriesName}: ${formatTooltipNumber(value as number | string)}`;
+  });
+  return [header, ...lines].join("<br/>");
+}
+
+// combinedTrendOption 전용 — 식수/만족도 두 시리즈가 범례 단순화를 위해
+// 코너명 하나로 같은 seriesName을 쓰므로(아래 참고), seriesName만으로는
+// 어느 지표인지 구분이 안 돼 seriesId(`"{코너}::headcount"`/`"...::satisfaction"`)
+// 로 지표 라벨을 따로 붙인다.
+function combinedTrendTooltipFormatter(
+  params: {
+    axisValueLabel?: string;
+    axisValue?: string;
+    marker: string;
+    seriesName: string;
+    seriesId?: string;
+    value: unknown;
+  }[],
+): string {
+  const header = params[0]?.axisValueLabel ?? params[0]?.axisValue ?? "";
+  const lines = params.map((p) => {
+    const value = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
+    const metricLabel = p.seriesId?.endsWith("::satisfaction") ? "만족도" : "식수";
+    return `${p.marker}${p.seriesName} ${metricLabel}: ${formatTooltipNumber(value as number | string)}`;
   });
   return [header, ...lines].join("<br/>");
 }
@@ -156,6 +180,7 @@ function DivisionAnalysisSection() {
             { label: "전체", value: "전체" },
             { label: "평일", value: "평일" },
             { label: "주말+공휴일", value: "주말+공휴일" },
+            { label: "패밀리데이", value: "패밀리데이" },
           ]}
           onChange={setClassification}
         />
@@ -194,7 +219,8 @@ function DivisionAnalysisSection() {
   );
 }
 
-// 히트맵 값(0~1)이 낮음→높음으로 진해지는 단일 색상(blue) 시퀀셜 램프.
+// 히트맵 값(0~1)이 낮음→높음으로 진해지는 단일 색상(blue) 시퀀셜 램프 —
+// dataviz 스킬 palette.md의 sequential blue 램프 step 100/350/700과 동일한 값.
 const SEQUENTIAL_BLUE_RAMP = ["#cde2fb", "#5598e7", "#0d366b"];
 
 function hexToRgb(hex: string): [number, number, number] {
@@ -205,7 +231,7 @@ function hexToRgb(hex: string): [number, number, number] {
 // share/maxShare를 0~1로 정규화해 SEQUENTIAL_BLUE_RAMP를 선형보간한다 — 주간
 // 식단표 격자의 "전체 예측 비교" 배경 히트맵용(TasteClusterSection과 같은 램프,
 // dataviz 스킬: sequential은 단일 색상 하나로만).
-function shareToBackground(share: number, maxShare: number): string | undefined {
+function shareToBackgroundRgb(share: number, maxShare: number): [number, number, number] | undefined {
   if (maxShare <= 0 || share <= 0) return undefined;
   const t = Math.max(0, Math.min(1, share / maxShare));
   const stops = SEQUENTIAL_BLUE_RAMP.map(hexToRgb);
@@ -214,10 +240,39 @@ function shareToBackground(share: number, maxShare: number): string | undefined 
   const localT = scaled - i;
   const [r1, g1, b1] = stops[i];
   const [r2, g2, b2] = stops[i + 1];
-  const r = Math.round(r1 + (r2 - r1) * localT);
-  const g = Math.round(g1 + (g2 - g1) * localT);
-  const b = Math.round(b1 + (b2 - b1) * localT);
-  return `rgb(${r}, ${g}, ${b})`;
+  return [
+    Math.round(r1 + (r2 - r1) * localT),
+    Math.round(g1 + (g2 - g1) * localT),
+    Math.round(b1 + (b2 - b1) * localT),
+  ];
+}
+
+// WCAG 상대 명도/대비 계산(dataviz 스킬 validate_palette.js::contrast와 동일 공식) —
+// 기존엔 share/maxShare > 0.55라는 임의 컷오프로 흰/회색/노란 텍스트를 골랐는데,
+// 컷오프 아래(전체 셀의 절반 이상)에서 회색(--ink-muted)·노란색(--warning, 밝은
+// 배경 대비 1.79:1로 사실상 안 보임)이 연한 파란 배경 위에 그대로 남아 대비가
+// 낮았다 — 실제 배경색 명도로 흰색/기본잉크(--ink) 중 대비가 더 높은 쪽을 고른다.
+function srgbChannelToLinear(c: number): number {
+  const s = c / 255;
+  return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+
+function relativeLuminance([r, g, b]: [number, number, number]): number {
+  return 0.2126 * srgbChannelToLinear(r) + 0.7152 * srgbChannelToLinear(g) + 0.0722 * srgbChannelToLinear(b);
+}
+
+function wcagContrast(a: [number, number, number], b: [number, number, number]): number {
+  const [lumA, lumB] = [relativeLuminance(a), relativeLuminance(b)];
+  const [hi, lo] = lumA > lumB ? [lumA, lumB] : [lumB, lumA];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+const DARK_TEXT_RGB: [number, number, number] = [11, 11, 11]; // var(--ink)
+const LIGHT_TEXT_RGB: [number, number, number] = [255, 255, 255];
+
+function useLightTextOn(bgRgb: [number, number, number] | undefined): boolean {
+  if (!bgRgb) return false;
+  return wcagContrast(bgRgb, LIGHT_TEXT_RGB) > wcagContrast(bgRgb, DARK_TEXT_RGB);
 }
 
 
@@ -407,6 +462,29 @@ function CornerAnalysisTab() {
     onSuccess: () => query.refetch(),
   });
 
+  // 코너 선택을 이 탭과 CornerLoyaltySection이 공유한다 — 피크타임 서브속도를
+  // "코너별 비교"(아래 throughputTrendOption, 전체 코너)와 "메뉴별 비교"(선택된
+  // 코너의 메뉴별, CornerLoyaltySection에도 있던 차트)로 오갈 때 코너 선택이
+  // 서로 어긋나지 않게 한다(2026-07).
+  const [selectedCornerId, setSelectedCornerId] = useState<number | null>(null);
+  useEffect(() => {
+    if (selectedCornerId == null && (query.data ?? []).length > 0) {
+      setSelectedCornerId(query.data![0].corner_id);
+    }
+  }, [query.data, selectedCornerId]);
+  const [throughputCompareMode, setThroughputCompareMode] = useState<"corner" | "menu">("corner");
+  // corner-menu-throughput 쿼리키는 CornerLoyaltySection과 동일 — React Query
+  // 캐시가 자동으로 중복 요청을 막아준다(이 레포에 이미 있는 패턴).
+  const menuThroughputQuery = useQuery({
+    queryKey: ["corner-menu-throughput", selectedCornerId],
+    queryFn: () =>
+      api.cornerMenuThroughput(selectedCornerId as number, {
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+      }),
+    enabled: selectedCornerId != null && throughputCompareMode === "menu",
+  });
+
   // 파이차트·꺾은선그래프 색상을 코너 인기 순위가 아니라 코너 자체(corner_id)에 고정한다
   // (dataviz 스킬: "색은 순위가 아니라 개체를 따라간다" — 기간별로 랭킹이 바뀌어도 같은 코너는 같은 색).
   const SHARE_EXCLUDED_CORNER_NAMES = new Set(["미캠회관(전골)"]); // 그린미트(is_diet_corner)와 함께 점유율 비교에서 제외
@@ -535,19 +613,14 @@ function CornerAnalysisTab() {
   const combinedTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 56, right: 56, top: 40, bottom: 28 },
-    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
+    tooltip: { trigger: "axis", formatter: combinedTrendTooltipFormatter },
     legend: {
       top: 0,
       textStyle: { color: chartTheme.text },
-      data: monthlyTrendCorners.flatMap((c) => [`${c.corner_name} 식수`, `${c.corner_name} 만족도`]),
-      // 코너×지표(식수/만족도) 조합이 많아 한꺼번에 다 켜면 복잡하므로, 기본은
-      // 식수 라인만 보여주고 만족도는 범례를 클릭해서 필요할 때만 겹쳐본다.
-      selected: Object.fromEntries(
-        monthlyTrendCorners.flatMap((c) => [
-          [`${c.corner_name} 식수`, true],
-          [`${c.corner_name} 만족도`, false],
-        ]),
-      ),
+      // 범례는 코너명 하나씩만 — 식수(실선)/만족도(점선) 두 시리즈가 같은
+      // name을 쓰므로 ECharts가 자동으로 한 항목에 묶어 같이 토글한다(2026-07,
+      // "{코너} 식수"/"{코너} 만족도"로 항목이 2배라 보기 힘들다는 피드백).
+      data: monthlyTrendCorners.map((c) => c.corner_name),
     },
     xAxis: { type: "category", data: monthlyPeriods, ...axisStyle },
     yAxis: [
@@ -570,7 +643,8 @@ function CornerAnalysisTab() {
       const color = resolveColor(cornerColor.get(c.corner_id) ?? "var(--series-1)");
       return [
         {
-          name: `${c.corner_name} 식수`,
+          id: `${c.corner_name}::headcount`,
+          name: c.corner_name,
           type: "line" as const,
           yAxisIndex: 0,
           symbol: "circle",
@@ -580,7 +654,8 @@ function CornerAnalysisTab() {
           data: monthlyPeriods.map((p) => monthlyByCorner.get(c.corner_name)?.get(p)?.headcount ?? null),
         },
         {
-          name: `${c.corner_name} 만족도`,
+          id: `${c.corner_name}::satisfaction`,
+          name: c.corner_name,
           type: "line" as const,
           yAxisIndex: 1,
           symbol: "diamond",
@@ -684,6 +759,7 @@ function CornerAnalysisTab() {
               { label: "전체", value: "전체" },
               { label: "평일", value: "평일" },
               { label: "주말+공휴일", value: "주말+공휴일" },
+              { label: "패밀리데이", value: "패밀리데이" },
             ]}
             onChange={setClassification}
           />
@@ -807,10 +883,47 @@ function CornerAnalysisTab() {
                   )}
                   {visibleTrendMetrics.throughput && (
                     <div>
-                      <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                        피크타임 분당 서브 추이
-                      </p>
-                      <ReactECharts option={throughputTrendOption} style={{ height: 380 }} />
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                          피크타임 분당 서브 추이
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <SegmentedControl
+                            value={throughputCompareMode}
+                            options={[
+                              { label: "코너별 비교", value: "corner" },
+                              { label: "메뉴별 비교", value: "menu" },
+                            ]}
+                            onChange={setThroughputCompareMode}
+                          />
+                          {throughputCompareMode === "menu" && query.data && query.data.length > 0 && (
+                            <SegmentedControl
+                              value={selectedCornerId != null ? String(selectedCornerId) : ""}
+                              options={query.data.map((c) => ({ label: c.corner_name, value: String(c.corner_id) }))}
+                              onChange={(v) => setSelectedCornerId(Number(v))}
+                            />
+                          )}
+                        </div>
+                      </div>
+                      {throughputCompareMode === "corner" ? (
+                        <ReactECharts option={throughputTrendOption} style={{ height: 380 }} />
+                      ) : (
+                        <>
+                          {menuThroughputQuery.isLoading && <LoadingState />}
+                          {menuThroughputQuery.isError && <ErrorState error={menuThroughputQuery.error} />}
+                          {menuThroughputQuery.data && menuThroughputQuery.data.menus.length === 0 && (
+                            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                              표본 부족
+                            </p>
+                          )}
+                          {menuThroughputQuery.data && menuThroughputQuery.data.menus.length > 0 && (
+                            <ReactECharts
+                              option={buildMenuThroughputOption(menuThroughputQuery.data, chartTheme)}
+                              style={{ height: Math.max(160, menuThroughputQuery.data.menus.length * 32) }}
+                            />
+                          )}
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -819,7 +932,11 @@ function CornerAnalysisTab() {
           </>
         )}
       </Card>
-      <CornerLoyaltySection corners={query.data ?? []} />
+      <CornerLoyaltySection
+        corners={query.data ?? []}
+        selectedCornerId={selectedCornerId}
+        onSelectCorner={setSelectedCornerId}
+      />
       <MenuPairAnalysisSection corners={query.data ?? []} />
       <MenuAffinitySection />
     </div>
@@ -943,17 +1060,20 @@ function buildMenuThroughputOption(
 // PRD 10-1: 코너 코어층 = "코너 충성도" 분석. 특정 코너를 반복적으로 찾는
 // 이용자층 규모/특징만 본다 — 메뉴 동반 선택 쌍(10-2, 메뉴 선호 연관 분석)과는
 // 목적이 다른 별개 화면으로 분리했다(2026-07, 기존엔 한 카드에 섞여 있었음).
-function CornerLoyaltySection({ corners }: { corners: { corner_id: number; corner_name: string }[] }) {
+function CornerLoyaltySection({
+  corners,
+  selectedCornerId,
+  onSelectCorner,
+}: {
+  corners: { corner_id: number; corner_name: string }[];
+  // 코너 선택은 부모(CornerAnalysisTab)와 공유한다 — "피크타임 서브속도"
+  // 섹션의 "메뉴별 비교" 모드와 코너 선택이 어긋나지 않게 하기 위함(2026-07).
+  selectedCornerId: number | null;
+  onSelectCorner: (cornerId: number) => void;
+}) {
   const chartTheme = useChartTheme();
-  const [selectedCornerId, setSelectedCornerId] = useState<number | null>(corners[0]?.corner_id ?? null);
   const [minVisitCount, setMinVisitCount] = useState(3);
   const [minShare, setMinShare] = useState(30);
-
-  useEffect(() => {
-    if (selectedCornerId == null && corners.length > 0) {
-      setSelectedCornerId(corners[0].corner_id);
-    }
-  }, [corners, selectedCornerId]);
 
   const cornerQuery = useQuery({
     queryKey: ["corner-core-layer-menu-pairs", selectedCornerId, minVisitCount, minShare],
@@ -975,6 +1095,19 @@ function CornerLoyaltySection({ corners }: { corners: { corner_id: number; corne
       }),
     enabled: selectedCornerId != null,
   });
+  // 코너간 비교 뷰 — "어디 코너 코어층은 몇 명이고 유동층은 몇 명인지" 전체를
+  // 한눈에 보기 위한 요약(2026-07). 아래 코너 선택 컨트롤과 같은 min_visit_
+  // count/min_share를 공유해 상세 뷰와 기준이 어긋나지 않게 한다.
+  const summaryQuery = useQuery({
+    queryKey: ["corner-core-layer-summary", minVisitCount, minShare],
+    queryFn: () =>
+      api.cornerCoreLayerSummary({
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+        min_visit_count: minVisitCount,
+        min_share: minShare / 100,
+      }),
+  });
 
   if (corners.length === 0) return null;
 
@@ -987,11 +1120,30 @@ function CornerLoyaltySection({ corners }: { corners: { corner_id: number; corne
         경우, ② 같은 메인메뉴가 여러 코너에서 동시 제공된 날에도 이 코너를 고른 비율(메뉴가 같으니 코너
         선택은 순수한 코너 선호로 봅니다). 두 신호는 서로 다른 관점이라 따로 보여줍니다.
       </p>
+      {summaryQuery.isLoading && <LoadingState />}
+      {summaryQuery.isError && <ErrorState error={summaryQuery.error} />}
+      {summaryQuery.data && (
+        <div className="mb-5">
+          <Table
+            columns={[
+              { key: "corner_name", label: "코너" },
+              { key: "core", label: "코어 이용자", align: "right" },
+              { key: "non_core", label: "유동층", align: "right" },
+            ]}
+            rows={summaryQuery.data.map((r) => ({
+              corner_name: r.corner_name,
+              core: `${r.core_employee_count}명`,
+              non_core: `${r.non_core_employee_count}명`,
+            }))}
+            rowKey={(row) => row.corner_name as string}
+          />
+        </div>
+      )}
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <SegmentedControl
           value={selectedCornerId != null ? String(selectedCornerId) : ""}
           options={corners.map((c) => ({ label: c.corner_name, value: String(c.corner_id) }))}
-          onChange={(v) => setSelectedCornerId(Number(v))}
+          onChange={(v) => onSelectCorner(Number(v))}
         />
         <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
           최소 방문횟수
@@ -1449,9 +1601,20 @@ function MenuQuadrantTab() {
   const [sortKey, setSortKey] = useState<SortKey>("appearance");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [visibleQuadrants, setVisibleQuadrants] = useState<Set<string>>(new Set(QUADRANT_LABELS));
+  // 조식/중식/석식마다 나오는 메뉴가 달라 전체로 묶어 보면 비교가 안 맞는다 —
+  // "전체"는 기존 사전 recompute된 MenuPerformanceStats, 특정 끼니는 그 자리에서
+  // 계산하는 by-meal-type 엔드포인트로 전환한다(2026-07).
+  const [mealTypeFilter, setMealTypeFilter] = useState<MealType | "전체">("전체");
   const query = useQuery({
-    queryKey: ["menu-performance", PERIOD_START, PERIOD_END],
-    queryFn: () => api.menuPerformance({ period_start: PERIOD_START, period_end: PERIOD_END }),
+    queryKey: ["menu-performance", PERIOD_START, PERIOD_END, mealTypeFilter],
+    queryFn: () =>
+      mealTypeFilter === "전체"
+        ? api.menuPerformance({ period_start: PERIOD_START, period_end: PERIOD_END })
+        : api.menuPerformanceByMealType({
+            period_start: PERIOD_START,
+            period_end: PERIOD_END,
+            meal_type: mealTypeFilter,
+          }),
   });
   const recompute = () => api.recomputeMenuPerformance({ period_start: PERIOD_START, period_end: PERIOD_END });
 
@@ -1571,6 +1734,18 @@ function MenuQuadrantTab() {
         원(버블) 크기는 제공 횟수 — 작을수록 표본이 적어 가로축 수치가 우연한 결과로
         튈 수 있습니다(점선 테두리 = 최근 {LOW_APPEARANCE_THRESHOLD}회 미만 제공).
       </p>
+      <div className="mb-3">
+        <SegmentedControl
+          value={mealTypeFilter}
+          options={[
+            { label: "전체", value: "전체" },
+            { label: "조식", value: "조식" },
+            { label: "중식", value: "중식" },
+            { label: "석식", value: "석식" },
+          ]}
+          onChange={setMealTypeFilter}
+        />
+      </div>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-4 text-xs">
           {QUADRANT_LABELS.map((label) => {
@@ -1591,15 +1766,17 @@ function MenuQuadrantTab() {
             );
           })}
         </div>
-        <Button
-          variant="secondary"
-          onClick={async () => {
-            await recompute();
-            query.refetch();
-          }}
-        >
-          재계산
-        </Button>
+        {mealTypeFilter === "전체" && (
+          <Button
+            variant="secondary"
+            onClick={async () => {
+              await recompute();
+              query.refetch();
+            }}
+          >
+            재계산
+          </Button>
+        )}
       </div>
       <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
@@ -2394,8 +2571,9 @@ function WeeklyMenuReviewTab() {
                         const isSelected = key === selectedSlotKey;
                         const predicted = slot.main ? predictedByPlanId[slot.main.plan_id] : undefined;
                         const share = predicted?.prediction.predicted_share;
-                        const heatBg = share != null ? shareToBackground(share, maxShare) : undefined;
-                        const useLightText = share != null && maxShare > 0 && share / maxShare > 0.55;
+                        const heatBgRgb = share != null ? shareToBackgroundRgb(share, maxShare) : undefined;
+                        const heatBg = heatBgRgb ? `rgb(${heatBgRgb[0]}, ${heatBgRgb[1]}, ${heatBgRgb[2]})` : undefined;
+                        const useLightText = useLightTextOn(heatBgRgb);
                         const waitMinutes = predicted?.prediction.expected_wait_minutes;
                         const isCongested = waitValues.length > 1 && waitMinutes != null && waitMinutes > medianWait;
                         return (
@@ -2411,13 +2589,13 @@ function WeeklyMenuReviewTab() {
                               boxShadow: isSelected ? "inset 2px 0 0 var(--accent)" : undefined,
                             }}
                           >
-                            <div className="font-medium" style={{ color: useLightText ? "#fff" : undefined }}>
+                            <div className="font-medium" style={{ color: useLightText ? "#fff" : "var(--ink)" }}>
                               {slot.main ? slot.main.menu_name : "미배정"}
                             </div>
                             {slot.sides.length > 0 && (
                               <div
                                 className="mt-0.5 text-xs"
-                                style={{ color: useLightText ? "rgba(255,255,255,0.85)" : "var(--ink-muted)" }}
+                                style={{ color: useLightText ? "rgba(255,255,255,0.85)" : "rgba(11,11,11,0.72)" }}
                               >
                                 {slot.sides.map((s) => s.menu_name).join(", ")}
                               </div>
@@ -2425,15 +2603,19 @@ function WeeklyMenuReviewTab() {
                             {predicted && share != null && (
                               <div
                                 className="mt-0.5 text-xs"
-                                style={{ color: useLightText ? "rgba(255,255,255,0.9)" : "var(--ink-secondary)" }}
+                                style={{ color: useLightText ? "rgba(255,255,255,0.9)" : "rgba(11,11,11,0.72)" }}
                               >
                                 점유율 {(share * 100).toFixed(1)}%
                               </div>
                             )}
                             {isCongested && (
+                              // 혼잡 경고는 색(--warning)만으로 신호하지 않는다 — 밝은
+                              // 배경에서 대비가 낮기도 하고(1.79:1), dataviz 스킬 원칙상
+                              // 상태색은 항상 아이콘+라벨과 함께여야 한다. ⚠ 이모지가
+                              // 아이콘 역할을 하므로 글자색은 본문과 같은 대비색을 쓴다.
                               <div
                                 className="mt-0.5 text-xs font-medium"
-                                style={{ color: useLightText ? "#fff" : "var(--warning)" }}
+                                style={{ color: useLightText ? "#fff" : "var(--ink)" }}
                                 title={CONGESTION_EXPLANATION}
                               >
                                 ⚠ 혼잡 예상 · 대기 ~{waitMinutes}분

@@ -11,8 +11,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.models.enums import MenuRole
-from app.models.logs import MealLog, WeeklyMenuPlan
+from app.models.logs import MealLog
 
 
 @dataclass(frozen=True)
@@ -113,26 +112,18 @@ def classify_menu_controlled_corner_preference(
 def build_menu_controlled_meal_log_rows(
     db: Session, period_start: dt.date, period_end: dt.date
 ) -> list[tuple[dt.date, int, int]]:
-    """같은 날 같은 메인메뉴(menu_id)가 2개 이상 코너에서 동시 제공된 경우만 골라,
-    그 상황에서 실제 취식된 (날짜, 메뉴id, 코너id) 행을 돌려준다 —
+    """같은 날 같은 메뉴(menu_id)가 2개 이상 코너에서 실제로 취식된 경우만 골라,
+    그 상황의 (날짜, 메뉴id, 코너id) 행을 돌려준다 —
     classify_menu_controlled_corner_preference의 입력.
-    """
-    plan_rows = (
-        db.query(WeeklyMenuPlan.plan_date, WeeklyMenuPlan.menu_id, WeeklyMenuPlan.corner_id)
-        .filter(
-            WeeklyMenuPlan.plan_date >= period_start,
-            WeeklyMenuPlan.plan_date <= period_end,
-            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
-        )
-        .all()
-    )
-    corners_by_date_menu: dict[tuple[dt.date, int], set[int]] = defaultdict(set)
-    for plan_date, menu_id, corner_id in plan_rows:
-        corners_by_date_menu[(plan_date, menu_id)].add(corner_id)
-    contested_date_menus = {k for k, corners in corners_by_date_menu.items() if len(corners) >= 2}
-    if not contested_date_menus:
-        return []
 
+    "경합" 여부 판정을 meal_log에서 직접 한다 — 예전엔 weekly_menu_plan(주간
+    식단표, MenuRole.MAIN)에서만 찾았는데, 이 테이블은 다른 곳(analysis.py의
+    corner_id 배정 로직)에서도 이미 "누락되기 쉬워 안 쓴다"고 명시된 소스라
+    계획표에 없거나 MAIN이 아닌 SIDE로 잘못 분류된 코너가 있으면 실제로는
+    같은 날 다른 코너에서 같은 메뉴가 나왔어도 조용히 빠졌다(2026-07 실사용
+    버그 신고로 발견). meal_log가 실제 취식 사실이라 이걸 직접 근거로 삼는
+    쪽이 더 정확하다.
+    """
     period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
     period_start_dt = dt.datetime.combine(period_start, dt.time())
     meal_rows = (
@@ -144,8 +135,13 @@ def build_menu_controlled_meal_log_rows(
         )
         .all()
     )
-    return [
-        (eaten_at.date(), menu_id, corner_id)
-        for eaten_at, corner_id, menu_id in meal_rows
-        if (eaten_at.date(), menu_id) in contested_date_menus
-    ]
+    rows = [(eaten_at.date(), menu_id, corner_id) for eaten_at, corner_id, menu_id in meal_rows]
+
+    corners_by_date_menu: dict[tuple[dt.date, int], set[int]] = defaultdict(set)
+    for plan_date, menu_id, corner_id in rows:
+        corners_by_date_menu[(plan_date, menu_id)].add(corner_id)
+    contested_date_menus = {k for k, corners in corners_by_date_menu.items() if len(corners) >= 2}
+    if not contested_date_menus:
+        return []
+
+    return [row for row in rows if (row[0], row[1]) in contested_date_menus]

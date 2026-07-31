@@ -2314,3 +2314,164 @@ vite build` 클린, uvicorn+vite 띄운 뒤 Playwright로 실 데이터 기준
 고정되어 버려(부모 쿼리가 비동기로 나중에 채워짐) 코너 선택 상태가
 영원히 `null`로 남는 버그를 Playwright 스크린샷 비교 중 발견 — `useEffect`
 로 `corners`가 채워지면 첫 코너를 선택하도록 동기화해 수정.
+
+## 40. 실사용 피드백 라운드 — 버그 2건·패밀리데이 신설·수정 7건 (2026-07)
+
+지난 라운드 배포 후 실사용 중 나온 피드백을 처리했다: VOE 클러스터링 500
+에러, Agent 채팅이 실제 데이터가 있어도 "데이터 없음"으로 답변 거부하던
+버그, "패밀리데이"(매월 21일이 있는 주의 금요일, 출근 자율) 신규 분류,
+그 외 홈/분석 화면 수정 7건.
+
+### 40.1 VOE 클러스터링 500 에러 — 원인 재현 실패, 방어 로직 추가
+
+코드 리뷰·시딩 데이터 재현 모두 500을 재현하지 못했다(표본부족·NOT NULL
+제약은 이미 방어돼 있었음, sklearn 1.5 KMeans로 직접 검증). 가장 그럴듯한
+원인은 실제 사내 LLM 임베딩 게이트웨이 호출 실패(타임아웃/인증/응답
+스키마 불일치)인데, `cluster_monthly_voe`(`voe_clustering.py`)에 예외
+처리가 전혀 없어 어떤 예외든 그대로 500으로 노출됐다. 방어책: (1)
+`np.array(embeddings)`로 넘기기 전 임베딩 개수/차원 일치를 검증해 명확한
+`ValueError`를 던지게 함(불일치 시 numpy가 알아보기 힘든 에러를 던지는
+문제 방지), (2) 클러스터 라벨 요약(`_summarize_cluster`) 호출 실패는
+클러스터링 자체(KMeans 배정)를 실패시키지 않고 "미분류"로 폴백, (3)
+`dashboard.py::recompute_voe_clusters` 엔드포인트에서 예외를 502 +
+상세 메시지로 감싸 원인 진단이 가능하게 함. `test_voe_clustering.py`
+신규(이 경로에 테스트가 전혀 없었음).
+
+### 40.2 Agent 채팅 그라운딩 — 월/랭킹 파싱 추가
+
+`chat_grounding.py`가 데이터 **종류**(식수/만족도/voe 등)만 라우팅하고
+**기간**(몇 월)·**의도**(top N/순위)는 전혀 파싱하지 않아 "6월 식수
+top3"/"6월 가장 많이 먹은 메뉴" 같은 질문에 항상 "이번 주"만 보거나
+아예 매칭되는 카테고리가 없어 데이터 없음으로 답했다. 순수함수
+`_extract_month_range`("N월"/"지난달"/"이번달" 파싱, 이번 달보다 큰
+달이면 작년으로 간주), `_extract_top_n`("top3"/"상위 3"/"3위" 파싱),
+`_wants_ranking`(랭킹 의도 키워드 매칭)을 추가하고 모든 포매터를
+`(db, message)` 시그니처로 통일했다. 신규 카테고리 `menu_ranking`
+("많이 먹은", "인기 메뉴" 등 구문 매칭) + 신규 백엔드 엔드포인트
+`GET /analysis/menus/top-by-headcount`(임의 기간을 `meal_log`에서
+그 자리에서 집계 — `menu_performance`는 사전 recompute된 정확히 일치
+하는 기간만 조회 가능해 채팅처럼 즉석 질의에 못 씀).
+
+### 40.3 패밀리데이 — 3단계 분류로 앱 전체 확장
+
+`holidays.py::DayClassification`에 `FAMILY_DAY = "패밀리데이"` 추가.
+판정: `family_day_of_month(year, month)` — 그 달 21일이 속한 주(월~일)의
+금요일(`21일 + (5 - 21일.isoweekday())`일). 공휴일과 겹치면 공휴일 우선.
+`is_holiday` 컬럼(`DailyCornerStats`/`DailyDivisionStats`)은 boolean이라
+3단계를 못 담는다 — `family_day_dates_in_range(start, end)`로 기간 내
+패밀리데이 날짜 집합을 계산해 `analysis.py::_apply_classification_filter`
+(신규 공통 헬퍼, `division_analysis`/`_load_corner_stats`가 공유)가
+"패밀리데이"는 `stat_date IN (...)`, "평일"은 그 집합을 `NOT IN`으로
+추가 제외해 더는 평일 버킷에 안 섞이게 한다. 시뮬레이션 baseline(최근
+8회 이력 평균, `simulation.py::_fetch_classification_history`)도 패밀리
+데이가 월 1회뿐이라 `is_holiday=False` 풀에서 훨씬 넓게(400개) 스캔한
+뒤 Python에서 `is_family_day()`로 걸러 8개를 모은다(평일 이력도 같은
+풀에서 패밀리데이만 제외, 스캔 폭은 32개로 충분). `dashboard.py::_compute_
+weekly_summary`/`simulation.py::what_if`는 `HolidayService.classify()`
+확장만으로 자동 반영(코드 변경 불필요). 프론트는 `Classification` 타입에
+`"패밀리데이"` 추가 + 모든 분류 필터 `SegmentedControl`/`Legend`에 3번째
+옵션, 홈 화면 차트 색상은 `var(--series-3)`로 구분.
+
+### 40.4 홈 화면 — Take Out 제외, 토요일 기본 숨김
+
+"최고 혼잡 예상 코너"(`HomePage.tsx`) reduce에 `corner_name !== "Take
+Out"` 필터 추가(착석 취식이 아니라 혼잡도 개념과 안 맞음 — `corner_
+analysis`의 `exclude_take_out`과 같은 이유). "오늘 예상 총 식수"는 그대로
+유지(사용자가 최고 혼잡 코너만 명시). "주간 식수 추이"/"코너별 주간 식수
+추이"는 토요일이 평일과 규모가 달라 같은 라인에 섞으면 오해하기 쉽다 —
+`showSaturday` state(기본 `false`)로 두 차트 전용 `chartWeeklyData`를
+필터링(누적 식수 스탯 타일은 영향 없음, 원본 `weekly.data` 그대로 사용),
+버튼으로 토글.
+
+### 40.5 주간 식단표 히트맵 — 색상 대비 재설계 (dataviz 스킬 적용)
+
+기존 `useLightText = share/maxShare > 0.55`라는 share 비율 임의 컷오프가
+실제 배경색 명도와 무관해, 컷오프 아래(전체 셀 절반 이상)에서 회색
+(`--ink-muted`)·노란색(`--warning`, 밝은 배경 대비 1.79:1로 사실상 안
+보임) 텍스트가 연한 파란 배경 위에 그대로 남았다. WCAG 상대 명도/대비
+공식(`AnalysisPage.tsx::relativeLuminance`/`wcagContrast`, dataviz 스킬
+`validate_palette.js::contrast`와 동일 공식)으로 흰색/기본잉크(`var(--ink)`)
+중 실제 대비가 높은 쪽을 선택하도록 교체(`useLightTextOn`). 혼잡 경고
+(`⚠ 혼잡 예상`)는 색(`--warning`)만으로 신호하지 않는다 — dataviz 스킬
+원칙(상태색은 항상 아이콘+라벨과 함께)에 따라 ⚠ 이모지가 아이콘 역할을
+하고 텍스트는 본문과 같은 대비색을 쓰게 변경.
+
+### 40.6 메뉴별 분석 — 조식/중식/석식 필터
+
+`MenuPerformanceStats`(`/menu-performance`가 읽는 테이블)는 끼니 구분
+없이 통합 집계라 스키마 마이그레이션 없이는 끼니별로 못 나눈다 —
+`aggregate_menu_performance`(aggregation.py)와 동일한 순수함수 체인
+(`compute_menu_score`/`compute_menu_frequency`/`compute_share_of_traffic`/
+`classify_menu_quadrant`)을 재사용하되 `MealLog` 쿼리에 `meal_type`
+필터를 추가해 그 자리에서 계산만 하고 저장하지 않는 신규 엔드포인트
+`GET /analysis/menu-performance/by-meal-type`을 추가(기존 엔드포인트는
+그대로 유지). 수요/만족도 중앙값도 그 meal_type 내에서 다시 계산한다.
+`MenuQuadrantTab`에 조식/중식/석식 `SegmentedControl` 추가, "전체" 선택
+시에만 "재계산" 버튼 노출(끼니별 모드는 저장 대상이 없음).
+
+### 40.7 코너별 분석 — 범례 단순화 (코너명만)
+
+`combinedTrendOption`의 식수/만족도 두 시리즈가 "{코너} 식수"/"{코너}
+만족도"로 범례가 2배였다 — 두 시리즈의 `name`을 코너명 하나로 통일하면
+ECharts가 자동으로 한 범례 항목에 묶어 같이 토글한다. 두 시리즈 구분은
+`series.id`(`"{코너}::headcount"`/`"{코너}::satisfaction"`)로 유지하고,
+이 차트 전용 툴팁 포매터(`combinedTrendTooltipFormatter`)가 `seriesId`로
+"식수"/"만족도" 라벨을 붙여 렌더한다.
+
+### 40.8 코너 코어층 — 메뉴 통제 선호도 버그 수정 + 코너간 비교 뷰
+
+**버그**: `corner_core_layer.py::build_menu_controlled_meal_log_rows`가
+"경합 상황"(같은 날 같은 메뉴가 2개 이상 코너에서) 판정을 `meal_log`가
+아니라 `weekly_menu_plan`의 `MenuRole.MAIN` 행에서만 찾았다 —
+`weekly_menu_plan`은 이미 다른 곳(`_corner_id_by_menu_from_meal_log`
+주석)에서 "누락되기 쉬워 안 쓴다"고 명시된 소스라, 계획표에 없거나
+MAIN이 아닌 SIDE로 잘못 분류된 코너는 실제 `meal_log`에 데이터가 있어도
+조용히 빠졌다. 수정: `weekly_menu_plan` 의존을 완전히 제거하고
+`meal_log`에서 직접 (날짜, menu_id)별 서로 다른 corner_id 수를 세어
+경합 여부를 판정 — 실제 취식 사실을 근거로 삼는 쪽이 더 정확하다.
+회귀 테스트(`test_menu_controlled_preference_detects_contested_menu_
+without_weekly_menu_plan`)는 `/ingest/weekly-menu`를 아예 호출하지
+않고도 정확한 비율이 나오는지 확인한다.
+
+**비교 뷰**: 신규 슬림 엔드포인트 `GET /analysis/corners/core-layer-
+summary` — 기존 `corner_core_layer_menu_pairs`처럼 코너 하나씩 개별
+호출/쿼리하지 않고 `build_employee_corner_counts`(전체 코너를 이미 한
+번에 스캔함)를 한 번만 호출한 뒤 `classify_corner_core_layer`만 코너별로
+루프(메뉴 쌍 계산 생략, 비교 목적이라 가벼움). `CornerLoyaltySection`
+상단에 전체 코너 비교 표(코너명/코어 이용자/유동층)를 추가.
+
+### 40.9 피크타임 서브속도 — 코너별/메뉴별 비교 연계
+
+`CornerAnalysisTab`의 코너별 피크타임 서브속도 추이(전체 코너 라인차트)와
+`CornerLoyaltySection`의 메뉴별 피크타임 막대(선택된 코너 1개)가 완전히
+분리된 코너 선택 상태를 각자 가지고 있었다 — `selectedCornerId`를
+`CornerAnalysisTab`으로 끌어올려 `CornerLoyaltySection`은 props(`selectedCornerId`/
+`onSelectCorner`)로 받게 바꾸고, "피크타임 서브" 섹션에 "코너별 비교"
+(기존 라인차트)/"메뉴별 비교"(코너 선택 컨트롤 + 막대차트, `corner-menu-
+throughput` 쿼리키가 `CornerLoyaltySection`과 동일해 React Query 캐시가
+자동으로 중복 요청을 막음) 모드 토글을 추가했다. 코너를 어느 쪽에서
+바꾸든 두 섹션이 같은 코너를 가리킨다.
+
+**파일 요약**:
+
+| 항목 | 파일 |
+|---|---|
+| 40.1 | `backend/app/services/voe_clustering.py`, `backend/app/api/dashboard.py`, `backend/tests/test_voe_clustering.py`(신규) |
+| 40.2 | `backend/app/services/chat_grounding.py`, `backend/app/api/analysis.py`(신규 `top-by-headcount`) |
+| 40.3 | `backend/app/services/holidays.py`, `backend/app/api/analysis.py`, `backend/app/api/simulation.py`, `frontend/src/api/client.ts`, `frontend/src/pages/HomePage.tsx`, `frontend/src/pages/AnalysisPage.tsx` |
+| 40.4 | `frontend/src/pages/HomePage.tsx` |
+| 40.5 | `frontend/src/pages/AnalysisPage.tsx`(`WeeklyMenuReviewTab`) |
+| 40.6 | `backend/app/api/analysis.py`(신규 `menu-performance/by-meal-type`), `frontend/src/api/client.ts`, `frontend/src/pages/AnalysisPage.tsx`(`MenuQuadrantTab`) |
+| 40.7 | `frontend/src/pages/AnalysisPage.tsx`(`CornerAnalysisTab`) |
+| 40.8 | `backend/app/services/corner_core_layer.py`, `backend/app/api/analysis.py`(신규 `corners/core-layer-summary`), `frontend/src/api/client.ts`, `frontend/src/pages/AnalysisPage.tsx`(`CornerLoyaltySection`) |
+| 40.9 | `frontend/src/pages/AnalysisPage.tsx`(`CornerAnalysisTab`, `CornerLoyaltySection`) |
+
+**검증**: 신규/변경 pytest 전부 통과(백엔드 265개), 프론트 `tsc -b &&
+vite build` 클린, uvicorn+vite 띄운 뒤 Playwright로 실 데이터 기준
+스크린샷 확인(패밀리데이 필터가 홈 차트에서 3색으로 분리되고 필터링
+시 정확히 그 날짜만 남음, 히트맵 모든 셀 텍스트 대비 확인, 메뉴별 분석
+끼니 필터 전환, 코너별 분석 범례가 코너명 하나씩만 뜨고 툴팁이 식수/
+만족도를 정확히 구분, 코너 코어층 비교 표에 전체 코너가 한 번에
+나오고(우연히 40.8 버그 수정 전엔 "데이터 없음"이던 메뉴 통제 선호도가
+"43%, 271건 중 117건"으로 실데이터가 나오는 것도 이때 확인됨), 피크타임
+서브속도 코너별/메뉴별 모드 전환 시 코너 선택이 두 섹션에서 일치).

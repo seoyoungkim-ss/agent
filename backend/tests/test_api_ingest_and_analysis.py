@@ -1201,6 +1201,44 @@ def test_division_analysis_classification_filter(client, db_session):
     assert rows[0]["period"] == saturday.isoformat()
 
 
+def test_division_analysis_family_day_classification_filter(client, db_session):
+    from app.services.aggregation import aggregate_daily_stats
+    from app.services.holidays import family_day_of_month
+
+    family_day = family_day_of_month(MONDAY.year, MONDAY.month)
+    assert family_day == MONDAY + dt.timedelta(days=4)  # 2026-07-24(금) — MONDAY가 속한 주와 같은 주
+
+    _ingest_meal_log(client, "E5001", "맛남", company_name="삼성전자", eaten_date=MONDAY)
+    _ingest_meal_log(client, "E5002", "맛남", company_name="삼성전자", eaten_date=family_day)
+    aggregate_daily_stats(db_session, MONDAY)
+    aggregate_daily_stats(db_session, family_day)
+
+    resp = client.get(
+        "/api/analysis/divisions",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": family_day.isoformat(),
+            "classification": "패밀리데이",
+        },
+    )
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["period"] == family_day.isoformat()
+
+    # 패밀리데이는 더는 "평일" 버킷에 안 섞여야 한다
+    weekday_resp = client.get(
+        "/api/analysis/divisions",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": family_day.isoformat(),
+            "classification": "평일",
+        },
+    )
+    weekday_rows = weekday_resp.json()
+    assert len(weekday_rows) == 1
+    assert weekday_rows[0]["period"] == MONDAY.isoformat()
+
+
 def _set_food_vector(db_session, menu_name: str, vector: list[float]):
     from app.models.master import MenuMaster
 
@@ -1488,6 +1526,44 @@ def test_corner_core_layer_menu_pairs_splits_core_and_non_core(client, db_sessio
     assert frozenset({"스테이크", "파스타"}) in non_core_pairs
 
 
+def test_corner_core_layer_summary_compares_all_corners_in_one_call(client):
+    # E1~E3: 한식 코어층(4번 방문, share=1.0). N1~N3: 한식은 1번만(미달),
+    # 양식을 5번 방문(share 5/6)해 양식 코어층.
+    for emp in ["E1", "E2", "E3"]:
+        for day_offset, menu in enumerate(["떡볶이", "짜장면", "떡볶이", "짜장면"]):
+            _ingest_meal_log(
+                client,
+                emp,
+                "맛남",
+                eaten_date=MONDAY + dt.timedelta(days=day_offset),
+                menu_name=menu,
+                corner_name="한식",
+            )
+    for emp in ["N1", "N2", "N3"]:
+        _ingest_meal_log(client, emp, "맛남", eaten_date=MONDAY, menu_name="김치찌개", corner_name="한식")
+        for day_offset, menu in enumerate(["스테이크", "파스타", "스테이크", "파스타", "스테이크"]):
+            _ingest_meal_log(
+                client,
+                emp,
+                "맛남",
+                eaten_date=MONDAY + dt.timedelta(days=day_offset + 1),
+                menu_name=menu,
+                corner_name="양식",
+            )
+
+    resp = client.get(
+        "/api/analysis/corners/core-layer-summary",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=10)).isoformat()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    by_name = {r["corner_name"]: r for r in body}
+    assert by_name["한식"]["core_employee_count"] == 3
+    assert by_name["한식"]["non_core_employee_count"] == 3
+    assert by_name["양식"]["core_employee_count"] == 3
+    assert by_name["양식"]["non_core_employee_count"] == 3
+
+
 def test_corner_core_layer_menu_pairs_excludes_take_out_placeholder_menus(client, db_session):
     # 코너별 분석의 메뉴 쌍에서 "선택형 Take out" 같은 플레이스홀더 메뉴가
     # 계속 나오던 문제 — build_employee_menu_sets에서 걸러야 한다.
@@ -1598,6 +1674,31 @@ def test_corner_core_layer_menu_pairs_includes_menu_controlled_preference(client
     assert resp.status_code == 200
 
     # 4명 중 3명은 한식에서, 1명은 일품에서 공용메뉴를 먹음
+    for i in range(3):
+        _ingest_meal_log(client, f"H{i}", "맛남", eaten_date=MONDAY, menu_name="공용메뉴", corner_name="한식")
+    _ingest_meal_log(client, "I0", "맛남", eaten_date=MONDAY, menu_name="공용메뉴", corner_name="일품")
+
+    from app.models.master import CornerMaster
+
+    corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    resp = client.get(
+        f"/api/analysis/corners/{corner.corner_id}/core-layer-menu-pairs",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=1)).isoformat()},
+    )
+    assert resp.status_code == 200
+    pref = resp.json()["menu_controlled_preference"]
+    assert pref is not None
+    assert pref["contested_occasions"] == 4
+    assert pref["chosen_count"] == 3
+    assert pref["preference_ratio"] == 0.75
+
+
+def test_menu_controlled_preference_detects_contested_menu_without_weekly_menu_plan(client, db_session):
+    # 2026-07 버그 신고: weekly_menu_plan(주간 식단표)이 전혀 없어도 meal_log에
+    # 같은 날 같은 메뉴가 서로 다른 코너에서 실제 취식됐으면 경합으로 잡혀야
+    # 한다 — 이전엔 weekly_menu_plan에만 의존해 "경합 없음"으로 잘못 나왔다.
+    # 이 테스트는 /ingest/weekly-menu를 전혀 호출하지 않는다(의도적).
     for i in range(3):
         _ingest_meal_log(client, f"H{i}", "맛남", eaten_date=MONDAY, menu_name="공용메뉴", corner_name="한식")
     _ingest_meal_log(client, "I0", "맛남", eaten_date=MONDAY, menu_name="공용메뉴", corner_name="일품")
@@ -1858,3 +1959,185 @@ def test_corner_main_menu_by_date_returns_main_menu_only(client):
     assert len(body) == 1
     assert body[0]["menu_name"] == "제육볶음"
     assert body[0]["plan_date"] == MONDAY.isoformat()
+
+
+def test_top_menus_by_headcount_ranks_by_appearance_count(client):
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY, menu_name="제육볶음")
+    _ingest_meal_log(client, "E2", "맛남", eaten_date=MONDAY, menu_name="제육볶음")
+    _ingest_meal_log(client, "E3", "맛남", eaten_date=MONDAY, menu_name="돈까스")
+
+    resp = client.get(
+        "/api/analysis/menus/top-by-headcount",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "top_n": 5},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body[0]["menu_name"] == "제육볶음"
+    assert body[0]["headcount"] == 2
+    assert body[1]["menu_name"] == "돈까스"
+    assert body[1]["headcount"] == 1
+
+
+def test_top_menus_by_headcount_respects_top_n(client):
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY, menu_name="제육볶음")
+    _ingest_meal_log(client, "E2", "맛남", eaten_date=MONDAY, menu_name="돈까스")
+
+    resp = client.get(
+        "/api/analysis/menus/top-by-headcount",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "top_n": 1},
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+def test_top_menus_by_headcount_outside_period_returns_empty(client):
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY, menu_name="제육볶음")
+
+    resp = client.get(
+        "/api/analysis/menus/top-by-headcount",
+        params={
+            "period_start": (MONDAY - dt.timedelta(days=30)).isoformat(),
+            "period_end": (MONDAY - dt.timedelta(days=1)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_congestion_forecast_uses_family_day_specific_baseline(client, db_session):
+    from app.models.enums import MealType
+    from app.models.master import CornerMaster
+    from app.models.stats import DailyCornerStats
+    from app.services.holidays import family_day_of_month
+
+    resp = client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                {
+                    "plan_date": MONDAY.isoformat(),
+                    "meal_type": "중식",
+                    "corner_name": "한식",
+                    "menu_name": "제육볶음",
+                    "menu_role": "메인",
+                    "source_row_raw": "제육볶음",
+                }
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    # 평일 이력: 낮은 식수(10명) 8회
+    for i in range(1, 9):
+        db_session.add(
+            DailyCornerStats(
+                stat_date=MONDAY - dt.timedelta(days=i),
+                corner_id=corner.corner_id,
+                meal_type=MealType.LUNCH,
+                headcount=10,
+                is_holiday=False,
+            )
+        )
+    # 패밀리데이 이력: 과거 8개월치, 뚜렷이 다른 식수(200명)
+    year, month = MONDAY.year, MONDAY.month
+    for _ in range(8):
+        month -= 1
+        if month == 0:
+            month, year = 12, year - 1
+        db_session.add(
+            DailyCornerStats(
+                stat_date=family_day_of_month(year, month),
+                corner_id=corner.corner_id,
+                meal_type=MealType.LUNCH,
+                headcount=200,
+                is_holiday=False,
+            )
+        )
+    db_session.commit()
+
+    target_family_day = family_day_of_month(MONDAY.year, MONDAY.month)  # 2026-07-24
+    resp = client.get(
+        "/api/simulation/congestion-forecast",
+        params={"target_date": target_family_day.isoformat(), "meal_type": "중식"},
+    )
+    assert resp.status_code == 200
+    corner_row = next(c for c in resp.json()["corners"] if c["corner_name"] == "한식")
+    # 패밀리데이 이력(200명)만 baseline에 반영되고 평일 이력(10명)과 안 섞여야 한다
+    assert corner_row["predicted_headcount"] == pytest.approx(200.0, abs=0.5)
+
+
+def test_what_if_reports_family_day_classification(client):
+    from app.services.holidays import family_day_of_month
+
+    target_family_day = family_day_of_month(MONDAY.year, MONDAY.month)
+    resp = client.post(
+        "/api/simulation/what-if",
+        json={"target_date": target_family_day.isoformat(), "meal_type": "중식", "weather": "맑음"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["classification"] == "패밀리데이"
+
+
+def _ingest_meal_log_with_meal_type(client, employee_id, taste, meal_type, menu_name, eaten_date=MONDAY):
+    rows = [
+        {
+            "eaten_at": dt.datetime.combine(eaten_date, dt.time(8, 0, 0)).isoformat(),
+            "employee_id": employee_id,
+            "meal_type": meal_type,
+            "corner_name": "한식",
+            "taste_score": taste,
+            "menu_name": menu_name,
+        }
+    ]
+    resp = client.post("/api/ingest/meal-log", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+
+def test_menu_performance_by_meal_type_filters_to_selected_meal(client):
+    _ingest_meal_log_with_meal_type(client, "E1", "맛남", "조식", "토스트")
+    _ingest_meal_log_with_meal_type(client, "E2", "맛남", "조식", "토스트")
+    _ingest_meal_log_with_meal_type(client, "E3", "맛남", "중식", "제육볶음")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/by-meal-type",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "meal_type": "조식"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    menu_names = {r["menu_name"] for r in body}
+    assert menu_names == {"토스트"}
+    row = next(r for r in body if r["menu_name"] == "토스트")
+    assert row["total_headcount"] == 2
+
+
+def test_menu_performance_by_meal_type_empty_when_no_logs_for_meal(client):
+    _ingest_meal_log_with_meal_type(client, "E1", "맛남", "중식", "제육볶음")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/by-meal-type",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "meal_type": "석식"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_menu_performance_by_meal_type_computes_quadrant_within_meal_type(client):
+    for i in range(6):
+        _ingest_meal_log_with_meal_type(client, f"A{i}", "맛남", "조식", "인기메뉴A")
+    for i in range(2):
+        _ingest_meal_log_with_meal_type(client, f"B{i}", "개선", "조식", "비인기메뉴B")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/by-meal-type",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "meal_type": "조식"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    row_a = next(r for r in body if r["menu_name"] == "인기메뉴A")
+    row_b = next(r for r in body if r["menu_name"] == "비인기메뉴B")
+    assert row_a["total_headcount"] == 6
+    assert row_b["total_headcount"] == 2
+    assert row_a["quadrant"] is not None
+    assert row_b["quadrant"] is not None

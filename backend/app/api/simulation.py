@@ -13,13 +13,15 @@ from app.models.enums import MealType, MenuQuadrant, MenuRole
 from app.models.logs import WeeklyMenuPlan
 from app.models.master import CornerMaster
 from app.models.stats import DailyCornerStats, MenuPerformanceStats
-from app.services.holidays import DayClassification, HolidayService
+from app.services.holidays import DayClassification, HolidayService, is_family_day
 from app.services.menu_throughput import build_corner_daily_peak_share, compute_peak_share_ratio, window_minutes
 from app.services.weekly_menu_prediction import compute_expected_wait_minutes
 
 router = APIRouter(prefix="/simulation", tags=["simulation"])
 
-_HISTORY_WINDOW = 8  # 최근 같은 분류(평일/휴일)·식사구분 N회 평균을 baseline으로 사용
+_HISTORY_WINDOW = 8  # 최근 같은 분류(평일/휴일/패밀리데이)·식사구분 N회 평균을 baseline으로 사용
+_WEEKDAY_HISTORY_SCAN_LIMIT = _HISTORY_WINDOW * 4  # 평일 풀에서 패밀리데이를 걸러내야 해서 조금 더 넉넉히 조회
+_FAMILY_DAY_HISTORY_SCAN_LIMIT = 400  # 패밀리데이는 월 1회뿐이라 _HISTORY_WINDOW개를 모으려면 훨씬 넓게 훑어야 함
 _PEAK_SHARE_WINDOW_DAYS = 60  # peak_share_ratio 실측용 조회 기간(meal_log 날짜 범위)
 
 # PRD 7.1 신메뉴 배수의 v0 임의값(기존 1.15)을, 이미 성과 데이터가 있는 계획 메뉴는
@@ -115,18 +117,49 @@ class WhatIfRequest(BaseModel):
     has_company_event: bool = False
 
 
-def _baseline_headcount(db: Session, corner_id: int, meal_type: MealType, is_holiday: bool) -> float:
-    history = (
+def _fetch_classification_history(
+    db: Session, corner_id: int, meal_type: MealType, classification: DayClassification
+) -> list[DailyCornerStats]:
+    """최근 같은 분류(평일/주말+공휴일/패밀리데이)의 daily_corner_stats 최대 _HISTORY_WINDOW개.
+
+    is_holiday 컬럼은 boolean이라 패밀리데이를 구분 못한다 — "평일"/"패밀리데이"
+    둘 다 is_holiday=False 풀에서 넉넉히 가져온 뒤 Python에서 is_family_day로
+    골라낸다(패밀리데이는 월 1회뿐이라 스캔 범위를 훨씬 넓게 잡음, 평일은
+    패밀리데이만 제외하면 되니 조금만 더 넓게 잡음).
+    """
+    if classification == DayClassification.HOLIDAY:
+        return (
+            db.query(DailyCornerStats)
+            .filter(
+                DailyCornerStats.corner_id == corner_id,
+                DailyCornerStats.meal_type == meal_type,
+                DailyCornerStats.is_holiday.is_(True),
+            )
+            .order_by(DailyCornerStats.stat_date.desc())
+            .limit(_HISTORY_WINDOW)
+            .all()
+        )
+
+    is_family = classification == DayClassification.FAMILY_DAY
+    scan_limit = _FAMILY_DAY_HISTORY_SCAN_LIMIT if is_family else _WEEKDAY_HISTORY_SCAN_LIMIT
+    candidates = (
         db.query(DailyCornerStats)
         .filter(
             DailyCornerStats.corner_id == corner_id,
             DailyCornerStats.meal_type == meal_type,
-            DailyCornerStats.is_holiday.is_(is_holiday),
+            DailyCornerStats.is_holiday.is_(False),
         )
         .order_by(DailyCornerStats.stat_date.desc())
-        .limit(_HISTORY_WINDOW)
+        .limit(scan_limit)
         .all()
     )
+    if is_family:
+        return [h for h in candidates if is_family_day(h.stat_date)][:_HISTORY_WINDOW]
+    return [h for h in candidates if not is_family_day(h.stat_date)][:_HISTORY_WINDOW]
+
+
+def _baseline_headcount(db: Session, corner_id: int, meal_type: MealType, classification: DayClassification) -> float:
+    history = _fetch_classification_history(db, corner_id, meal_type, classification)
     return statistics.fmean([h.headcount for h in history]) if history else 0.0
 
 
@@ -139,7 +172,6 @@ def what_if(payload: WhatIfRequest, db: Session = Depends(get_db)):
     """
     holiday_svc = HolidayService(db)
     classification = holiday_svc.classify(payload.target_date)
-    is_holiday = classification == DayClassification.HOLIDAY
 
     planned_menu_quadrant: MenuQuadrant | None = None
     if payload.planned_menu_id is not None:
@@ -154,7 +186,7 @@ def what_if(payload: WhatIfRequest, db: Session = Depends(get_db)):
     corners = db.query(CornerMaster).all()
     results = []
     for corner in corners:
-        baseline = _baseline_headcount(db, corner.corner_id, payload.meal_type, is_holiday)
+        baseline = _baseline_headcount(db, corner.corner_id, payload.meal_type, classification)
         multiplier = _WEATHER_MULTIPLIER[payload.weather]
         if payload.has_company_event:
             multiplier *= 0.90  # 사내 행사가 있으면 카페테리아 이용이 다소 줄어든다는 가정(v0)
@@ -190,7 +222,7 @@ def congestion_forecast(target_date: dt.date, meal_type: MealType, db: Session =
     구성했다. 전용 최적화 로직은 후속 고도화 대상이다.
     """
     holiday_svc = HolidayService(db)
-    is_holiday = holiday_svc.is_holiday(target_date)
+    classification = holiday_svc.classify(target_date)
     corners = db.query(CornerMaster).all()
     settings = get_settings()
     peak_window_minutes = window_minutes(settings.peak_time_start, settings.peak_time_end)
@@ -202,17 +234,7 @@ def congestion_forecast(target_date: dt.date, meal_type: MealType, db: Session =
 
     forecasts = []
     for corner in corners:
-        history = (
-            db.query(DailyCornerStats)
-            .filter(
-                DailyCornerStats.corner_id == corner.corner_id,
-                DailyCornerStats.meal_type == meal_type,
-                DailyCornerStats.is_holiday.is_(is_holiday),
-            )
-            .order_by(DailyCornerStats.stat_date.desc())
-            .limit(_HISTORY_WINDOW)
-            .all()
-        )
+        history = _fetch_classification_history(db, corner.corner_id, meal_type, classification)
         baseline = statistics.fmean([h.headcount for h in history]) if history else 0.0
 
         planned_menu_id = _planned_main_menu_id(db, corner.corner_id, meal_type, target_date)

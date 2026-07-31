@@ -320,7 +320,16 @@ async def recompute_voe_clusters(period: dt.date, db: Session = Depends(get_db))
     """
     settings = get_settings()
     client = InternalLLMClient(settings)
-    clusters_created = await cluster_monthly_voe(db, period.replace(day=1), client)
+    try:
+        clusters_created = await cluster_monthly_voe(db, period.replace(day=1), client)
+    except Exception as exc:
+        # 이 경로는 사내 LLM 임베딩 게이트웨이 호출을 포함해 외부 의존성이
+        # 많다 — 원인 불명 500 대신 어떤 예외였는지 detail에 남겨 디버깅
+        # 가능하게 한다(2026-07, 500 에러 신고 조사 중 추가).
+        raise HTTPException(
+            status_code=502,
+            detail=f"VOE 클러스터링 실패(사내 LLM 임베딩/응답 오류 가능성): {exc}",
+        ) from exc
     return {"clusters_created": clusters_created}
 
 

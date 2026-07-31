@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.models.enums import FoodVectorSource, MenuRole
+from app.models.enums import TASTE_SCORE_POINTS, FoodVectorSource, MealType, MenuRole
 from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import (
@@ -33,9 +33,15 @@ from app.services.food_vector import (
     describe_average_bias,
 )
 from app.services.food_vector_tagging import run_llm_food_vector_tagging
-from app.services.holidays import DayClassification
+from app.services.holidays import DayClassification, family_day_dates_in_range
 from app.services.llm_client import InternalLLMClient
-from app.services.master_data import TAKE_OUT_CORNER_NAME
+from app.services.master_data import PLACEHOLDER_MENU_NAMES, TAKE_OUT_CORNER_NAME
+from app.services.menu_performance import (
+    classify_menu_quadrant,
+    compute_menu_frequency,
+    compute_menu_score,
+    compute_share_of_traffic,
+)
 from app.services.menu_affinity import (
     build_employee_menu_sets,
     compute_menu_affinity,
@@ -100,22 +106,41 @@ def _corner_id_by_menu_from_meal_log(
     return corner_id_by_menu
 
 
+def _apply_classification_filter(query, stat_date_col, is_holiday_col, classification, period_start, period_end):
+    """평일/주말+공휴일/패밀리데이 공통 필터.
+
+    is_holiday 컬럼은 boolean이라 3단계를 표현 못한다 — 패밀리데이는 기간 내
+    날짜를 계산(family_day_dates_in_range)해 stat_date IN/NOT IN으로 거른다.
+    "평일" 필터에서는 패밀리데이 날짜를 제외해 더는 평일 버킷에 안 섞이게 한다.
+    """
+    if classification == DayClassification.WEEKDAY.value:
+        query = query.filter(is_holiday_col.is_(False))
+        family_dates = family_day_dates_in_range(period_start, period_end)
+        if family_dates:
+            query = query.filter(stat_date_col.notin_(family_dates))
+    elif classification == DayClassification.HOLIDAY.value:
+        query = query.filter(is_holiday_col.is_(True))
+    elif classification == DayClassification.FAMILY_DAY.value:
+        family_dates = family_day_dates_in_range(period_start, period_end)
+        query = query.filter(stat_date_col.in_(family_dates)) if family_dates else query.filter(False)
+    return query
+
+
 @router.get("/divisions")
 def division_analysis(
     period_start: dt.date,
     period_end: dt.date,
     granularity: Literal["daily", "weekly", "monthly"] = "daily",
-    classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
+    classification: str | None = Query(default=None, description="평일 | 주말+공휴일 | 패밀리데이"),
     db: Session = Depends(get_db),
 ):
     """PRD 6.1: 본사/계열사/기타 구분 일간/주간/월간 식수."""
     query = db.query(DailyDivisionStats).filter(
         DailyDivisionStats.stat_date.between(period_start, period_end)
     )
-    if classification == DayClassification.WEEKDAY.value:
-        query = query.filter(DailyDivisionStats.is_holiday.is_(False))
-    elif classification == DayClassification.HOLIDAY.value:
-        query = query.filter(DailyDivisionStats.is_holiday.is_(True))
+    query = _apply_classification_filter(
+        query, DailyDivisionStats.stat_date, DailyDivisionStats.is_holiday, classification, period_start, period_end
+    )
 
     totals: dict[tuple[str, str], int] = {}
     for row in query.all():
@@ -132,10 +157,9 @@ def _load_corner_stats(
     db: Session, period_start: dt.date, period_end: dt.date, classification: str | None
 ) -> tuple[list[DailyCornerStats], dict[int, CornerMaster]]:
     query = db.query(DailyCornerStats).filter(DailyCornerStats.stat_date.between(period_start, period_end))
-    if classification == DayClassification.WEEKDAY.value:
-        query = query.filter(DailyCornerStats.is_holiday.is_(False))
-    elif classification == DayClassification.HOLIDAY.value:
-        query = query.filter(DailyCornerStats.is_holiday.is_(True))
+    query = _apply_classification_filter(
+        query, DailyCornerStats.stat_date, DailyCornerStats.is_holiday, classification, period_start, period_end
+    )
     corners = {c.corner_id: c for c in db.query(CornerMaster).all()}
     return query.all(), corners
 
@@ -144,7 +168,7 @@ def _load_corner_stats(
 def corner_analysis(
     period_start: dt.date,
     period_end: dt.date,
-    classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
+    classification: str | None = Query(default=None, description="평일 | 주말+공휴일 | 패밀리데이"),
     exclude_take_out: bool = Query(
         default=False, description="Take Out 코너 제외 — 착석 취식이 아니라 혼잡도/만족도 분석에 안 맞음"
     ),
@@ -187,7 +211,7 @@ def corner_analysis_trend(
     period_start: dt.date,
     period_end: dt.date,
     granularity: Literal["daily", "weekly", "monthly"] = "weekly",
-    classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
+    classification: str | None = Query(default=None, description="평일 | 주말+공휴일 | 패밀리데이"),
     exclude_take_out: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
@@ -361,6 +385,44 @@ def corner_core_layer_menu_pairs(
     }
 
 
+@router.get("/corners/core-layer-summary")
+def corner_core_layer_summary(
+    period_start: dt.date,
+    period_end: dt.date,
+    min_visit_count: int = 3,
+    min_share: float = 0.3,
+    db: Session = Depends(get_db),
+):
+    """코너 코어층을 전체 코너 한 번에 비교하는 슬림 뷰.
+
+    `corner_core_layer_menu_pairs`는 코너 하나씩 개별 호출해야 하고 메뉴 쌍
+    계산까지 포함해 무겁다 — 비교 목적으로는 코어/유동 인원 수만 있으면
+    되므로, `build_employee_corner_counts`(전체 코너를 이미 한 번에 스캔함)
+    를 한 번만 호출한 뒤 코너별로 `classify_corner_core_layer`만 루프 돈다
+    (메뉴 쌍 계산 생략).
+    """
+    corners = db.query(CornerMaster).all()
+    employee_corner_counts = build_employee_corner_counts(db, period_start, period_end)
+    total_employees = len(employee_corner_counts)
+
+    result = []
+    for corner in corners:
+        core_results = classify_corner_core_layer(
+            employee_corner_counts, corner.corner_id, min_visit_count=min_visit_count, min_share=min_share
+        )
+        core_count = len(core_results)
+        result.append(
+            {
+                "corner_id": corner.corner_id,
+                "corner_name": corner.corner_name,
+                "core_employee_count": core_count,
+                "non_core_employee_count": total_employees - core_count,
+            }
+        )
+    result.sort(key=lambda r: r["core_employee_count"], reverse=True)
+    return result
+
+
 @router.get("/corners/{corner_id}/menu-throughput")
 def corner_menu_throughput(
     corner_id: int,
@@ -431,6 +493,150 @@ def menu_performance(period_start: dt.date, period_end: dt.date, db: Session = D
         }
         for r in rows
     ]
+
+
+@router.get("/menu-performance/by-meal-type")
+def menu_performance_by_meal_type(
+    period_start: dt.date, period_end: dt.date, meal_type: MealType, db: Session = Depends(get_db)
+):
+    """PRD 6.3 확장: 조식/중식/석식별 메뉴 4분면.
+
+    `MenuPerformanceStats`(`/menu-performance`가 읽는 테이블)는 끼니 구분 없이
+    전체를 통합해 사전 recompute한 값이라 끼니별로 나눌 수 없다 — 스키마
+    마이그레이션 없이, `aggregate_menu_performance`(aggregation.py)와 동일한
+    순수함수 체인(compute_menu_score/compute_menu_frequency/compute_share_
+    of_traffic/classify_menu_quadrant)을 재사용하되 `meal_type` 필터를 추가해
+    그 자리에서 계산만 하고 저장하지 않는다(기존 `MenuPerformanceStats`/
+    `/menu-performance`는 그대로 유지, 하위호환). 수요/만족도 중앙값 기준도
+    그 meal_type 내에서 다시 계산한다 — 끼니마다 분포가 다르기 때문.
+    """
+    settings = get_settings()
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+
+    excluded_menu_ids = {
+        menu_id
+        for (menu_id,) in db.query(MenuMaster.menu_id).filter(MenuMaster.menu_name.in_(PLACEHOLDER_MENU_NAMES))
+    }
+    query = db.query(MealLog).filter(
+        MealLog.eaten_at >= period_start_dt,
+        MealLog.eaten_at < period_end_exclusive,
+        MealLog.menu_id.isnot(None),
+        MealLog.meal_type == meal_type,
+    )
+    if excluded_menu_ids:
+        query = query.filter(MealLog.menu_id.notin_(excluded_menu_ids))
+    logs = query.all()
+    if not logs:
+        return []
+
+    total_headcount_all = len(logs)
+    all_scores = [TASTE_SCORE_POINTS[log.taste_score] for log in logs if log.taste_score is not None]
+    global_avg_score = statistics.fmean(all_scores) if all_scores else 3.0
+
+    by_menu: dict[int, list[MealLog]] = {}
+    for log in logs:
+        by_menu.setdefault(log.menu_id, []).append(log)
+
+    prelim: dict[int, dict] = {}
+    for menu_id, rows in by_menu.items():
+        taste_scores = [r.taste_score for r in rows if r.taste_score is not None]
+        score_result = compute_menu_score(
+            taste_scores,
+            global_avg_score=global_avg_score,
+            shrinkage_m=settings.menu_score_shrinkage_m,
+            low_sample_threshold=settings.menu_score_low_sample_threshold,
+        )
+        freq = compute_menu_frequency(
+            [r.eaten_at.date() for r in rows],
+            total_headcount=len(rows),
+            evaluation_count=len(taste_scores),
+        )
+        demand = freq.total_headcount / freq.appearance_count if freq.appearance_count else 0.0
+        prelim[menu_id] = {"score_result": score_result, "freq": freq, "demand": demand}
+
+    demand_values = [v["demand"] for v in prelim.values()]
+    score_values = [
+        v["score_result"].adjusted_score for v in prelim.values() if v["score_result"].adjusted_score is not None
+    ]
+    demand_threshold = statistics.median(demand_values) if demand_values else 0.0
+    score_threshold = statistics.median(score_values) if score_values else global_avg_score
+
+    menus = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
+    corners = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+    corner_id_by_menu = _corner_id_by_menu_from_meal_log(db, period_start, period_end)
+
+    result = []
+    for menu_id, data in prelim.items():
+        score_result = data["score_result"]
+        freq = data["freq"]
+        share = compute_share_of_traffic(freq.total_headcount, total_headcount_all)
+        quadrant = classify_menu_quadrant(
+            demand=data["demand"],
+            satisfaction=score_result.adjusted_score or global_avg_score,
+            demand_threshold=demand_threshold,
+            satisfaction_threshold=score_threshold,
+            evaluation_count=score_result.evaluation_count,
+            low_sample_threshold=settings.menu_score_low_sample_threshold,
+        )
+        result.append(
+            {
+                "menu_id": menu_id,
+                "menu_name": menus.get(menu_id),
+                "corner_name": corners.get(corner_id_by_menu.get(menu_id)),
+                "appearance_count": freq.appearance_count,
+                "total_headcount": freq.total_headcount,
+                "evaluation_count": freq.evaluation_count,
+                "evaluation_rate": freq.evaluation_rate,
+                "raw_score": score_result.raw_score,
+                "adjusted_score": score_result.adjusted_score,
+                "share_of_traffic": share,
+                "quadrant": quadrant.value,
+            }
+        )
+    return result
+
+
+def _top_menu_ids_by_count(menu_ids: list[int], top_n: int) -> list[tuple[int, int]]:
+    """순수함수 — menu_id 목록에서 등장 빈도 상위 top_n개를 (menu_id, count)로 반환."""
+    counts: dict[int, int] = {}
+    for menu_id in menu_ids:
+        counts[menu_id] = counts.get(menu_id, 0) + 1
+    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+
+
+@router.get("/menus/top-by-headcount")
+def top_menus_by_headcount(
+    period_start: dt.date, period_end: dt.date, top_n: int = 10, db: Session = Depends(get_db)
+):
+    """기간 내 취식 건수(식수) 기준 메뉴 순위.
+
+    `menu_performance`/`MenuPerformanceStats`는 사전에 recompute된 정확히
+    일치하는 (period_start, period_end)만 조회 가능해 임의 기간(예: Agent
+    채팅에서 "6월 가장 많이 먹은 메뉴" 같은 즉석 질의)에는 못 쓴다 — 이
+    엔드포인트는 `meal_log`에서 그 자리에서 바로 집계해 임의 기간을 즉시
+    조회한다(저장하지 않음, `aggregate_menu_performance`와 동일하게
+    `PLACEHOLDER_MENU_NAMES` 제외).
+    """
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+
+    excluded_menu_ids = {
+        menu_id
+        for (menu_id,) in db.query(MenuMaster.menu_id).filter(MenuMaster.menu_name.in_(PLACEHOLDER_MENU_NAMES))
+    }
+    query = db.query(MealLog.menu_id).filter(
+        MealLog.eaten_at >= period_start_dt,
+        MealLog.eaten_at < period_end_exclusive,
+        MealLog.menu_id.isnot(None),
+    )
+    if excluded_menu_ids:
+        query = query.filter(MealLog.menu_id.notin_(excluded_menu_ids))
+    menu_ids = [row[0] for row in query.all()]
+
+    top = _top_menu_ids_by_count(menu_ids, top_n)
+    menu_names = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
+    return [{"menu_id": menu_id, "menu_name": menu_names.get(menu_id), "headcount": count} for menu_id, count in top]
 
 
 @router.post("/daily-stats/recompute")

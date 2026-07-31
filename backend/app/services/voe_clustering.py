@@ -48,6 +48,17 @@ async def cluster_monthly_voe(
 
     n_clusters = min(max_clusters, len(comments))
     embeddings = await llm_client.embed(comments)
+    # 사내 LLM 임베딩 API가 응답 개수/차원을 어긋나게 돌려주면 np.array()가
+    # ragged sequence로 알아보기 힘든 예외를 던진다 — 여기서 먼저 검증해
+    # 명확한 원인을 남긴다(2026-07, 500 에러 재현 조사 중 발견한 방어 지점).
+    if len(embeddings) != len(comments):
+        raise ValueError(
+            f"임베딩 개수({len(embeddings)})가 코멘트 개수({len(comments)})와 다릅니다 — "
+            "사내 LLM 임베딩 API 응답을 확인하세요."
+        )
+    embedding_dim = len(embeddings[0]) if embeddings else 0
+    if any(len(e) != embedding_dim for e in embeddings):
+        raise ValueError("사내 LLM 임베딩 API가 반환한 벡터들의 차원이 서로 다릅니다.")
     matrix = np.array(embeddings, dtype=float)
 
     kmeans = KMeans(n_clusters=n_clusters, n_init="auto", random_state=42)
@@ -65,7 +76,14 @@ async def cluster_monthly_voe(
         distances = np.linalg.norm(cluster_vectors - centroid, axis=1)
         representative = cluster_comments[int(np.argmin(distances))]
 
-        cluster_label, keywords = await _summarize_cluster(llm_client, cluster_comments)
+        # 라벨/키워드는 부가 정보라(핵심인 클러스터 배정 자체는 이미 KMeans로
+        # 끝남) 사내 LLM 요약 호출이 실패해도 전체 재계산을 실패시키지 않고
+        # "미분류"로 대체한다 — _summarize_cluster 파싱 실패 시의 기존 기본값
+        # (label = "미분류")과 같은 성격의 폴백을 호출 실패에도 확장한 것.
+        try:
+            cluster_label, keywords = await _summarize_cluster(llm_client, cluster_comments)
+        except Exception:
+            cluster_label, keywords = "미분류", []
 
         db.add(
             MonthlyVoeCluster(
