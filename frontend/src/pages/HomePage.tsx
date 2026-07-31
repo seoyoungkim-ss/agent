@@ -212,6 +212,56 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   const seriesFamilyDay = resolveColor("var(--series-3)");
   const holidayColor = resolveColor("var(--critical)");
   const familyDayColor = resolveColor("var(--series-3)");
+
+  // 패밀리데이는 한 주에 최대 1일뿐이라 "주간 식수 추이"로는 서로 비교가 안 된다
+  // — 패밀리데이를 선택하면 대신 월별로 패밀리데이끼리 식수를 비교하는 별도
+  // 추이를 보여준다(2026-07, division_analysis를 재사용 — 이미 classification=
+  // 패밀리데이+월간 집계를 지원함).
+  const familyDayTrend = useQuery({
+    queryKey: ["family-day-monthly-trend"],
+    queryFn: () =>
+      api.divisionAnalysis({
+        period_start: isoDaysAgo(365),
+        period_end: isoDaysAgo(0),
+        granularity: "monthly",
+        classification: "패밀리데이",
+      }),
+    enabled: classification === "패밀리데이",
+  });
+  const familyDayHeadcountByMonth = new Map<string, number>();
+  for (const row of familyDayTrend.data ?? []) {
+    familyDayHeadcountByMonth.set(row.period, (familyDayHeadcountByMonth.get(row.period) ?? 0) + row.headcount);
+  }
+  const familyDayMonths = [...familyDayHeadcountByMonth.keys()].sort();
+  const familyDayTrendOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 16, top: 16, bottom: 28 },
+    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
+    xAxis: {
+      type: "category",
+      data: familyDayMonths,
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      name: "식수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: [
+      {
+        name: "패밀리데이 식수",
+        type: "line" as const,
+        symbol: "circle",
+        symbolSize: 8,
+        lineStyle: { width: 2, color: seriesFamilyDay },
+        itemStyle: { color: seriesFamilyDay, borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
+        data: familyDayMonths.map((m) => familyDayHeadcountByMonth.get(m) ?? 0),
+      },
+    ],
+  };
   // "주간 식수 추이"/"코너별 주간 식수 추이" 두 차트 전용 — 토요일 토글이 꺼져
   // 있으면 두 차트에서만 토요일을 뺀다(누적 식수 스탯 타일은 영향 없음).
   const chartWeeklyData = showSaturday
@@ -478,6 +528,22 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
             {cornerTrend.data && trendCornersHome.length > 0 && (
               <ReactECharts option={cornerTrendOption} style={{ height: 280 }} />
             )}
+          </div>
+        )}
+        {classification === "패밀리데이" && (
+          <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              월별 패밀리데이 식수 추이 — 패밀리데이는 한 주에 하루뿐이라 평일과 비교하는 대신 지난
+              1년간 패밀리데이끼리 월별로 비교합니다.
+            </p>
+            {familyDayTrend.isLoading && <LoadingState />}
+            {familyDayTrend.isError && <ErrorState error={familyDayTrend.error} />}
+            {familyDayTrend.data && familyDayMonths.length === 0 && (
+              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                최근 1년 내 패밀리데이 식수 데이터가 없습니다.
+              </p>
+            )}
+            {familyDayMonths.length > 0 && <ReactECharts option={familyDayTrendOption} style={{ height: 280 }} />}
           </div>
         )}
       </Card>
