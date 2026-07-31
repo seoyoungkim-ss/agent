@@ -225,6 +225,83 @@ def test_menu_performance_recompute_excludes_take_out_placeholder_menus(client):
     assert "(포장)메디쏠라" not in menu_names
 
 
+def test_menu_performance_loyal_following_overrides_low_demand_to_hidden_gem(client):
+    # "로열티메뉴"는 3번만 나오고 총 식수도 10명뿐이라 수요는 낮지만(대조군
+    # "인기메뉴테스트" 대비), 그 메뉴가 나올 때마다(3번 다) 챙겨 먹는 고정
+    # 고객 2명이 있으면 만족도가 낮아도(전부 "개선") 퇴출후보 대신 숨은강자로
+    # 분류돼야 한다(2026-07 사용자 요청).
+    loyalty_dates = [MONDAY, MONDAY + dt.timedelta(days=7), MONDAY + dt.timedelta(days=14)]
+    for d in loyalty_dates:
+        _ingest_meal_log(client, "EL1", "개선", eaten_date=d, menu_name="로열티메뉴", corner_name="한식")
+        _ingest_meal_log(client, "EL2", "개선", eaten_date=d, menu_name="로열티메뉴", corner_name="한식")
+    # 한 번씩만 찾는 사람들 — 로열티 조건(최소 주문횟수 2회) 미달
+    _ingest_meal_log(client, "EC1", "개선", eaten_date=loyalty_dates[0], menu_name="로열티메뉴", corner_name="한식")
+    _ingest_meal_log(client, "EC2", "개선", eaten_date=loyalty_dates[0], menu_name="로열티메뉴", corner_name="한식")
+    _ingest_meal_log(client, "EC3", "개선", eaten_date=loyalty_dates[1], menu_name="로열티메뉴", corner_name="한식")
+    _ingest_meal_log(client, "EC4", "개선", eaten_date=loyalty_dates[2], menu_name="로열티메뉴", corner_name="한식")
+
+    # 대조군 — 수요를 확실히 높게 만들어 로열티메뉴가 저수요 분면에 들어가게 함
+    for i in range(20):
+        _ingest_meal_log(client, f"EP{i}", "맛남", eaten_date=MONDAY, menu_name="인기메뉴테스트", corner_name="일품")
+
+    period_end = MONDAY + dt.timedelta(days=14)
+    resp = client.post(
+        "/api/analysis/menu-performance/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": period_end.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    resp = client.get(
+        "/api/analysis/menu-performance",
+        params={"period_start": MONDAY.isoformat(), "period_end": period_end.isoformat()},
+    )
+    row = next(r for r in resp.json() if r["menu_name"] == "로열티메뉴")
+    assert row["has_loyal_following"] is True
+    assert row["quadrant"] == "숨은강자"
+
+
+def test_menu_performance_satisfaction_trend_detects_recent_decline(client):
+    # 직전(prior) 30일엔 만족도가 높았다가 최근(recent) 30일엔 뚝 떨어진 메뉴 —
+    # satisfaction_trend가 "하락"으로 잡혀야 한다(2026-07 사용자 요청,
+    # menu_trend_window_days=30 기본값 기준 period_end 앵커).
+    period_end = dt.date(2026, 7, 31)
+    prior_date = period_end - dt.timedelta(days=45)  # 직전 30일 구간 안
+    recent_date = period_end - dt.timedelta(days=10)  # 최근 30일 구간 안
+    period_start = period_end - dt.timedelta(days=89)
+
+    for i in range(10):
+        _ingest_meal_log(client, f"EP{i}", "맛남", eaten_date=prior_date, menu_name="하락메뉴", corner_name="한식")
+    for i in range(10):
+        _ingest_meal_log(client, f"ER{i}", "개선", eaten_date=recent_date, menu_name="하락메뉴", corner_name="한식")
+
+    resp = client.post(
+        "/api/analysis/menu-performance/recompute",
+        params={"period_start": period_start.isoformat(), "period_end": period_end.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    resp = client.get(
+        "/api/analysis/menu-performance",
+        params={"period_start": period_start.isoformat(), "period_end": period_end.isoformat()},
+    )
+    row = next(r for r in resp.json() if r["menu_name"] == "하락메뉴")
+    assert row["satisfaction_trend"] == "하락"
+
+
+def test_menu_performance_by_meal_type_includes_trend_and_loyalty_fields(client):
+    _ingest_meal_log_with_meal_type(client, "E1", "맛남", "조식", "토스트")
+    _ingest_meal_log_with_meal_type(client, "E2", "맛남", "조식", "토스트")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/by-meal-type",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "meal_type": "조식"},
+    )
+    assert resp.status_code == 200
+    row = next(r for r in resp.json() if r["menu_name"] == "토스트")
+    assert row["satisfaction_trend"] in ("상승", "유지", "하락")
+    assert isinstance(row["has_loyal_following"], bool)
+
+
 def test_menu_highlights_detects_rising_menu_and_new_menu_reaction(client):
     _ingest_weekly_menu(client)  # 제육볶음/계란후라이, 한식, MONDAY
 

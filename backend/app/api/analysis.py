@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.models.enums import TASTE_SCORE_POINTS, FoodVectorSource, MealType, MenuRole
+from app.models.enums import TASTE_SCORE_POINTS, FoodVectorSource, MealType, MenuRole, TrendDirection
 from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import (
@@ -19,7 +19,12 @@ from app.models.stats import (
     MenuPerformanceStats,
     TasteCluster,
 )
-from app.services.aggregation import aggregate_daily_stats, aggregate_menu_performance, diagnose_menu_decline
+from app.services.aggregation import (
+    aggregate_daily_stats,
+    aggregate_menu_performance,
+    compute_menu_satisfaction_trends,
+    diagnose_menu_decline,
+)
 from app.services.corner_core_layer import (
     build_employee_corner_counts,
     build_menu_controlled_meal_log_rows,
@@ -37,10 +42,12 @@ from app.services.holidays import DayClassification, family_day_dates_in_range
 from app.services.llm_client import InternalLLMClient
 from app.services.master_data import PLACEHOLDER_MENU_NAMES, TAKE_OUT_CORNER_NAME
 from app.services.menu_performance import (
+    classify_menu_loyalty,
     classify_menu_quadrant,
     compute_menu_frequency,
     compute_menu_score,
     compute_share_of_traffic,
+    compute_trend,
 )
 from app.services.menu_affinity import (
     build_employee_menu_sets,
@@ -504,6 +511,8 @@ def menu_performance(period_start: dt.date, period_end: dt.date, db: Session = D
             "adjusted_score": r.adjusted_score,
             "share_of_traffic": r.share_of_traffic,
             "quadrant": r.quadrant_label.value if r.quadrant_label else None,
+            "satisfaction_trend": r.satisfaction_trend.value if r.satisfaction_trend else None,
+            "has_loyal_following": r.has_loyal_following,
         }
         for r in rows
     ]
@@ -549,8 +558,18 @@ def menu_performance_by_meal_type(
     global_avg_score = statistics.fmean(all_scores) if all_scores else 3.0
 
     by_menu: dict[int, list[MealLog]] = {}
+    employee_menu_counts: dict[str, dict[int, int]] = {}
     for log in logs:
         by_menu.setdefault(log.menu_id, []).append(log)
+        # 로열티 판정용 — 이미 읽어둔 logs에서 바로 집계(새 쿼리 없음, 2026-07).
+        employee_menu_counts.setdefault(log.employee_id, {})
+        employee_menu_counts[log.employee_id][log.menu_id] = (
+            employee_menu_counts[log.employee_id].get(log.menu_id, 0) + 1
+        )
+
+    menu_trend_by_id = compute_menu_satisfaction_trends(
+        db, menu_ids=list(by_menu.keys()), period_end=period_end, settings=settings, meal_type=meal_type
+    )
 
     prelim: dict[int, dict] = {}
     for menu_id, rows in by_menu.items():
@@ -585,6 +604,15 @@ def menu_performance_by_meal_type(
         score_result = data["score_result"]
         freq = data["freq"]
         share = compute_share_of_traffic(freq.total_headcount, total_headcount_all)
+        loyal_employees = classify_menu_loyalty(
+            employee_menu_counts,
+            menu_id,
+            freq.appearance_count,
+            min_order_count=settings.menu_loyalty_min_order_count,
+            min_order_ratio=settings.menu_loyalty_min_order_ratio,
+        )
+        has_loyal_following = len(loyal_employees) >= settings.menu_loyalty_min_employees
+        satisfaction_trend = menu_trend_by_id.get(menu_id, TrendDirection.FLAT)
         quadrant = classify_menu_quadrant(
             demand=data["demand"],
             satisfaction=score_result.adjusted_score or global_avg_score,
@@ -592,6 +620,8 @@ def menu_performance_by_meal_type(
             satisfaction_threshold=score_threshold,
             evaluation_count=score_result.evaluation_count,
             low_sample_threshold=settings.menu_score_low_sample_threshold,
+            satisfaction_trend=satisfaction_trend,
+            has_loyal_following=has_loyal_following,
         )
         result.append(
             {
@@ -606,6 +636,8 @@ def menu_performance_by_meal_type(
                 "adjusted_score": score_result.adjusted_score,
                 "share_of_traffic": share,
                 "quadrant": quadrant.value,
+                "satisfaction_trend": satisfaction_trend.value,
+                "has_loyal_following": has_loyal_following,
             }
         )
     return result

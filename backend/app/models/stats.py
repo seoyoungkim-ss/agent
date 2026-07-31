@@ -3,6 +3,7 @@ import datetime as dt
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     ARRAY,
+    Boolean,
     Date,
     DateTime,
     Enum as SAEnum,
@@ -16,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.models.enums import Division, MealType, MenuQuadrant
+from app.models.enums import Division, MealType, MenuQuadrant, TrendDirection
 from app.services.food_vector import FOOD_VECTOR_DIM
 
 
@@ -147,3 +148,12 @@ class MenuPerformanceStats(Base):
         SAEnum(MenuQuadrant, values_callable=lambda e: [x.value for x in e], native_enum=False),
         nullable=True,
     )
+    # PRD 6.3.4 확장(2026-07): 4분면 분류에 쓰인 최근/직전 N일 만족도 추세 —
+    # 개선시급/퇴출후보가 "아직 기준 이상이지만 하락 중"인 경우도 잡게 됨.
+    satisfaction_trend: Mapped[TrendDirection | None] = mapped_column(
+        SAEnum(TrendDirection, values_callable=lambda e: [x.value for x in e], native_enum=False),
+        nullable=True,
+    )
+    # PRD 6.3.5(2026-07): 수요가 낮아도 그 메뉴가 나올 때마다 챙겨 먹는 고정
+    # 고객이 있으면 True — 4분면 분류에서 퇴출후보 대신 숨은강자로 보정한다.
+    has_loyal_following: Mapped[bool] = mapped_column(Boolean, default=False)

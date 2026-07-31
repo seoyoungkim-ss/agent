@@ -74,3 +74,15 @@ class MenuQuadrant(str, enum.Enum):
     NEEDS_IMPROVEMENT = "개선시급"
     REMOVAL_CANDIDATE = "퇴출후보"
     LOW_SAMPLE = "표본부족"
+
+
+class TrendDirection(str, enum.Enum):
+    """PRD 6.3.3/6.3.4: 만족도/점유율 등 지표의 기간 간 상승·유지·하락 추세.
+
+    menu_performance_stats.satisfaction_trend 컬럼에 저장되므로(2026-07)
+    다른 DB 저장 enum과 같이 이 모듈에 둔다.
+    """
+
+    UP = "상승"
+    FLAT = "유지"
+    DOWN = "하락"

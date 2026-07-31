@@ -140,6 +140,8 @@ export interface CornerMainMenuByDateRow {
   menu_name: string;
 }
 
+export type TrendDirection = "상승" | "유지" | "하락";
+
 export interface MenuPerformanceRow {
   menu_id: number;
   menu_name: string;
@@ -152,6 +154,11 @@ export interface MenuPerformanceRow {
   adjusted_score: number | null;
   share_of_traffic: number | null;
   quadrant: Quadrant | null;
+  // 2026-07: 4분면 분류가 이 두 신호(직전 대비 만족도 추세, 로열티)에도
+  // 의존하게 됨 — classifyQuadrantClient가 백엔드 로직을 그대로 미러링하려면
+  // 슬라이더로 조절 안 되는 이 값들을 서버에서 받아와야 한다.
+  satisfaction_trend: TrendDirection | null;
+  has_loyal_following: boolean;
 }
 
 export type Granularity = "daily" | "weekly" | "monthly";

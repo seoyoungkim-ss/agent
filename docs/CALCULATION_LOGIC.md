@@ -2621,3 +2621,101 @@ avg_taste_score를 함께 반환하므로 새 쿼리 없이 기존 `activePeriod
 붙어 있음을 확인.
 
 **파일 요약**: `frontend/src/pages/AnalysisPage.tsx`(`MenuQuadrantTab`).
+
+## 43. 4분면 라벨 겹침 완화 + 분류 로직 확장(만족도 추세·메뉴 로열티) (2026-07)
+
+42.4에서 라벨을 항상 붙이게 했지만 분면 하나에 점이 몰리면(표본부족 등)
+여전히 겹쳐서 못 읽는다는 재피드백, 그리고 4분면 분류 로직 자체에 대한
+개선 요청 2건 — (1) 개선시급/퇴출후보가 "직전 대비 만족도 하락"도
+반영했으면 함, (2) 식수가 낮아도 그 메뉴만 꾸준히 찾는 고정 고객이 있으면
+퇴출후보로 몰지 말 것.
+
+### 43.1 라벨 겹침 — hideOverlap + 정렬 + 동적 높이
+
+`buildQuadrantScatterOption`(`AnalysisPage.tsx`)의 `labelLayout`에 기존
+`moveOverlap: "shiftY"`와 함께 `hideOverlap: true`를 추가했다 — 밀어내기로
+안 되면 아예 숨겨서(겹쳐서 못 읽는 것보다 일부만 보이는 게 낫다) 가독성을
+확보한다. `hideOverlap`은 데이터 배열 뒤쪽 요소의 라벨을 먼저 숨기므로,
+표본이 더 믿을만한(제공 횟수가 많아 원이 큰) 점의 라벨이 우선 살아남도록
+`appearance_count` 내림차순으로 정렬해 넘긴다. 패널 높이도 320px 고정에서
+`Math.max(280, Math.min(560, 60 + limited.length * 22))`로 항목 수에 따라
+늘어나게 바꿔 점이 많은 분면에 세로 공간을 더 준다.
+
+### 43.2 4분면 분류 — 만족도 추세 + 메뉴 로열티 반영
+
+**핵심 설계 결정(사용자 확인)**: 로열티(고정 고객) 판정 기준은 "그 메뉴가
+나온 횟수 대비 그 사람이 실제로 주문한 비율" — 코너 코어층
+(`corner_core_layer.py::classify_corner_core_layer`)의 "전체 방문 대비
+이 코너 비중" 방식은 메뉴 단위에서는 안 맞는다(메뉴는 코너와 달리 가끔만
+나와 비중이 항상 작게 나옴).
+
+- `TrendDirection` enum을 `app/services/menu_performance.py`에서
+  `app/models/enums.py`로 옮겼다(`menu_performance_stats.satisfaction_trend`
+  컬럼에 저장되므로 다른 DB 저장 enum과 같은 자리에 둠 — `menu_performance.py`
+  는 하위호환을 위해 그대로 재수출).
+- `aggregation.py`의 private `_trend`를 `menu_performance.py::compute_trend`
+  (순수함수)로 공개 이전 — 만족도 추세뿐 아니라 기존 `diagnose_headcount_
+  decline`의 점유율 추세에도 그대로 재사용.
+- 신규 `MenuLoyaltyResult`/`classify_menu_loyalty`(`menu_performance.py`,
+  순수함수) — 코너 코어층과 같은 이중 임계값 구조(절대 주문횟수 AND 비율)
+  지만 분모가 "그 메뉴가 나온 횟수"(`menu_appearance_count`)다. 기본값
+  `min_order_count=2`, `min_order_ratio=0.5`(설정 가능,
+  `config.py::menu_loyalty_min_order_count/ratio`). 이 조건을 만족하는
+  직원이 `menu_loyalty_min_employees`(기본 2)명 이상이어야
+  `has_loyal_following=True`.
+- `classify_menu_quadrant`에 `satisfaction_trend`/`has_loyal_following`
+  키워드 인자 추가(기본값 없음, 호출부가 명시적으로 넘기게 강제):
+  ```python
+  satisfaction_ok = satisfaction >= satisfaction_threshold and satisfaction_trend != TrendDirection.DOWN
+  if high_demand:
+      return POPULAR if satisfaction_ok else NEEDS_IMPROVEMENT
+  if has_loyal_following:
+      return HIDDEN_GEM  # 만족도와 무관하게 우선
+  return HIDDEN_GEM if satisfaction_ok else REMOVAL_CANDIDATE
+  ```
+  만족도가 기준 이상이어도 하락 추세면 "양호"로 인정하지 않아 개선시급/
+  퇴출후보로 조기 경보되고, 로열티 신호는 저수요 분면(퇴출후보 vs
+  숨은강자)에서만 만족도보다 우선한다 — 이미 고수요인 메뉴는 로열티와
+  무관하게 만족도 기준대로 분류된다("식수가 낮아도"라는 사용자 전제가
+  고수요 분면엔 적용되지 않으므로).
+- **만족도 추세 계산**(`aggregation.py::compute_menu_satisfaction_trends`,
+  공개 함수 — `analysis.py::menu_performance_by_meal_type`에서도 재사용):
+  호출부의 `period_start`/`period_end`가 무엇이든 상관없이 항상
+  `period_end` 기준 최근/직전 `menu_trend_window_days`일(기본 30일)을
+  비교한다(패밀리데이처럼 표본이 희소한 경우와 무관하게 항상 같은 기준).
+  두 구간 중 하나라도 평가가 없으면 "유지"로 본다(보수적 기본값, 잘못된
+  하락 판정 방지). 쿼리 1번만 추가(menu_id/taste_score/eaten_at, 두
+  구간을 합친 범위를 한 번에 가져와 파이썬에서 나눔).
+- **로열티 계산**: `employee_menu_counts`(사번별 메뉴별 주문횟수)는 새
+  쿼리 없이 이미 읽어둔 `logs`/`by_menu`에서 바로 집계한다 —
+  `aggregate_menu_performance`/`menu_performance_by_meal_type` 둘 다 이미
+  기간 전체 `MealLog`를 한 번에 읽어두므로 무료로 얻는다.
+- **저장**: `menu_performance_stats`에 `satisfaction_trend`(nullable
+  enum)/`has_loyal_following`(bool, default False) 컬럼 추가(마이그레이션
+  `d6ad762b4b92`) — `quadrant_label`처럼 같은 recompute 시점에 계산해
+  저장해야 프론트가 슬라이더로 기준값을 바꿀 때도 서버 재조회 없이 즉시
+  재분류를 미러링할 수 있다(`classifyQuadrantClient`가 이 두 값을 그대로
+  받아 백엔드와 동일한 분기를 탐).
+- 프론트: 툴팁에 "만족도 추세: 하락"/"고정 고객 있음"을 해당하는 경우만
+  추가로 보여준다.
+
+**검증**: 백엔드 신규 유닛테스트 12건(`compute_trend`, `classify_menu_
+loyalty` 임계값/정렬/빈 배열, `classify_menu_quadrant`의 하락 추세
+다운그레이드 2건 + 로열티 오버라이드 2건) + 통합테스트 3건(`aggregate_
+menu_performance`가 로열티 있는 저수요 메뉴를 실제로 숨은강자로 분류,
+직전/최근 만족도가 뚜렷이 갈리는 메뉴의 `satisfaction_trend`가 "하락"으로
+저장, `menu_performance_by_meal_type` 응답에도 두 필드가 포함) 포함 전체
+279개 통과. 프론트 `tsc -b && vite build` 클린. uvicorn 재시작 후(코드
+변경이 기존 프로세스에 반영 안 됨) 실 데이터로 재계산 → Playwright 확인:
+표본부족 패널(10개 점)에서 라벨이 이전처럼 다 겹치지 않고 일부만 자동
+숨겨져 읽을 수 있음, 실 데이터에 이미 로열티 고객이 있는 메뉴 다수가
+`has_loyal_following=true`로 나옴(예: 짜장면·스테이크는 숨은강자로 유지,
+제육볶음처럼 고수요인 메뉴는 로열티와 무관하게 개선시급 그대로 — 로열티가
+저수요 분면에서만 작동하는 설계가 실데이터에서도 의도대로 동작함을 확인).
+
+**파일 요약**: `backend/app/models/enums.py`, `backend/app/models/stats.py`,
+`backend/alembic/versions/d6ad762b4b92_*.py`(신규), `backend/app/config.py`,
+`backend/app/services/menu_performance.py`, `backend/app/services/
+aggregation.py`, `backend/app/api/analysis.py`, `backend/tests/
+test_menu_performance.py`, `backend/tests/test_api_ingest_and_analysis.py`,
+`frontend/src/api/client.ts`, `frontend/src/pages/AnalysisPage.tsx`.

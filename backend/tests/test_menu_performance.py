@@ -6,10 +6,12 @@ from app.models.enums import MenuQuadrant, TasteScore
 from app.services.menu_performance import (
     DeclineDiagnosis,
     TrendDirection,
+    classify_menu_loyalty,
     classify_menu_quadrant,
     compute_menu_frequency,
     compute_menu_score,
     compute_share_of_traffic,
+    compute_trend,
     diagnose_headcount_decline,
 )
 
@@ -123,6 +125,8 @@ def test_quadrant_popular():
         satisfaction_threshold=3.5,
         evaluation_count=50,
         low_sample_threshold=10,
+        satisfaction_trend=TrendDirection.FLAT,
+        has_loyal_following=False,
     )
     assert q == MenuQuadrant.POPULAR
 
@@ -135,6 +139,8 @@ def test_quadrant_needs_improvement():
         satisfaction_threshold=3.5,
         evaluation_count=50,
         low_sample_threshold=10,
+        satisfaction_trend=TrendDirection.FLAT,
+        has_loyal_following=False,
     )
     assert q == MenuQuadrant.NEEDS_IMPROVEMENT
 
@@ -147,6 +153,8 @@ def test_quadrant_hidden_gem():
         satisfaction_threshold=3.5,
         evaluation_count=50,
         low_sample_threshold=10,
+        satisfaction_trend=TrendDirection.FLAT,
+        has_loyal_following=False,
     )
     assert q == MenuQuadrant.HIDDEN_GEM
 
@@ -159,6 +167,8 @@ def test_quadrant_removal_candidate():
         satisfaction_threshold=3.5,
         evaluation_count=50,
         low_sample_threshold=10,
+        satisfaction_trend=TrendDirection.FLAT,
+        has_loyal_following=False,
     )
     assert q == MenuQuadrant.REMOVAL_CANDIDATE
 
@@ -171,5 +181,109 @@ def test_quadrant_low_sample_overrides_everything():
         satisfaction_threshold=3.5,
         evaluation_count=3,
         low_sample_threshold=10,
+        satisfaction_trend=TrendDirection.FLAT,
+        has_loyal_following=False,
     )
     assert q == MenuQuadrant.LOW_SAMPLE
+
+
+# ---- 6.3.4 확장(2026-07): 만족도 하락 추세 + 로열티 ----
+
+
+def test_compute_trend_up_flat_down():
+    assert compute_trend(3.0, 3.5) == TrendDirection.UP
+    assert compute_trend(3.0, 3.05) == TrendDirection.FLAT
+    assert compute_trend(3.0, 2.5) == TrendDirection.DOWN
+
+
+def test_compute_trend_none_or_zero_previous_is_flat():
+    assert compute_trend(None, 3.0) == TrendDirection.FLAT
+    assert compute_trend(3.0, None) == TrendDirection.FLAT
+    assert compute_trend(0.0, 3.0) == TrendDirection.FLAT
+
+
+def test_quadrant_downgrades_popular_to_needs_improvement_when_satisfaction_declining():
+    # 만족도(4.5)는 기준(3.5) 이상이라 예전엔 인기메뉴였겠지만, 직전 대비
+    # 하락 중이면 개선시급으로 조기 경보한다(2026-07 사용자 요청).
+    q = classify_menu_quadrant(
+        demand=10,
+        satisfaction=4.5,
+        demand_threshold=5,
+        satisfaction_threshold=3.5,
+        evaluation_count=50,
+        low_sample_threshold=10,
+        satisfaction_trend=TrendDirection.DOWN,
+        has_loyal_following=False,
+    )
+    assert q == MenuQuadrant.NEEDS_IMPROVEMENT
+
+
+def test_quadrant_downgrades_hidden_gem_to_removal_candidate_when_satisfaction_declining():
+    q = classify_menu_quadrant(
+        demand=2,
+        satisfaction=4.5,
+        demand_threshold=5,
+        satisfaction_threshold=3.5,
+        evaluation_count=50,
+        low_sample_threshold=10,
+        satisfaction_trend=TrendDirection.DOWN,
+        has_loyal_following=False,
+    )
+    assert q == MenuQuadrant.REMOVAL_CANDIDATE
+
+
+def test_quadrant_loyal_following_overrides_removal_candidate():
+    # 수요가 낮고 만족도도 기준 미만이라 원래는 퇴출후보지만, 그 메뉴가 나올
+    # 때마다 챙겨 먹는 고정 고객이 있으면 숨은강자로 본다(2026-07 사용자 요청).
+    q = classify_menu_quadrant(
+        demand=2,
+        satisfaction=2.0,
+        demand_threshold=5,
+        satisfaction_threshold=3.5,
+        evaluation_count=50,
+        low_sample_threshold=10,
+        satisfaction_trend=TrendDirection.FLAT,
+        has_loyal_following=True,
+    )
+    assert q == MenuQuadrant.HIDDEN_GEM
+
+
+def test_quadrant_loyal_following_does_not_affect_high_demand_branch():
+    # 로열티는 "수요가 낮아도"라는 전제에서만 의미가 있다 — 이미 고수요인
+    # 메뉴는 로열티 여부와 무관하게 만족도 기준대로 개선시급이 나와야 한다.
+    q = classify_menu_quadrant(
+        demand=10,
+        satisfaction=2.0,
+        demand_threshold=5,
+        satisfaction_threshold=3.5,
+        evaluation_count=50,
+        low_sample_threshold=10,
+        satisfaction_trend=TrendDirection.FLAT,
+        has_loyal_following=True,
+    )
+    assert q == MenuQuadrant.NEEDS_IMPROVEMENT
+
+
+def test_classify_menu_loyalty_requires_both_count_and_ratio():
+    counts = {
+        "E1": {100: 4},  # 4/5=0.8 비율 충분하지만 min_order_count=2 이상, 통과
+        "E2": {100: 1},  # 횟수 부족(1<2)
+        "E3": {100: 2, 101: 3},  # 100에 대해 2/5=0.4 비율 미달(min 0.5)
+    }
+    results = classify_menu_loyalty(counts, menu_id=100, menu_appearance_count=5)
+    assert [r.employee_id for r in results] == ["E1"]
+    assert results[0].order_ratio == pytest.approx(0.8)
+
+
+def test_classify_menu_loyalty_zero_appearance_returns_empty():
+    assert classify_menu_loyalty({"E1": {100: 5}}, menu_id=100, menu_appearance_count=0) == []
+
+
+def test_classify_menu_loyalty_sorts_by_ratio_then_count_desc():
+    counts = {
+        "E1": {100: 2},  # 2/4 = 0.5
+        "E2": {100: 4},  # 4/4 = 1.0
+        "E3": {100: 3},  # 3/4 = 0.75
+    }
+    results = classify_menu_loyalty(counts, menu_id=100, menu_appearance_count=4, min_order_ratio=0.5)
+    assert [r.employee_id for r in results] == ["E2", "E3", "E1"]

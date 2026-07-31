@@ -13,6 +13,7 @@ import {
   type MenuPairRow,
   type MenuPerformanceRow,
   type PredictedNumbersRow,
+  type TrendDirection,
   type WeeklyMenuPlanItem,
   type WeeklyMenuSlot,
 } from "../api/client";
@@ -1472,22 +1473,24 @@ type MenuQuadrantMetrics = MenuPerformanceRow & {
 };
 
 // 백엔드 classify_menu_quadrant(app/services/menu_performance.py)와 동일한 규칙을
-// 프론트에서 재현한다 — 표본부족 판정(evaluation_count 기준)은 조절 대상이
-// 아니므로 서버가 내려준 값을 그대로 쓰고, 수요/만족도 기준값만 화면에서 바꾼다.
+// 프론트에서 재현한다 — 표본부족 판정(evaluation_count 기준)과 만족도 추세/
+// 로열티(satisfactionTrend/hasLoyalFollowing, 2026-07)는 슬라이더로 조절할 수
+// 없는 서버 계산값이라 그대로 받아 쓰고, 수요/만족도 기준값만 화면에서 바꾼다.
 function classifyQuadrantClient(
   demand: number,
   satisfaction: number,
   isLowSample: boolean,
   demandThreshold: number,
   scoreThreshold: number,
+  satisfactionTrend: TrendDirection | null,
+  hasLoyalFollowing: boolean,
 ): string {
   if (isLowSample) return "표본부족";
   const highDemand = demand >= demandThreshold;
-  const highSatisfaction = satisfaction >= scoreThreshold;
-  if (highDemand && highSatisfaction) return "인기메뉴";
-  if (highDemand && !highSatisfaction) return "개선시급";
-  if (!highDemand && highSatisfaction) return "숨은강자";
-  return "퇴출후보";
+  const satisfactionOk = satisfaction >= scoreThreshold && satisfactionTrend !== "하락";
+  if (highDemand) return satisfactionOk ? "인기메뉴" : "개선시급";
+  if (hasLoyalFollowing) return "숨은강자";
+  return satisfactionOk ? "숨은강자" : "퇴출후보";
 }
 
 const QUADRANT_LIMIT_OPTIONS: { label: string; value: "5" | "10" | "20" | "all" }[] = [
@@ -1501,20 +1504,27 @@ const QUADRANT_LIMIT_OPTIONS: { label: string; value: "5" | "10" | "20" | "all" 
 // 분면 하나당 항목 수가 적어 점끼리 겹칠 일이 크게 줄어든다 — 점(산점도)
 // 옆에 "메뉴명 (코너명)" 라벨을 항상 붙여서(2026-07, 같은 메뉴명이 여러
 // 코너에서 나올 수 있어 코너명까지 표기해야 구분됨) 어떤 점인지 바로 알 수
-// 있게 한다. 그래도 두 점이 너무 가까우면 라벨이 겹칠 수 있어 labelLayout
-// (moveOverlap)으로 세로로 살짝 밀어낸다.
+// 있게 한다. 그래도 점이 많으면 라벨이 겹칠 수 있어 labelLayout으로 먼저
+// 세로로 밀어보고(moveOverlap), 그래도 겹치면 아예 숨긴다(hideOverlap —
+// 겹쳐서 글씨를 못 알아보는 것보다 일부만 보이는 게 낫다, 2026-07 피드백).
+// 표본이 더 믿을만한(제공 횟수가 많아 원이 큰) 점의 라벨이 우선 살아남도록
+// appearance_count 내림차순으로 정렬해 넘긴다(hideOverlap은 배열 뒤쪽 요소의
+// 라벨을 먼저 숨김).
 function buildQuadrantScatterOption(
   items: MenuQuadrantMetrics[],
   color: string,
   chartTheme: ReturnType<typeof useChartTheme>,
 ) {
-  const maxAppearance = Math.max(1, ...items.map((r) => r.appearance_count));
-  const data = items.map((r) => {
+  const ordered = [...items].sort((a, b) => b.appearance_count - a.appearance_count);
+  const maxAppearance = Math.max(1, ...ordered.map((r) => r.appearance_count));
+  const data = ordered.map((r) => {
     const isLowAppearance = r.appearance_count < LOW_APPEARANCE_THRESHOLD;
     const label = r.corner_name ? `${r.menu_name} (${r.corner_name})` : r.menu_name;
     return {
       name: label,
       value: [r.demand, r.satisfaction, r.appearance_count],
+      satisfactionTrend: r.satisfaction_trend,
+      hasLoyalFollowing: r.has_loyal_following,
       symbolSize: 8 + Math.sqrt(r.appearance_count / maxAppearance) * 22,
       itemStyle: {
         color,
@@ -1536,8 +1546,24 @@ function buildQuadrantScatterOption(
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 24, top: 16, bottom: 40 },
     tooltip: {
-      formatter: (p: { data: { name: string; value: number[] } }) =>
-        `${p.data.name}<br/>수요: ${p.data.value[0].toFixed(2)}<br/>만족도: ${p.data.value[1].toFixed(2)}<br/>제공 횟수: ${p.data.value[2]}회`,
+      formatter: (p: {
+        data: {
+          name: string;
+          value: number[];
+          satisfactionTrend: TrendDirection | null;
+          hasLoyalFollowing: boolean;
+        };
+      }) => {
+        const lines = [
+          p.data.name,
+          `수요: ${p.data.value[0].toFixed(2)}`,
+          `만족도: ${p.data.value[1].toFixed(2)}`,
+          `제공 횟수: ${p.data.value[2]}회`,
+        ];
+        if (p.data.satisfactionTrend === "하락") lines.push("만족도 추세: 하락");
+        if (p.data.hasLoyalFollowing) lines.push("고정 고객 있음");
+        return lines.join("<br/>");
+      },
     },
     xAxis: {
       type: "value",
@@ -1557,7 +1583,7 @@ function buildQuadrantScatterOption(
       {
         type: "scatter" as const,
         data,
-        labelLayout: { moveOverlap: "shiftY" as const },
+        labelLayout: { moveOverlap: "shiftY" as const, hideOverlap: true },
       },
     ],
   };
@@ -1636,7 +1662,15 @@ function MenuQuadrantTab() {
 
   const classified: MenuQuadrantMetrics[] = metrics.map((r) => ({
     ...r,
-    effectiveQuadrant: classifyQuadrantClient(r.demand, r.satisfaction, r.isLowSample, demandThreshold, scoreThreshold),
+    effectiveQuadrant: classifyQuadrantClient(
+      r.demand,
+      r.satisfaction,
+      r.isLowSample,
+      demandThreshold,
+      scoreThreshold,
+      r.satisfaction_trend,
+      r.has_loyal_following,
+    ),
   }));
   const cornerGroups = groupByCorner(classified);
 
@@ -1686,9 +1720,10 @@ function MenuQuadrantTab() {
         직접 조절할 수 있습니다(표본부족 판정은 평가건수 기준으로 별도 처리되어 조절
         대상이 아닙니다). 분류별로 그래프를 따로 그려 점끼리 겹치는 걸 줄였고, 점 옆에
         "메뉴명 (코너명)"을 표기합니다(흐린 점 = 최근 {LOW_APPEARANCE_THRESHOLD}회
-        미만 제공이라 수요 수치가 우연한 결과로 튈 수 있음, 원 크기는 제공 횟수). 아래
-        범례를 클릭하면 보고 싶은 분류만 골라 볼 수 있고, "표시 개수"로 분류별 표시
-        개수를 조절할 수 있습니다.
+        미만 제공이라 수요 수치가 우연한 결과로 튈 수 있음, 원 크기는 제공 횟수). 점이
+        너무 몰려 라벨이 겹치면 일부는 자동으로 숨겨지는데, 안 보이는 점도 마우스를
+        올리면 툴팁으로 확인할 수 있습니다. 아래 범례를 클릭하면 보고 싶은 분류만 골라
+        볼 수 있고, "표시 개수"로 분류별 표시 개수를 조절할 수 있습니다.
       </p>
       <div className="mb-3">
         <SegmentedControl
@@ -1819,7 +1854,7 @@ function MenuQuadrantTab() {
                 ) : (
                   <ReactECharts
                     option={buildQuadrantScatterOption(limited, resolveColor(quadrantColor(label)), chartTheme)}
-                    style={{ height: 320 }}
+                    style={{ height: Math.max(280, Math.min(560, 60 + limited.length * 22)) }}
                   />
                 )}
               </div>

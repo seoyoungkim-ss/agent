@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
-from app.models.enums import TASTE_SCORE_POINTS, MenuQuadrant, TasteScore
+from app.models.enums import TASTE_SCORE_POINTS, MenuQuadrant, TasteScore, TrendDirection
 
 # ---------------------------------------------------------------------------
 # 6.3.1 만족도 점수화 및 표본 수 보정
@@ -107,12 +107,6 @@ def compute_menu_frequency(
 # ---------------------------------------------------------------------------
 
 
-class TrendDirection(str, Enum):
-    UP = "상승"
-    FLAT = "유지"
-    DOWN = "하락"
-
-
 class DeclineDiagnosis(str, Enum):
     MENU_SATISFACTION_ISSUE = "메뉴 자체 만족도 이슈"  # 점유율↓ + 만족도↓
     SUBSTITUTION_RISK = "경쟁 메뉴 대체 가능성"  # 점유율↓ + 만족도 유지/상승
@@ -125,6 +119,28 @@ def compute_share_of_traffic(menu_headcount: int, total_headcount: int) -> float
     if total_headcount <= 0:
         return None
     return menu_headcount / total_headcount
+
+
+_DEFAULT_FLAT_TOLERANCE = 0.05  # ±5% 이내 변화는 "유지"로 취급
+
+
+def compute_trend(
+    previous: float | None, current: float | None, *, flat_tolerance: float = _DEFAULT_FLAT_TOLERANCE
+) -> TrendDirection:
+    """순수 함수 — 이전/현재 값(만족도든 점유율이든)을 비교해 상승/유지/하락 판정.
+
+    4분면 분류(classify_menu_quadrant)가 만족도 추세에 직접 의존하게 되어(2026-07)
+    aggregation.py의 private _trend를 이 pure-function 모듈로 옮겼다 — 점유율
+    추세(diagnose_headcount_decline)에도 그대로 재사용한다.
+    """
+    if previous is None or current is None or previous == 0:
+        return TrendDirection.FLAT
+    change = (current - previous) / previous
+    if change <= -flat_tolerance:
+        return TrendDirection.DOWN
+    if change >= flat_tolerance:
+        return TrendDirection.UP
+    return TrendDirection.FLAT
 
 
 def diagnose_headcount_decline(
@@ -144,6 +160,54 @@ def diagnose_headcount_decline(
 
 
 # ---------------------------------------------------------------------------
+# 6.3.5 메뉴 로열티 (그 메뉴가 나올 때마다 챙겨 먹는 고정 고객)
+# ---------------------------------------------------------------------------
+
+# 코너 코어층(corner_core_layer.py::classify_corner_core_layer)은 "전체 방문
+# 대비 이 코너 비중"으로 로열티를 재지만, 메뉴는 코너와 달리 가끔만 나오므로
+# (예: 180일 중 3~5번) 같은 방식을 쓰면 비중이 항상 작게 나와 아무도 로열티로
+# 안 잡힌다 — 대신 "그 메뉴가 나온 횟수 대비 실제로 주문한 비율"로 잰다
+# (2026-07 사용자 결정).
+
+
+@dataclass(frozen=True)
+class MenuLoyaltyResult:
+    employee_id: str
+    menu_order_count: int
+    menu_appearance_count: int
+    order_ratio: float
+
+
+def classify_menu_loyalty(
+    employee_menu_counts: dict[str, dict[int, int]],
+    menu_id: int,
+    menu_appearance_count: int,
+    *,
+    min_order_count: int = 2,
+    min_order_ratio: float = 0.5,
+) -> list[MenuLoyaltyResult]:
+    """순수 함수 — employee_menu_counts는 {사번: {menu_id: 주문횟수}}.
+
+    코너 코어층(classify_corner_core_layer)과 같은 이중 임계값 구조(절대 횟수
+    AND 비율)이지만, 비율의 분모가 "그 사람 전체 식사"가 아니라 "그 메뉴가
+    나온 횟수"다.
+    """
+    if menu_appearance_count <= 0:
+        return []
+    results = []
+    for emp, counts in employee_menu_counts.items():
+        order_count = counts.get(menu_id, 0)
+        if order_count < min_order_count:
+            continue
+        ratio = order_count / menu_appearance_count
+        if ratio < min_order_ratio:
+            continue
+        results.append(MenuLoyaltyResult(emp, order_count, menu_appearance_count, ratio))
+    results.sort(key=lambda r: (r.order_ratio, r.menu_order_count), reverse=True)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # 6.3.4 메뉴 4분면 매트릭스
 # ---------------------------------------------------------------------------
 
@@ -156,22 +220,29 @@ def classify_menu_quadrant(
     satisfaction_threshold: float,
     evaluation_count: int,
     low_sample_threshold: int,
+    satisfaction_trend: TrendDirection,
+    has_loyal_following: bool,
 ) -> MenuQuadrant:
     """PRD 6.3.4.
 
     demand/satisfaction_threshold는 보통 전체 메뉴의 중앙값을 사용한다(호출부 책임).
     표본(evaluation_count)이 부족하면 4분면 판정 대신 LOW_SAMPLE로 별도 표시한다.
+
+    2026-07 확장: (1) 만족도가 기준 이상이어도 직전 대비 하락 중(satisfaction_
+    trend=DOWN)이면 "양호"로 인정하지 않는다 — 개선시급/퇴출후보가 기준선
+    아래로 떨어지기 전에 하락 추세도 조기에 포착하게 한다. (2) 식수(수요)가
+    낮아도 그 메뉴가 나올 때마다 챙겨 먹는 고정 고객이 있으면(has_loyal_
+    following) 퇴출후보로 몰지 않고 숨은강자로 본다 — 이 신호가 만족도보다
+    우선한다.
     """
     if evaluation_count < low_sample_threshold:
         return MenuQuadrant.LOW_SAMPLE
 
     high_demand = demand >= demand_threshold
-    high_satisfaction = satisfaction >= satisfaction_threshold
+    satisfaction_ok = satisfaction >= satisfaction_threshold and satisfaction_trend != TrendDirection.DOWN
 
-    if high_demand and high_satisfaction:
-        return MenuQuadrant.POPULAR
-    if high_demand and not high_satisfaction:
-        return MenuQuadrant.NEEDS_IMPROVEMENT
-    if not high_demand and high_satisfaction:
+    if high_demand:
+        return MenuQuadrant.POPULAR if satisfaction_ok else MenuQuadrant.NEEDS_IMPROVEMENT
+    if has_loyal_following:
         return MenuQuadrant.HIDDEN_GEM
-    return MenuQuadrant.REMOVAL_CANDIDATE
+    return MenuQuadrant.HIDDEN_GEM if satisfaction_ok else MenuQuadrant.REMOVAL_CANDIDATE
