@@ -16,6 +16,26 @@ from sqlalchemy.orm import Session
 from app.models.logs import MealLog
 from app.models.master import MenuMaster
 from app.services.master_data import PLACEHOLDER_MENU_NAMES
+from app.services.taste_profile import cosine_similarity
+
+# food_vector 코사인 유사도가 이 값 이상이면 "자명한 조합"(같은 음식 카테고리끼리,
+# 예: 부대찌개+참치김치찌개)으로 본다 — 사용자가 원한 건 이런 뻔한 조합 말고
+# "부대찌개를 선호하는 사람이 떡볶이도 유의미하게 선호한다" 같은 직관적이지
+# 않은 연관관계라, 화면에서 이 조합들을 하단/별도로 뺄 수 있게 플래그만 계산한다.
+OBVIOUS_PAIR_SIMILARITY_THRESHOLD = 0.85
+
+
+def is_obvious_pair(
+    vector_a: list[float] | None,
+    vector_b: list[float] | None,
+    *,
+    threshold: float = OBVIOUS_PAIR_SIMILARITY_THRESHOLD,
+) -> bool | None:
+    """순수 함수 — 두 메뉴의 food_vector가 비슷할수록(같은 카테고리) 자명한
+    조합으로 본다. 둘 중 하나라도 벡터가 없으면 판단 불가(None)."""
+    if vector_a is None or vector_b is None:
+        return None
+    return cosine_similarity(vector_a, vector_b) >= threshold
 
 
 @dataclass(frozen=True)

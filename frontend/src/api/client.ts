@@ -52,6 +52,12 @@ export interface VoeCluster {
   keywords: string[];
 }
 
+export interface MenuCommentEntry {
+  eaten_at: string;
+  taste_score: string | null;
+  comment: string;
+}
+
 export interface VoeCategoryComment {
   eaten_at: string;
   corner_name: string | null;
@@ -123,6 +129,12 @@ export interface CornerTrendRow {
   avg_peak_throughput_per_min: number | null;
 }
 
+export interface CornerMainMenuByDateRow {
+  corner_id: number;
+  plan_date: string;
+  menu_name: string;
+}
+
 export interface MenuPerformanceRow {
   menu_id: number;
   menu_name: string;
@@ -177,6 +189,7 @@ export interface MenuPairRow {
   lift: number;
   corner_a?: string | null;
   corner_b?: string | null;
+  is_obvious_pair?: boolean | null;
 }
 
 export interface CornerCoreLayerMenuPairsResponse {
@@ -194,6 +207,11 @@ export interface CornerCoreLayerMenuPairsResponse {
     top_pairs: MenuPairRow[];
     cross_corner_pairs: MenuPairRow[];
   };
+  menu_controlled_preference?: {
+    contested_occasions: number;
+    chosen_count: number;
+    preference_ratio: number;
+  } | null;
 }
 
 export interface MenuThroughputRow {
@@ -320,6 +338,7 @@ export interface CongestionForecastRow {
   corner_id: number;
   corner_name: string;
   predicted_headcount: number;
+  expected_peak_headcount: number;
   avg_peak_throughput_per_min: number | null;
   expected_wait_minutes: number | null;
   planned_menu_id: number | null;
@@ -348,6 +367,11 @@ export const api = {
 
   voeClusters: (period: string) => request<VoeCluster[]>(`/dashboard/voe-clusters${qs({ period })}`),
 
+  recomputeVoeClusters: (period: string) =>
+    request<{ clusters_created: number }>(`/dashboard/voe-clusters/recompute${qs({ period })}`, {
+      method: "POST",
+    }),
+
   voeByCategory: (period: string) =>
     request<VoeByCategoryResponse>(`/dashboard/voe-by-category${qs({ period })}`),
 
@@ -355,6 +379,9 @@ export const api = {
     request<{ classified_comments: number }>(`/dashboard/voe-by-category/recompute${qs({ period })}`, {
       method: "POST",
     }),
+
+  menuComments: (menuName: string, limit = 20) =>
+    request<MenuCommentEntry[]>(`/dashboard/menu-comments/${encodeURIComponent(menuName)}${qs({ limit })}`),
 
   menuHighlights: () => request<MenuHighlightsResponse>("/dashboard/menu-highlights"),
 
@@ -375,6 +402,9 @@ export const api = {
     classification?: Classification;
     exclude_take_out?: boolean;
   }) => request<CornerTrendRow[]>(`/analysis/corners/trend${qs(params)}`),
+
+  cornerMainMenuByDate: (params: { period_start: string; period_end: string }) =>
+    request<CornerMainMenuByDateRow[]>(`/analysis/corners/main-menu-by-date${qs(params)}`),
 
   divisionAnalysis: (params: {
     period_start: string;

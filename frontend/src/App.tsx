@@ -3,8 +3,11 @@ import { HomePage } from "./pages/HomePage";
 import { AnalysisPage } from "./pages/AnalysisPage";
 import { SimulationPage } from "./pages/SimulationPage";
 import { ChatPage } from "./pages/ChatPage";
+import { WeeklyMenuVoeDetailPage } from "./pages/WeeklyMenuVoeDetailPage";
 
-type Tab = "home" | "analysis" | "simulation" | "chat";
+// "weekly-voe"는 상단 내비게이션엔 안 보이는 화면 — 홈의 "금주 메뉴 과거 VOE"
+// 카드를 클릭했을 때만 진입한다(뒤로가기 버튼으로 홈에 복귀).
+type Tab = "home" | "analysis" | "simulation" | "chat" | "weekly-voe";
 
 const TABS: { value: Tab; label: string }[] = [
   { value: "home", label: "홈" },
@@ -39,10 +42,11 @@ function App() {
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-6 py-6">
-        {tab === "home" && <HomePage />}
+        {tab === "home" && <HomePage onOpenWeeklyVoe={() => setTab("weekly-voe")} />}
         {tab === "analysis" && <AnalysisPage />}
         {tab === "simulation" && <SimulationPage />}
         {tab === "chat" && <ChatPage />}
+        {tab === "weekly-voe" && <WeeklyMenuVoeDetailPage onBack={() => setTab("home")} />}
       </main>
     </div>
   );

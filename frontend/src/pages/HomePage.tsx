@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
-import { api, type Classification } from "../api/client";
+import { api, type Classification, type CongestionForecastRow } from "../api/client";
 import {
   Button,
   Card,
@@ -30,6 +30,12 @@ function isoDaysAgo(days: number): string {
 }
 
 const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
+
+// 이 3개 코너는 니치 코너(테이크아웃/소규모 별관/다이어트식)라 일반 코너
+// 추이 비교에서 기본으로는 안 보이게 하고, 범례 맨 뒤로 보내 필요할 때만
+// 클릭해서 켜게 한다(analysis.py::corner_analysis의 그린미트 정렬 관례와
+// 같은 취지 — 니치 코너는 항상 뒤로).
+const LOW_PRIORITY_CORNER_NAMES = new Set(["Take Out", "미캠회관(전골)", "그린미트"]);
 
 // x축 날짜를 "MM-DD(요일)"로 보여줘 월~일 순서가 한눈에 보이게 한다.
 function weekdayLabel(dateIso: string): string {
@@ -67,14 +73,13 @@ const CLASSIFICATION_OPTIONS: { label: string; value: Classification | "전체" 
   { label: "주말+공휴일", value: "주말+공휴일" },
 ];
 
-export function HomePage() {
+export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) {
   const [classification, setClassification] = useState<Classification | "전체">("전체");
   const [menuName, setMenuName] = useState("");
   const [searchedMenu, setSearchedMenu] = useState<string | null>(null);
   const [exportStart, setExportStart] = useState(isoDaysAgo(30));
   const [exportEnd, setExportEnd] = useState(isoDaysAgo(0));
   const [selectedMonday, setSelectedMonday] = useState(mondayOf(new Date()));
-  const [selectedVoeCategory, setSelectedVoeCategory] = useState<string | null>(null);
   // 식당은 일요일에 운영하지 않으므로 월~토 6일만 조회한다.
   const saturdayOfSelected = addDays(selectedMonday, 5);
 
@@ -92,15 +97,6 @@ export function HomePage() {
     queryKey: ["menu-history", searchedMenu],
     queryFn: () => api.menuHistory(searchedMenu as string),
     enabled: !!searchedMenu,
-  });
-
-  const voeCategory = useQuery({
-    queryKey: ["voe-by-category", selectedMonday.slice(0, 7)],
-    queryFn: () => api.voeByCategory(`${selectedMonday.slice(0, 7)}-01`),
-  });
-  const recomputeVoeCategory = useMutation({
-    mutationFn: () => api.recomputeVoeByCategory(`${selectedMonday.slice(0, 7)}-01`),
-    onSuccess: () => voeCategory.refetch(),
   });
 
   const cornerSummary = useQuery({
@@ -145,6 +141,40 @@ export function HomePage() {
       api.improvementPoints({ period_start: RECOMPUTE_PERIOD_START, period_end: RECOMPUTE_PERIOD_END }),
   });
 
+  // 오늘 예상 총 식수 / 최고 혼잡 예상 코너 — 기존 혼잡도 예측(congestion-forecast,
+  // 요일별 최근 8회 평균 baseline × 계획 메뉴 인기도 배수)을 재사용한다.
+  const today = isoDaysAgo(0);
+  const congestionForecast = useQuery({
+    queryKey: ["congestion-forecast", today],
+    queryFn: () => api.congestionForecast({ target_date: today, meal_type: "중식" }),
+  });
+  const totalPredictedHeadcount = (congestionForecast.data?.corners ?? []).reduce(
+    (sum, c) => sum + c.predicted_headcount,
+    0,
+  );
+  const topCongestedCorner = (congestionForecast.data?.corners ?? []).reduce<CongestionForecastRow | null>(
+    (max, c) => (max === null || c.expected_peak_headcount > max.expected_peak_headcount ? c : max),
+    null,
+  );
+
+  // 금주 메뉴 과거 VOE — 이번 주 메인메뉴 중 과거 평가 이력(evaluation_count>0)이
+  // 있는 메뉴 수. 이번 주 메뉴 수가 적어(보통 5~15개) 병렬 개별 호출로 v0 구현.
+  const weeklyMenuQuery = useQuery({
+    queryKey: ["weekly-menu-main", selectedMonday, saturdayOfSelected],
+    queryFn: () => api.weeklyMenu({ period_start: selectedMonday, period_end: saturdayOfSelected }),
+  });
+  const weeklyMainMenuNames = [
+    ...new Set((weeklyMenuQuery.data ?? []).map((s) => s.main?.menu_name).filter((n): n is string => !!n)),
+  ];
+  const weeklyVoeHistory = useQuery({
+    queryKey: ["weekly-menu-voe-history", weeklyMainMenuNames.join("|")],
+    queryFn: async () => {
+      const results = await Promise.all(weeklyMainMenuNames.map((name) => api.menuHistory(name)));
+      return weeklyMainMenuNames.filter((_, i) => results[i].some((h) => h.evaluation_count > 0)).length;
+    },
+    enabled: weeklyMainMenuNames.length > 0,
+  });
+
   const totalHeadcount = weekly.data?.reduce((sum, d) => sum + d.headcount, 0) ?? 0;
   const chartTheme = useChartTheme();
   const seriesWeekday = resolveColor("var(--series-1)");
@@ -175,16 +205,14 @@ export function HomePage() {
     },
     series: [
       {
-        type: "bar",
-        barMaxWidth: 28,
-        itemStyle: {
-          borderRadius: [4, 4, 0, 0],
-          color: (params: { dataIndex: number }) => {
-            const d = weekly.data?.[params.dataIndex];
-            return d?.classification === "주말+공휴일" ? seriesHoliday : seriesWeekday;
-          },
-        },
-        data: weekly.data?.map((d) => d.headcount) ?? [],
+        type: "line",
+        symbol: "circle",
+        symbolSize: 8,
+        lineStyle: { width: 2, color: seriesWeekday },
+        data: (weekly.data ?? []).map((d) => ({
+          value: d.headcount,
+          itemStyle: { color: d.classification === "주말+공휴일" ? seriesHoliday : seriesWeekday },
+        })),
       },
     ],
   };
@@ -200,13 +228,25 @@ export function HomePage() {
     if (!trendByCornerHome.has(row.corner_name)) trendByCornerHome.set(row.corner_name, new Map());
     trendByCornerHome.get(row.corner_name)!.set(row.period, row.headcount);
   }
-  const trendCornersHome = (cornerSummary.data ?? []).filter((c) => trendByCornerHome.has(c.corner_name));
+  // 니치 코너(LOW_PRIORITY_CORNER_NAMES)는 범례 맨 뒤로 보내고 기본 숨김 —
+  // 나머지 코너는 기존 순서(corner_analysis 반환 순서) 그대로 유지.
+  const trendCornersHome = [...(cornerSummary.data ?? [])]
+    .filter((c) => trendByCornerHome.has(c.corner_name))
+    .sort((a, b) => Number(LOW_PRIORITY_CORNER_NAMES.has(a.corner_name)) - Number(LOW_PRIORITY_CORNER_NAMES.has(b.corner_name)));
+  const cornerLegendSelected = Object.fromEntries(
+    trendCornersHome.map((c) => [c.corner_name, !LOW_PRIORITY_CORNER_NAMES.has(c.corner_name)]),
+  );
 
   const cornerTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 32, bottom: 28 },
     tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
-    legend: { top: 0, textStyle: { color: chartTheme.text }, data: trendCornersHome.map((c) => c.corner_name) },
+    legend: {
+      top: 0,
+      textStyle: { color: chartTheme.text },
+      data: trendCornersHome.map((c) => c.corner_name),
+      selected: cornerLegendSelected,
+    },
     xAxis: {
       type: "category",
       data: cornerTrendDays,
@@ -273,21 +313,34 @@ export function HomePage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <StatTile label="선택한 주 누적 식수" value={totalHeadcount.toLocaleString()} />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatTile label="선택한 주의 누적 식수" value={totalHeadcount.toLocaleString()} />
         <StatTile
-          label="집계 대상 일수"
-          value={weekly.data?.length ?? 0}
-          sub={classification === "전체" ? "평일 + 주말+공휴일" : classification}
+          label="오늘 예상 총 식수"
+          value={
+            congestionForecast.isLoading ? "…" : Math.round(totalPredictedHeadcount).toLocaleString()
+          }
+          sub="요일별 최근 이력 + 계획 메뉴 인기도 기반"
         />
-        <StatTile label="선택한 달 VOE 코멘트 수" value={voeCategory.data?.total_comments ?? 0} />
+        <StatTile
+          label="최고 혼잡 예상 코너"
+          value={topCongestedCorner?.corner_name ?? "-"}
+          sub={
+            topCongestedCorner
+              ? `예상 피크 식수 ${Math.round(topCongestedCorner.expected_peak_headcount).toLocaleString()}명`
+              : "오늘 데이터 없음"
+          }
+          tone={topCongestedCorner ? "warning" : undefined}
+        />
+        <StatTile
+          label="금주 메뉴 과거 VOE"
+          value={weeklyVoeHistory.isLoading ? "…" : (weeklyVoeHistory.data ?? 0)}
+          sub="클릭하면 메뉴별 상세를 볼 수 있어요"
+          onClick={onOpenWeeklyVoe}
+        />
       </div>
 
-      <Card title="개선 포인트 — 혼잡도 / 만족도 / VOE">
-        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          최근 180일 분석 기준으로 지금 손볼 만한 지점입니다(v0 휴리스틱 — 매 요청 시
-          자동으로 골라 보여줍니다).
-        </p>
+      <Card title="개선 필요 포인트 — 혼잡도 / 만족도 / VOE">
         {improvementPoints.isLoading && <LoadingState />}
         {improvementPoints.isError && <ErrorState error={improvementPoints.error} />}
         {improvementPoints.data && improvementPoints.data.length === 0 && (
@@ -363,79 +416,6 @@ export function HomePage() {
               <ReactECharts option={cornerTrendOption} style={{ height: 280 }} />
             )}
           </div>
-        )}
-      </Card>
-
-      <Card title="월간 VOE 분류 (맛·간·위생·서비스)">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            카테고리를 클릭하면 해당 분류의 코멘트를 볼 수 있습니다. 한 코멘트가 여러 분류에 동시에 잡힐 수
-            있습니다. 매달 새벽에 사내 LLM이 자동으로 분류하며, 이번 달을 바로 반영하려면 재계산하세요.
-          </p>
-          <Button
-            variant="secondary"
-            onClick={() => recomputeVoeCategory.mutate()}
-            disabled={recomputeVoeCategory.isPending}
-          >
-            {recomputeVoeCategory.isPending ? "분류 중..." : "이번 달 재계산"}
-          </Button>
-        </div>
-        {recomputeVoeCategory.isError && <ErrorState error={recomputeVoeCategory.error} />}
-        {voeCategory.isLoading && <LoadingState />}
-        {voeCategory.isError && <ErrorState error={voeCategory.error} />}
-        {voeCategory.data && voeCategory.data.total_comments === 0 && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            이번 달 코멘트가 없습니다.
-          </p>
-        )}
-        {voeCategory.data && voeCategory.data.total_comments > 0 && (
-          <>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-              {voeCategory.data.categories.map((c) => (
-                <button
-                  key={c.category}
-                  onClick={() => setSelectedVoeCategory((cur) => (cur === c.category ? null : c.category))}
-                  className="rounded-md border p-3 text-left transition-colors"
-                  style={{
-                    borderColor: selectedVoeCategory === c.category ? "var(--accent)" : "var(--border)",
-                    background: selectedVoeCategory === c.category ? "var(--surface-2)" : "var(--surface)",
-                  }}
-                >
-                  <div className="text-[13px] font-medium">{c.category}</div>
-                  <div className="mt-1 text-lg font-semibold">{c.count}</div>
-                </button>
-              ))}
-            </div>
-            {selectedVoeCategory && (
-              <div className="mt-4">
-                {(() => {
-                  const selected = voeCategory.data.categories.find((c) => c.category === selectedVoeCategory);
-                  if (!selected || selected.comments.length === 0) {
-                    return (
-                      <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                        해당 분류의 코멘트가 없습니다.
-                      </p>
-                    );
-                  }
-                  return (
-                    <Table
-                      columns={[
-                        { key: "eaten_at", label: "취식일시" },
-                        { key: "corner_name", label: "코너" },
-                        { key: "comment", label: "코멘트" },
-                      ]}
-                      rows={selected.comments.map((c) => ({
-                        eaten_at: c.eaten_at.replace("T", " "),
-                        corner_name: c.corner_name ?? "-",
-                        comment: c.comment,
-                      }))}
-                      rowKey={(r, i) => `${r.eaten_at as string}-${i}`}
-                    />
-                  );
-                })()}
-              </div>
-            )}
-          </>
         )}
       </Card>
 

@@ -7,16 +7,20 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.analysis import _corner_id_by_menu_from_meal_log
+from app.config import get_settings
 from app.db import get_db
 from app.models.enums import MealType, MenuQuadrant, MenuRole
 from app.models.logs import WeeklyMenuPlan
 from app.models.master import CornerMaster
 from app.models.stats import DailyCornerStats, MenuPerformanceStats
 from app.services.holidays import DayClassification, HolidayService
+from app.services.menu_throughput import build_corner_daily_peak_share, compute_peak_share_ratio, window_minutes
+from app.services.weekly_menu_prediction import compute_expected_wait_minutes
 
 router = APIRouter(prefix="/simulation", tags=["simulation"])
 
 _HISTORY_WINDOW = 8  # 최근 같은 분류(평일/휴일)·식사구분 N회 평균을 baseline으로 사용
+_PEAK_SHARE_WINDOW_DAYS = 60  # peak_share_ratio 실측용 조회 기간(meal_log 날짜 범위)
 
 # PRD 7.1 신메뉴 배수의 v0 임의값(기존 1.15)을, 이미 성과 데이터가 있는 계획 메뉴는
 # 4분면(quadrant)에 따라 더 구체적으로 조정한다 — 표본부족(신메뉴라 데이터가 아직
@@ -188,6 +192,13 @@ def congestion_forecast(target_date: dt.date, meal_type: MealType, db: Session =
     holiday_svc = HolidayService(db)
     is_holiday = holiday_svc.is_holiday(target_date)
     corners = db.query(CornerMaster).all()
+    settings = get_settings()
+    peak_window_minutes = window_minutes(settings.peak_time_start, settings.peak_time_end)
+    meal_window_minutes = window_minutes(settings.meal_period_start, settings.meal_period_end)
+    fallback_peak_share_ratio = peak_window_minutes / meal_window_minutes
+
+    peak_share_period_end = target_date - dt.timedelta(days=1)
+    peak_share_period_start = peak_share_period_end - dt.timedelta(days=_PEAK_SHARE_WINDOW_DAYS)
 
     forecasts = []
     for corner in corners:
@@ -214,14 +225,28 @@ def congestion_forecast(target_date: dt.date, meal_type: MealType, db: Session =
 
         throughputs = [h.peak_throughput_per_min for h in history if h.peak_throughput_per_min]
         avg_throughput = statistics.fmean(throughputs) if throughputs else None
-        expected_wait_minutes = (
-            round(predicted_headcount / avg_throughput, 1) if avg_throughput and avg_throughput > 0 else None
+
+        # 혼잡 예상 대기시간 — "예상 식수 전체를 처리하는 데 걸리는 총 시간"이
+        # 아니라 "피크타임 처리 용량을 넘는 초과분만 대기로 본다"(2026-07 재설계,
+        # weekly_menu_prediction.py와 동일 공식/헬퍼 재사용 — 이 엔드포인트만
+        # 옛 공식이 남아있던 걸 여기서 같이 바로잡는다).
+        peak_count, meal_count = build_corner_daily_peak_share(
+            db, corner.corner_id, peak_share_period_start, peak_share_period_end
         )
+        peak_share_ratio = compute_peak_share_ratio(peak_count, meal_count)
+        if peak_share_ratio is None:
+            peak_share_ratio = fallback_peak_share_ratio
+        expected_wait_minutes = compute_expected_wait_minutes(
+            predicted_headcount, avg_throughput, peak_share_ratio, peak_window_minutes
+        )
+        expected_peak_headcount = round(predicted_headcount * peak_share_ratio, 1)
+
         forecasts.append(
             {
                 "corner_id": corner.corner_id,
                 "corner_name": corner.corner_name,
                 "predicted_headcount": round(predicted_headcount, 1),
+                "expected_peak_headcount": expected_peak_headcount,
                 "avg_peak_throughput_per_min": avg_throughput,
                 "expected_wait_minutes": expected_wait_minutes,
                 "planned_menu_id": planned_menu_id,

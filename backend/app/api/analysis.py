@@ -20,7 +20,12 @@ from app.models.stats import (
     TasteCluster,
 )
 from app.services.aggregation import aggregate_daily_stats, aggregate_menu_performance, diagnose_menu_decline
-from app.services.corner_core_layer import build_employee_corner_counts, classify_corner_core_layer
+from app.services.corner_core_layer import (
+    build_employee_corner_counts,
+    build_menu_controlled_meal_log_rows,
+    classify_corner_core_layer,
+    classify_menu_controlled_corner_preference,
+)
 from app.services.food_vector import (
     FOOD_VECTOR_DIMENSIONS,
     FOOD_VECTOR_LABELS_KO,
@@ -35,6 +40,7 @@ from app.services.menu_affinity import (
     build_employee_menu_sets,
     compute_menu_affinity,
     compute_top_menu_pairs,
+    is_obvious_pair,
 )
 from app.services.menu_combination import (
     build_side_combos_for_main_menu,
@@ -216,6 +222,29 @@ def corner_analysis_trend(
     return result
 
 
+@router.get("/corners/main-menu-by-date")
+def corner_main_menu_by_date(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """코너×날짜별 메인메뉴명 — 코너별 분석 서브그래프의 날짜 툴팁에 "그날 뭐
+    나왔는지" 붙이려는 용도(2026-07). weekly_menu_plan은 운영자가 별도 업로드해야
+    해 누락될 수 있어(32절), 없는 날짜/코너는 응답에서 그냥 빠진다(프론트가
+    없는 조합은 메뉴명 없이 표시).
+    """
+    rows = (
+        db.query(WeeklyMenuPlan.corner_id, WeeklyMenuPlan.plan_date, MenuMaster.menu_name)
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .filter(
+            WeeklyMenuPlan.plan_date >= period_start,
+            WeeklyMenuPlan.plan_date <= period_end,
+            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+        )
+        .all()
+    )
+    return [
+        {"corner_id": corner_id, "plan_date": plan_date.isoformat(), "menu_name": menu_name}
+        for corner_id, plan_date, menu_name in rows
+    ]
+
+
 @router.get("/corners/{corner_id}/core-layer-menu-pairs")
 def corner_core_layer_menu_pairs(
     corner_id: int,
@@ -254,6 +283,13 @@ def corner_core_layer_menu_pairs(
     corner_id_by_menu_id = _corner_id_by_menu_from_meal_log(db, period_start, period_end)
     menu_id_by_name = {name: mid for mid, name in db.query(MenuMaster.menu_id, MenuMaster.menu_name).all()}
     corner_name_by_id = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+    # 같은 카테고리 메뉴끼리(예: 부대찌개+참치김치찌개)는 "자명한 조합"으로 표시해
+    # 화면에서 뺄 수 있게 한다 — food_vector 코사인 유사도 기반(menu_affinity.py).
+    food_vector_by_name = {
+        m.menu_name: [float(x) for x in m.food_vector]
+        for m in db.query(MenuMaster).all()
+        if m.food_vector is not None
+    }
 
     def _corner_name_for_menu(menu_name: str) -> str | None:
         menu_id = menu_id_by_name.get(menu_name)
@@ -269,6 +305,9 @@ def corner_core_layer_menu_pairs(
                 "lift": p.lift,
                 "corner_a": _corner_name_for_menu(p.menu_a),
                 "corner_b": _corner_name_for_menu(p.menu_b),
+                "is_obvious_pair": is_obvious_pair(
+                    food_vector_by_name.get(p.menu_a), food_vector_by_name.get(p.menu_b)
+                ),
             }
             for p in pairs
         ]
@@ -283,9 +322,26 @@ def corner_core_layer_menu_pairs(
         cross = [p for p in candidates if p["corner_a"] and p["corner_b"] and p["corner_a"] != p["corner_b"]]
         return cross[:top_n]
 
+    # 코너 충성도 신호 2번째 기준 — 같은 날 같은 메인메뉴가 여러 코너에서 동시
+    # 제공된 경우, 메뉴가 같으니 코너 선택은 순수하게 코너 선호를 반영한다고 볼
+    # 수 있다(PRD, 2026-07). 방문 빈도/비중(위 core_results)과는 다른 신호라
+    # AND로 합치지 않고 별도 지표로 나란히 보여준다.
+    menu_controlled_rows = build_menu_controlled_meal_log_rows(db, period_start, period_end)
+    menu_controlled_preferences = classify_menu_controlled_corner_preference(menu_controlled_rows)
+    this_corner_preference = menu_controlled_preferences.get(corner_id)
+
     return {
         "corner_id": corner_id,
         "corner_name": corner.corner_name,
+        "menu_controlled_preference": (
+            {
+                "contested_occasions": this_corner_preference.contested_occasions,
+                "chosen_count": this_corner_preference.chosen_count,
+                "preference_ratio": round(this_corner_preference.preference_ratio, 3),
+            }
+            if this_corner_preference
+            else None
+        ),
         "core_layer": {
             "employee_count": len(core_employee_ids),
             "min_visit_count": min_visit_count,
@@ -810,4 +866,18 @@ def top_menu_pairs(
     """
     employee_menus = build_employee_menu_sets(db, period_start, period_end)
     pairs = compute_top_menu_pairs(employee_menus, min_co_count=min_co_count, top_n=top_n)
-    return [{"menu_a": p.menu_a, "menu_b": p.menu_b, "co_count": p.co_count, "lift": p.lift} for p in pairs]
+    food_vector_by_name = {
+        m.menu_name: [float(x) for x in m.food_vector]
+        for m in db.query(MenuMaster).all()
+        if m.food_vector is not None
+    }
+    return [
+        {
+            "menu_a": p.menu_a,
+            "menu_b": p.menu_b,
+            "co_count": p.co_count,
+            "lift": p.lift,
+            "is_obvious_pair": is_obvious_pair(food_vector_by_name.get(p.menu_a), food_vector_by_name.get(p.menu_b)),
+        }
+        for p in pairs
+    ]

@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.menu_affinity import compute_menu_affinity, compute_top_menu_pairs
+from app.services.menu_affinity import compute_menu_affinity, compute_top_menu_pairs, is_obvious_pair
 
 
 def test_strong_co_occurrence_has_high_lift():
@@ -135,3 +135,21 @@ def test_top_menu_pairs_lift_matches_formula():
     pair = next(r for r in results if {r.menu_a, r.menu_b} == {"A", "B"})
     # lift(A,B) = co_count * total / (count_A * count_B) = 2 * 4 / (3 * 3)
     assert pair.lift == pytest.approx(2 * 4 / (3 * 3))
+
+
+def test_is_obvious_pair_true_for_near_identical_vectors():
+    # 부대찌개-참치김치찌개처럼 같은 카테고리(둘 다 매운맛/국물 강함)
+    a = [0.9, 0.1, 0.5, 0.2, 0.3, 0.4, 0.3, 0.1, 0.9, 0.3]
+    b = [0.88, 0.12, 0.52, 0.18, 0.31, 0.42, 0.29, 0.1, 0.87, 0.28]
+    assert is_obvious_pair(a, b) is True
+
+
+def test_is_obvious_pair_false_for_different_vectors():
+    a = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    b = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert is_obvious_pair(a, b) is False
+
+
+def test_is_obvious_pair_none_when_vector_missing():
+    assert is_obvious_pair(None, [0.5] * 10) is None
+    assert is_obvious_pair([0.5] * 10, None) is None

@@ -8,7 +8,7 @@ export function Card({ title, children, className }: { title?: string; children:
       style={{ borderColor: "var(--border)", background: "var(--surface)" }}
     >
       {title && (
-        <h3 className="mb-3 text-[13px] font-medium" style={{ color: "var(--ink-secondary)" }}>
+        <h3 className="mb-3 text-[15px] font-semibold" style={{ color: "var(--ink)" }}>
           {title}
         </h3>
       )}
@@ -17,10 +17,42 @@ export function Card({ title, children, className }: { title?: string; children:
   );
 }
 
-export function StatTile({ label, value, sub }: { label: string; value: ReactNode; sub?: string }) {
+const STAT_TILE_TONE_COLOR: Record<string, string> = {
+  good: "var(--good)",
+  warning: "var(--warning)",
+  critical: "var(--critical)",
+};
+
+export function StatTile({
+  label,
+  value,
+  sub,
+  onClick,
+  tone,
+}: {
+  label: string;
+  value: ReactNode;
+  sub?: string;
+  onClick?: () => void;
+  // 핵심 수치가 상태(주의/위험 등)를 나타낼 때만 지정 — 값 텍스트에는 색을 넣지
+  // 않고 라벨 옆 점(dot)에만 싣는다(QuadrantBadge와 동일한 "색은 점에만" 규칙).
+  tone?: "good" | "warning" | "critical";
+}) {
+  const Tag = onClick ? "button" : "div";
+  const toneColor = tone ? STAT_TILE_TONE_COLOR[tone] : undefined;
   return (
-    <div className="rounded-md border p-4" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
-      <div className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+    <Tag
+      className={clsx("w-full rounded-md border p-4 text-left transition-colors", onClick && "hover:border-current")}
+      style={{
+        borderColor: "var(--border)",
+        background: "var(--surface)",
+        cursor: onClick ? "pointer" : undefined,
+        ...(toneColor ? { borderLeftColor: toneColor, borderLeftWidth: 3 } : {}),
+      }}
+      onClick={onClick}
+    >
+      <div className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+        {toneColor && <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: toneColor }} />}
         {label}
       </div>
       <div className="mt-1 text-[28px] font-semibold leading-none" style={{ color: "var(--ink)" }}>
@@ -31,7 +63,7 @@ export function StatTile({ label, value, sub }: { label: string; value: ReactNod
           {sub}
         </div>
       )}
-    </div>
+    </Tag>
   );
 }
 

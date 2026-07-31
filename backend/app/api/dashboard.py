@@ -30,6 +30,7 @@ from app.services.menu_highlights import (
 )
 from app.services.voe_category import OTHER_CATEGORY, VOE_CATEGORIES, classify_voe_categories
 from app.services.voe_category_llm import classify_monthly_voe_via_llm
+from app.services.voe_clustering import cluster_monthly_voe
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -143,6 +144,36 @@ def menu_history(menu_name: str, db: Session = Depends(get_db)):
             "quadrant": s.quadrant_label.value if s.quadrant_label else None,
         }
         for s in stats
+    ]
+
+
+@router.get("/menu-comments/{menu_name}")
+def menu_comments(menu_name: str, limit: int = 20, db: Session = Depends(get_db)):
+    """PRD 5.2: 이번주 메뉴의 과거 VOE 원문 코멘트 — "금주 메뉴 VOE 상세" 화면용.
+
+    menu_history(점수 이력)와 짝을 이룬다 — 점수만으로는 "무슨 내용인지" 알 수
+    없다는 피드백(2026-07, improvement_points의 voe_summary와 같은 문제의식)에
+    따라 원문을 그대로 보여준다.
+    """
+    menu = db.query(MenuMaster).filter_by(menu_name=menu_name).one_or_none()
+    if menu is None:
+        raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다")
+
+    rows = (
+        db.query(MealLog)
+        .filter(MealLog.menu_id == menu.menu_id, MealLog.comment.isnot(None))
+        .order_by(MealLog.eaten_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "eaten_at": r.eaten_at.isoformat(),
+            "taste_score": r.taste_score.value if r.taste_score else None,
+            "comment": r.comment,
+        }
+        for r in rows
+        if r.comment and r.comment.strip()
     ]
 
 
@@ -276,6 +307,21 @@ async def recompute_voe_by_category(period: dt.date, db: Session = Depends(get_d
     client = InternalLLMClient(settings)
     classified = await classify_monthly_voe_via_llm(db, period.replace(day=1), client)
     return {"classified_comments": classified}
+
+
+@router.post("/voe-clusters/recompute")
+async def recompute_voe_clusters(period: dt.date, db: Session = Depends(get_db)):
+    """그 달의 VOE 코멘트를 사내 LLM 임베딩+KMeans로 다시 클러스터링한다.
+
+    매달 새벽 스케줄러(app/scheduler.py)가 지난달치를 자동으로 돌리지만,
+    voe-by-category/recompute와 마찬가지로 이번 달 데이터를 화면에서 바로
+    재계산하고 싶을 때 쓰는 수동 트리거 — 지금까지는 이 엔드포인트가 없어
+    스케줄러 전용이었다(2026-07, "주관식 VOE" 서브탭 신설과 함께 추가).
+    """
+    settings = get_settings()
+    client = InternalLLMClient(settings)
+    clusters_created = await cluster_monthly_voe(db, period.replace(day=1), client)
+    return {"clusters_created": clusters_created}
 
 
 @router.get("/menu-highlights")

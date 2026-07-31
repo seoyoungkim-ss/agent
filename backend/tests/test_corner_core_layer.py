@@ -1,4 +1,6 @@
-from app.services.corner_core_layer import classify_corner_core_layer
+import datetime as dt
+
+from app.services.corner_core_layer import classify_corner_core_layer, classify_menu_controlled_corner_preference
 
 
 def test_meets_visit_count_and_share_is_core_layer():
@@ -43,3 +45,41 @@ def test_results_sorted_by_share_then_visit_count_descending():
     }
     results = classify_corner_core_layer(counts, corner_id=1, min_visit_count=1, min_share=0.1)
     assert [r.employee_id for r in results] == ["E3", "E1", "E2"]
+
+
+def _row(date_str: str, menu_id: int, corner_id: int) -> tuple[dt.date, int, int]:
+    return (dt.date.fromisoformat(date_str), menu_id, corner_id)
+
+
+def test_menu_controlled_preference_computes_ratio_per_corner():
+    # 7/6에 메뉴10이 코너1·코너2에서 동시 제공 — 3명은 코너1, 1명은 코너2 선택
+    rows = [
+        _row("2026-07-06", 10, 1),
+        _row("2026-07-06", 10, 1),
+        _row("2026-07-06", 10, 1),
+        _row("2026-07-06", 10, 2),
+    ]
+    result = classify_menu_controlled_corner_preference(rows)
+    assert result[1].contested_occasions == 4
+    assert result[1].chosen_count == 3
+    assert result[1].preference_ratio == 0.75
+    assert result[2].contested_occasions == 4
+    assert result[2].chosen_count == 1
+    assert result[2].preference_ratio == 0.25
+
+
+def test_menu_controlled_preference_aggregates_across_multiple_occasions():
+    rows = [
+        *([_row("2026-07-06", 10, 1)] * 2),
+        _row("2026-07-06", 10, 2),
+        _row("2026-07-13", 20, 1),
+        *([_row("2026-07-13", 20, 2)] * 3),
+    ]
+    result = classify_menu_controlled_corner_preference(rows)
+    # 코너1: 7/6(3명 중 2명) + 7/13(4명 중 1명) = 7명 중 3명
+    assert result[1].contested_occasions == 7
+    assert result[1].chosen_count == 3
+
+
+def test_menu_controlled_preference_empty_input_returns_empty():
+    assert classify_menu_controlled_corner_preference([]) == {}

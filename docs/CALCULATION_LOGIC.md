@@ -2124,3 +2124,193 @@ prompt`/`_fallback_summary` 패턴 재사용)에 넘겨 1~2문장 요약을 만�
 데이터 기준 스크린샷 확인(일요일 미노출, 슬라이더로 4분면 재분류·정렬·
 필터 동작, 레이더 차트 렌더, VOE 요약 인용구 노출, 다른 코너 조합 섹션
 노출).
+
+## 39. 식당 AX 대시보드 개선 12개 항목 (2026-07)
+
+사용자가 화면을 실사용하며 정리한 대규모 개편 요청 12개를 우선순위 배치
+([1,2,3,4] → [6,7,8] → [5,9] → [10,11] → [12])로 처리했다. 데이터 정의가
+모호한 지점은 사용자가 지정한 기준을 그대로 따랐고, 유일하게 실사용
+판단이 필요했던 4분면 X축 왜곡 문제(39.6)는 사용자에게 직접 확인해 결정
+했다.
+
+### 39.1 홈 요약 카드 4개 교체 + 혼잡도 예측 버그 수정
+
+`simulation.py::congestion_forecast`의 `expected_wait_minutes` 계산이
+`weekly_menu_prediction.py`에서는 이미 고쳐진(피크 초과분만 대기로 보는)
+공식으로 바뀌었는데, 이 엔드포인트만 옛 방식("예상 식수 전체를 처리하는
+총 시간")이 그대로 남아있었다 — 새 카드를 얹는 김에 `compute_expected_
+wait_minutes`/`compute_peak_share_ratio`/`build_corner_daily_peak_share`
+(기존 순수함수·헬퍼)로 교체해 같이 고쳤다. 응답에 `expected_peak_
+headcount = predicted_headcount × peak_share_ratio`(코너별 피크타임 실제
+몰릴 인원)를 신규 필드로 추가 — 홈의 "오늘 예상 총 식수"는 전체 코너
+`predicted_headcount` 합, "최고 혼잡 예상 코너"는 이 값이 최댓값인 코너.
+"금주 메뉴 과거 VOE"는 이번 주 메인메뉴 목록에 대해 프론트에서 `Promise.
+all`로 `menu-history`를 병렬 호출해 이력 있는 메뉴 수를 세는 v0 구현(트래픽
+적은 화면이라 배치 엔드포인트 신설은 과설계로 판단해 보류).
+
+### 39.2~39.4 문구·그래프 형태 변경
+
+"개선 포인트" → "개선 필요 포인트"로 문구 변경 + 내부 로직 설명 문단 삭제
+(39.2). 주간 식수 추이 막대→꺾은선(39.3, 포인트별 색은 `data: {value,
+itemStyle:{color}}[]` 형태로 유지). 코너별 주간 추이는 Take Out/미캠회관
+(전골)/그린미트를 범례 맨 뒤로 재정렬하고 `legend.selected`로 기본 OFF —
+클릭해서 켜야 보임(39.4, 이 프로젝트에서 `legend.selected` 첫 사용 사례).
+
+### 39.5 금주 메뉴 VOE 상세 화면 + 주관식 VOE 서브탭 신설
+
+신규 화면 `WeeklyMenuVoeDetailPage.tsx`(라우팅은 `App.tsx`의 숨은 탭
+`"weekly-voe"` — 네비게이션 바엔 없고 홈 카드 클릭으로만 진입) — 이번 주
+메인메뉴별 아코디언에 좌측 점수 이력(`menu-history`), 우측 코멘트 원문
+(신규 `GET /dashboard/menu-comments/{menu_name}`, `MealLog` 조인)을
+나란히 보여준다.
+
+분석 탭 "주관식 VOE" 서브탭(`VoeAnalysisTab`)엔 기존 홈에 있던 "월간 VOE
+분류"(카테고리 고정, `voe-by-category`)를 그대로 옮기고, **이미 백엔드엔
+다 구현돼 있었지만 어느 화면에도 안 붙어있던 죽은 기능**이던 `voe-
+clusters`(K-means 자유형 클러스터, `MonthlyVoeCluster`)를 새로 연결했다.
+수동 재계산 트리거가 없어(voe-by-category엔 있는데 비대칭) `POST /
+dashboard/voe-clusters/recompute`를 신규 추가. 홈 화면의 "월간 VOE 분류"
+섹션은 제거(1번 카드로 요약 대체).
+
+### 39.6 메뉴별 분석(구 메뉴 4분면) — X축 왜곡을 버블 크기로 시각화
+
+X축(1회 제공당 평균 식수)은 제공 횟수가 적은 메뉴일수록 하루치 우연한
+결과가 평균을 크게 흔든다는 문제가 있었다. 세 가지 방식(임계값 이하 회색
+처리 / 최소 표본 미달 시 숨김 / 버블 크기로 표본수 시각화)을 사용자에게
+제시했고, **버블 크기 방식**으로 확정했다. `MenuQuadrantTab`의
+`scatterData`에서 `symbolSize`를 `appearance_count` 기반 제곱근 스케일로
+바꾸고(`buildMenuPairGraphOption`의 기존 버블 스케일 패턴 재사용), 최소
+표본(최근 3회 미만) 메뉴는 점선 테두리+낮은 불투명도로 추가 구분. 탭
+이름도 "메뉴 4분면" → "메뉴별 분석"으로 변경.
+
+### 39.7~39.8 코너별 분석 — 듀얼축 통합 그래프 + 표 기본 숨김
+
+기존 "누적 식수"/"평균 만족도" 막대 그래프 두 개를 하나의 **월간 기간축
+듀얼축 꺾은선**으로 통합했다(`cornerAnalysisTrend(granularity="monthly")`
+가 이미 코너·월별 `headcount`/`avg_taste_score`를 함께 반환하므로 백엔드
+신규 엔드포인트 없이 프론트 차트 구성만 변경). `yAxis: [{식수}, {만족도,
+min:0,max:5}]`, 코너당 "{코너명} 식수"(`yAxisIndex:0`)/"{코너명} 만족도"
+(`yAxisIndex:1`) 두 시리즈로 나눠 범례 클릭으로 개별 ON/OFF 가능(39.7).
+지표명 "누적 식수" → "월간 식수". 하단 상세 표는 `useState(false)` +
+토글 버튼으로 기본 숨김(39.8).
+
+### 39.9 서브그래프 — 월 주차별 표시 + 메인메뉴 툴팁
+
+"코너별 만족도·피크타임 서브속도 추이" 서브그래프에 `trendGranularity`
+옵션을 `"weekly-of-month"`로 확장 — 월 선택기(`<input type="month">`)로
+고른 달의 `cornerAnalysisTrend(granularity="daily")`를 그대로 받아
+**프론트에서** 날짜를 주차로 그룹핑(`Math.ceil(dayOfMonth/7)`)해 "1주차"~
+"5주차" 라벨을 붙인다 — 백엔드 `granularity` enum에 새 값을 추가하는 대신
+프론트 재집계로 구현해 `_period_bucket`(analysis.py) 등 기존 집계 로직에
+영향이 없게 했다. 그래프 포인트 hover 시 그날의 코너별 메인메뉴를 툴팁에
+추가로 표시하기 위해 신규 `GET /analysis/corners/main-menu-by-date`
+(`weekly_menu_plan`의 MAIN 역할만 코너·날짜별로 매핑해 반환)를 추가하고,
+프론트가 이 맵을 `tooltip.formatter`에서 날짜+코너로 조회해 `(메인:
+메뉴명)`을 덧붙인다.
+
+### 39.10 코너 코어층/메뉴 동반선택쌍 — 두 개의 독립 화면으로 분리
+
+기존엔 코어층(방문 빈도·비중 기준)과 메뉴 동반선택쌍(장바구니 분석)이 한
+Card 안에 섞여 있었다. 사용자 지시대로 목적이 다른 두 분석을 완전히
+분리했다(`AnalysisPage.tsx`의 `CornerLoyaltySection`/
+`MenuPairAnalysisSection`, 이전의 단일 `CornerCoreLayerSection`을 대체).
+
+**코너 코어층(10-1)** — 기존 판정 기준(①방문 횟수·비중이 유의미하게
+높음, `classify_corner_core_layer`)에 신규 기준(②같은 메인메뉴가 여러
+코너에서 동시 제공된 날에도 이 코너를 고르는 패턴)을 **AND로 합치지 않고
+나란히 보여주는 방식**으로 추가했다(AND로 합치면 기존 코어층 정의가
+깨짐). 신규 `corner_core_layer.py::classify_menu_controlled_corner_
+preference(rows)`: 입력은 `(plan_date, menu_id, corner_id)` 튜플 목록 —
+`build_menu_controlled_meal_log_rows(db, period_start, period_end)`(신규
+DB 헬퍼)가 `weekly_menu_plan`에서 같은 (날짜, 메뉴)가 2개 이상 corner_id로
+MAIN 제공된 "경합 상황"을 찾고, 그 조합에 해당하는 `meal_log` 행만
+필터링해 넘긴다. 코너별로 `contested_occasions`(경합 상황에서의 전체
+선택 수)와 `chosen_count`(그 코너가 선택된 수)를 **모든 경합 이벤트에
+걸쳐 분자·분모를 누적**해 집계한다(이벤트 단위 단순 평균이 아니라 참여
+인원 비례 가중 — 참여자가 많은 이벤트가 자연히 더 크게 반영됨).
+`preference_ratio = chosen_count / contested_occasions`를 "메뉴 동일
+상황에서도 이 코너 선택 비율"로 화면에 노출, 경합 상황이 없으면(개발
+DB처럼 표본이 희소하면) "데이터 없음"을 명확히 표시.
+
+**메뉴 동반 선택 쌍(10-2)** — `menu_affinity.py`가 이미 반환하던 `lift`
+기준 정렬 옵션을 프론트에 노출(`sortKey: "co_count"|"lift"`, 기존
+`co_count` 우선 정렬 대신 사용자가 고를 수 있게). "자명한 조합"(예:
+부대찌개-참치김치찌개처럼 같은 카테고리) 판정은 신규 `menu_affinity.py::
+is_obvious_pair(vector_a, vector_b, threshold=0.85)` — 두 메뉴의
+`food_vector`(10차원) 코사인 유사도(`taste_profile.py::cosine_
+similarity` 재사용)가 0.85 이상이면 자명한 조합으로 플래그. 벡터가 없는
+메뉴는 `None`(판정 불가, 화면에서 필터링 대상 아님). API 응답(`/analysis/
+corners/{id}/core-layer-menu-pairs`, `/analysis/menu-pairs/top`)의 각
+페어에 `is_obvious_pair` 필드를 추가하고, 프론트는 기본으로 자명한 조합을
+숨겨(체크박스로 켜야 보임) "부대찌개 선호자가 떡볶이도 유의미하게
+선호한다" 같은 비자명한 연관관계가 lift 순으로 먼저 보이게 한다.
+
+### 39.11 Agent 채팅 데이터 그라운딩
+
+`InternalLLMClient`(`llm_client.py`)는 tool calling을 지원하지 않는 순수
+텍스트 in/out 클라이언트라, "질문을 규칙 기반으로 분류 → 관련 데이터
+사전 조회 → system 메시지로 주입" 방식으로 그라운딩했다(신규
+`backend/app/services/chat_grounding.py`).
+
+- `route_categories(message) -> list[str]`: 순수함수, 키워드 매칭만으로
+  카테고리 목록을 정한다(혼잡/피크/대기→`congestion`, 만족도/평가/점수→
+  `satisfaction`, voe/의견/불만/코멘트/후기→`voe`, 식수/몇명/인원→
+  `headcount`, 신메뉴/새메뉴→`new_menu`). 한 메시지에 여러 카테고리가
+  매칭될 수 있고, 하나도 안 맞으면 빈 리스트.
+- `build_grounded_context(db, user_message) -> str`: 매칭된 카테고리마다
+  전용 포맷터가 **기존 라우트 함수를 그대로 재호출**해서 데이터를 조회한다
+  (새 쿼리 로직을 만들지 않음) — `congestion_forecast`(오늘 중식 피크
+  예상), `corner_analysis`(최근 30일 코너별 만족도), `_compute_voe_by_
+  category`(이번 달 카테고리별 건수+대표 코멘트 최대 2건), `_compute_
+  weekly_summary`(이번 주 일자별 식수), `menu_highlights`(최근 신메뉴
+  반응). 매칭 카테고리가 없으면 기본 종합 요약(최근 7일 식수 상위 3개
+  코너 + 이번 달 VOE 상위 카테고리)으로 대체.
+- 조회 결과는 "이 데이터에 근거해서만 답하고, 없는 내용은 추측하지 말고
+  데이터가 없다고 답하라"는 지시문과 함께 system 메시지로 만들어
+  `payload.messages` 맨 앞에 삽입한다(`chat.py::chat_stream`). LLM
+  호출(`chat_stream`) 자체는 기존과 동일한 스트리밍 프로토콜이라 프론트
+  변경은 없음.
+
+### 39.12 UI 스타일 가이드 일괄 적용
+
+전체 항목 완료 후 마지막에 한 번에 적용(중간에 바꾸면 배치별 diff가
+섞여 리뷰가 어려워짐):
+- `Card` 제목을 `text-[13px] font-medium` → `text-[15px] font-semibold`
+  (색도 `ink-secondary` → `ink`)로 키워, 페이지 대제목(`text-lg font-
+  semibold`)과 섹션 제목의 위계를 더 뚜렷하게 구분.
+- `StatTile`에 optional `tone?: "good"|"warning"|"critical"` prop 추가 —
+  값 텍스트 자체엔 색을 넣지 않고(기존 `QuadrantBadge`와 동일한 "색은
+  점에만 싣는다" 규칙 유지) 라벨 옆 점(dot) + 왼쪽 강조 테두리로만
+  상태를 표시한다. 상태를 실제로 나타내는 지표에만 적용(예: 홈의 "최고
+  혼잡 예상 코너" 카드에 `tone="warning"`) — 모든 StatTile에 임의로
+  씌우지 않음.
+- 분석 탭들의 최상위 컨테이너 spacing이 `space-y-4`로 다른 페이지
+  (홈/시뮬레이션/VOE 상세, `space-y-6`)와 어긋나 있던 것을 통일
+  (`AnalysisPage.tsx`의 `UserAnalysisTab`/`CornerAnalysisTab`/`WeeklyMenuReviewTab`/
+  `VoeAnalysisTab`/`AnalysisPage` 최상위 및 "메뉴별 분석" 탭 묶음 wrapper).
+
+**파일 요약**:
+
+| 항목 | 파일 |
+|---|---|
+| 39.1 | `backend/app/api/simulation.py`, `frontend/src/pages/HomePage.tsx` |
+| 39.2~39.4 | `frontend/src/pages/HomePage.tsx` |
+| 39.5 | `backend/app/api/dashboard.py`, `frontend/src/pages/WeeklyMenuVoeDetailPage.tsx`(신규), `frontend/src/pages/AnalysisPage.tsx`, `frontend/src/App.tsx` |
+| 39.6 | `frontend/src/pages/AnalysisPage.tsx`(`MenuQuadrantTab`) |
+| 39.7, 39.8 | `frontend/src/pages/AnalysisPage.tsx`(`CornerAnalysisTab`) |
+| 39.9 | `backend/app/api/analysis.py`, `frontend/src/pages/AnalysisPage.tsx` |
+| 39.10 | `backend/app/services/corner_core_layer.py`, `backend/app/services/menu_affinity.py`, `backend/app/api/analysis.py`, `frontend/src/pages/AnalysisPage.tsx`, `frontend/src/api/client.ts` |
+| 39.11 | `backend/app/services/chat_grounding.py`(신규), `backend/app/api/chat.py` |
+| 39.12 | `frontend/src/components/ui.tsx`, `frontend/src/pages/HomePage.tsx`, `frontend/src/pages/AnalysisPage.tsx` |
+
+**검증**: 신규/변경 pytest 전부 통과(백엔드 228개), 프론트 `tsc -b &&
+vite build` 클린, uvicorn+vite 띄운 뒤 Playwright로 실 데이터 기준
+스크린샷 확인(홈 카드 4개 + 혼잡 경고 톤, 꺾은선 전환, 범례 기본 OFF,
+4분면 버블 크기, 코너별 듀얼축 통합 그래프, 표 접기/펼치기, VOE 상세
+화면, 주관식 VOE 서브탭, 코어층/동반선택쌍 분리 화면에서 코너 전환·정렬
+토글·자명 조합 필터 동작, Agent 채팅이 200 응답 + system 메시지에 실제
+데이터 주입 확인, 통일된 카드 제목/여백). 구현 도중 `CornerLoyaltySection`의
+`selectedCornerId` 초기값이 `corners` prop이 비어있는 첫 렌더 시점에
+고정되어 버려(부모 쿼리가 비동기로 나중에 채워짐) 코너 선택 상태가
+영원히 `null`로 남는 버그를 Playwright 스크린샷 비교 중 발견 — `useEffect`
+로 `corners`가 채워지면 첫 코너를 선택하도록 동기화해 수정.
