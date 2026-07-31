@@ -1497,23 +1497,47 @@ const QUADRANT_LIMIT_OPTIONS: { label: string; value: "5" | "10" | "20" | "all" 
   { label: "전체", value: "all" },
 ];
 
-// 산점도는 메뉴가 많으면 원끼리 다 겹쳐 어떤 메뉴인지 구분이 안 된다는 피드백(2026-07)
-// — 분면별로 따로 떼어 가로 막대로 그리면 겹칠 일이 없고, y축 자체가 메뉴명이라
-// 옆에 이름이 항상 붙는다. 막대 길이=수요, 막대 끝 라벨=만족도.
-function buildQuadrantBarOption(
+// 분면별로 따로 떼어 그리면(원래 전체를 한 좌표에 겹쳐 그리던 것과 달리)
+// 분면 하나당 항목 수가 적어 점끼리 겹칠 일이 크게 줄어든다 — 점(산점도)
+// 옆에 "메뉴명 (코너명)" 라벨을 항상 붙여서(2026-07, 같은 메뉴명이 여러
+// 코너에서 나올 수 있어 코너명까지 표기해야 구분됨) 어떤 점인지 바로 알 수
+// 있게 한다. 그래도 두 점이 너무 가까우면 라벨이 겹칠 수 있어 labelLayout
+// (moveOverlap)으로 세로로 살짝 밀어낸다.
+function buildQuadrantScatterOption(
   items: MenuQuadrantMetrics[],
   color: string,
   chartTheme: ReturnType<typeof useChartTheme>,
 ) {
-  // ECharts 카테고리 y축은 배열 순서대로 아래→위로 그리므로, 수요가 큰 메뉴를
-  // 맨 위에 두려면 내림차순 정렬 후 뒤집어야 한다.
-  const ordered = [...items].sort((a, b) => b.demand - a.demand).reverse();
+  const maxAppearance = Math.max(1, ...items.map((r) => r.appearance_count));
+  const data = items.map((r) => {
+    const isLowAppearance = r.appearance_count < LOW_APPEARANCE_THRESHOLD;
+    const label = r.corner_name ? `${r.menu_name} (${r.corner_name})` : r.menu_name;
+    return {
+      name: label,
+      value: [r.demand, r.satisfaction, r.appearance_count],
+      symbolSize: 8 + Math.sqrt(r.appearance_count / maxAppearance) * 22,
+      itemStyle: {
+        color,
+        opacity: isLowAppearance ? 0.45 : 0.9,
+        borderColor: isLowAppearance ? resolveColor("var(--ink-muted)") : "transparent",
+        borderWidth: isLowAppearance ? 1.5 : 0,
+        borderType: isLowAppearance ? ("dashed" as const) : ("solid" as const),
+      },
+      label: {
+        show: true,
+        formatter: label,
+        position: "right" as const,
+        color: chartTheme.text,
+        fontSize: 11,
+      },
+    };
+  });
   return {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 140, right: 60, top: 8, bottom: 32 },
+    grid: { left: 48, right: 24, top: 16, bottom: 40 },
     tooltip: {
-      formatter: (p: { data: { menuName: string; demand: number; satisfaction: number; appearance: number } }) =>
-        `${p.data.menuName}<br/>수요: ${p.data.demand.toFixed(2)}<br/>만족도: ${p.data.satisfaction.toFixed(2)}<br/>제공 횟수: ${p.data.appearance}회`,
+      formatter: (p: { data: { name: string; value: number[] } }) =>
+        `${p.data.name}<br/>수요: ${p.data.value[0].toFixed(2)}<br/>만족도: ${p.data.value[1].toFixed(2)}<br/>제공 횟수: ${p.data.value[2]}회`,
     },
     xAxis: {
       type: "value",
@@ -1522,32 +1546,18 @@ function buildQuadrantBarOption(
       splitLine: { lineStyle: { color: chartTheme.grid } },
     },
     yAxis: {
-      type: "category",
-      data: ordered.map((r) => r.menu_name),
-      axisLabel: { color: chartTheme.text, width: 120, overflow: "truncate" as const },
-      axisTick: { show: false },
+      type: "value",
+      name: "만족도",
+      min: 0,
+      max: 5,
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
     },
     series: [
       {
-        type: "bar" as const,
-        barMaxWidth: 18,
-        data: ordered.map((r) => ({
-          value: r.demand,
-          menuName: r.menu_name,
-          demand: r.demand,
-          satisfaction: r.satisfaction,
-          appearance: r.appearance_count,
-          itemStyle: {
-            color,
-            opacity: r.appearance_count < LOW_APPEARANCE_THRESHOLD ? 0.45 : 0.9,
-          },
-        })),
-        label: {
-          show: true,
-          position: "right" as const,
-          color: chartTheme.text,
-          formatter: (p: { data: { satisfaction: number } }) => `${p.data.satisfaction.toFixed(2)}점`,
-        },
+        type: "scatter" as const,
+        data,
+        labelLayout: { moveOverlap: "shiftY" as const },
       },
     ],
   };
@@ -1671,13 +1681,14 @@ function MenuQuadrantTab() {
   return (
     <Card title="메뉴별 분석 — 인기메뉴 / 숨은강자 / 개선시급 / 퇴출후보">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        수요(1회 제공당 평균 식수)와 만족도가 각각 기준값보다 큰지 작은지로 네 가지로
-        나눕니다. 기준값은 기본적으로 전체 메뉴의 중앙값이며, 아래 슬라이더로 직접
-        조절할 수 있습니다(표본부족 판정은 평가건수 기준으로 별도 처리되어 조절 대상이
-        아닙니다). 분류별로 막대 그래프를 따로 그려 메뉴명이 겹치지 않게 했고, 막대
-        끝의 숫자는 만족도입니다(흐린 막대 = 최근 {LOW_APPEARANCE_THRESHOLD}회 미만
-        제공이라 수요 수치가 우연한 결과로 튈 수 있음). 아래 범례를 클릭하면 보고 싶은
-        분류만 골라 볼 수 있고, "표시 개수"로 분류별 막대 수를 조절할 수 있습니다.
+        가로축(1회 제공당 평균 식수)과 세로축(만족도)이 각각 기준값보다 큰지 작은지로
+        네 가지로 나눕니다. 기준값은 기본적으로 전체 메뉴의 중앙값이며, 아래 슬라이더로
+        직접 조절할 수 있습니다(표본부족 판정은 평가건수 기준으로 별도 처리되어 조절
+        대상이 아닙니다). 분류별로 그래프를 따로 그려 점끼리 겹치는 걸 줄였고, 점 옆에
+        "메뉴명 (코너명)"을 표기합니다(흐린 점 = 최근 {LOW_APPEARANCE_THRESHOLD}회
+        미만 제공이라 수요 수치가 우연한 결과로 튈 수 있음, 원 크기는 제공 횟수). 아래
+        범례를 클릭하면 보고 싶은 분류만 골라 볼 수 있고, "표시 개수"로 분류별 표시
+        개수를 조절할 수 있습니다.
       </p>
       <div className="mb-3">
         <SegmentedControl
@@ -1807,8 +1818,8 @@ function MenuQuadrantTab() {
                   </p>
                 ) : (
                   <ReactECharts
-                    option={buildQuadrantBarOption(limited, resolveColor(quadrantColor(label)), chartTheme)}
-                    style={{ height: Math.max(120, limited.length * 32 + 40) }}
+                    option={buildQuadrantScatterOption(limited, resolveColor(quadrantColor(label)), chartTheme)}
+                    style={{ height: 320 }}
                   />
                 )}
               </div>

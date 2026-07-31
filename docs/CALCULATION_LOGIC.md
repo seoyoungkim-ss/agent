@@ -2600,3 +2600,24 @@ avg_taste_score를 함께 반환하므로 새 쿼리 없이 기존 `activePeriod
 
 **파일 요약**: `frontend/src/pages/HomePage.tsx`,
 `frontend/src/pages/AnalysisPage.tsx`(`MenuQuadrantTab`, `CornerAnalysisTab`).
+
+### 42.4 메뉴별 분석 4분면 — 막대 → 점(산점도)으로 재수정 + 코너명 표기
+
+42.2에서 막대 그래프로 바꿨더니 "막대 말고 점으로 보여달라"는 재요청.
+분면별 패널 분리(겹침 완화 효과의 핵심)는 그대로 유지하되, 각 패널
+내부를 막대 대신 원래 방식인 산점도(x=수요, y=만족도)로 되돌렸다
+(`buildQuadrantScatterOption`, `buildQuadrantBarOption` 대체). 분면당
+항목 수가 이미 5~20개로 적어(42.2 표시개수 제한 유지) 전체를 한 좌표에
+욱여넣던 이전 버전보다는 겹침이 훨씬 덜하다. 추가로 "메뉴 보여줄 때
+코너명도 같이 표기해달라"는 요청 반영 — 같은 메뉴명이 여러 코너에서
+나올 수 있어(`MenuPerformanceRow.corner_name`) 점 옆 라벨과 툴팁 모두
+"메뉴명 (코너명)" 형식으로 통일했다. 그래도 가까운 점끼리 라벨이 겹칠
+수 있어 ECharts 6 `labelLayout: { moveOverlap: "shiftY" }`로 세로 방향
+자동 밀어내기를 적용했다(완전한 겹침 방지는 아니고 완화).
+
+**검증**: 프론트 `tsc -b && vite build` 클린. Playwright로 실 데이터
+확인 — 인기메뉴/숨은강자/개선시급/표본부족 패널 모두 점으로 표시되고
+각 점 옆에 "메뉴명 (코너명)"(예: "돼지불고기 (한식)", "짜장면 (분식)")이
+붙어 있음을 확인.
+
+**파일 요약**: `frontend/src/pages/AnalysisPage.tsx`(`MenuQuadrantTab`).
