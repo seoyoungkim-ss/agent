@@ -2475,3 +2475,52 @@ vite build` 클린, uvicorn+vite 띄운 뒤 Playwright로 실 데이터 기준
 나오고(우연히 40.8 버그 수정 전엔 "데이터 없음"이던 메뉴 통제 선호도가
 "43%, 271건 중 117건"으로 실데이터가 나오는 것도 이때 확인됨), 피크타임
 서브속도 코너별/메뉴별 모드 전환 시 코너 선택이 두 섹션에서 일치).
+
+## 41. 주간 식수 추이 — 조식/중식/석식 체크 필터 (2026-07)
+
+`daily_division_stats`/`daily_corner_stats`는 이미 `(stat_date, division|
+corner_id, meal_type)` 단위로 끼니별 행을 따로 저장하는데(6.2절), 홈
+화면의 "주간 식수 추이"/"코너별 주간 식수 추이"는 그동안 이 행들을
+끼니 구분 없이 항상 다 더해서만 보여줬다. 요청은 체크박스로 조식/중식/
+석식을 골라 보고, 여러 개를 체크하면 그만큼 합산되게 해달라는 것.
+
+**백엔드**: `dashboard.py::_compute_weekly_summary`와
+`analysis.py::_load_corner_stats`(이 둘이 각각 `GET /dashboard/weekly-
+summary`, `GET /analysis/corners`, `GET /analysis/corners/trend`의
+공통 조회 함수)에 `meal_types: list[MealType] | None` 파라미터를
+추가해 `meal_type.in_(meal_types)` 필터를 얹었다. 값을 생략하면(빈
+리스트/`None`) 기존과 동일하게 전체 합산 — 하위호환.
+
+**주의(Query 기본값 함정)**: `corner_analysis`(`GET /analysis/corners`)
+는 FastAPI 라우트일 뿐 아니라 `chat_grounding.py`/`dashboard.py`에서
+평범한 파이썬 함수로도 직접 호출된다. 이런 직접 호출 경로에서는
+FastAPI가 `Query(default=None, ...)`를 실제 `None`으로 풀어주지
+않고 `Query` 객체 자체가 그대로 인자에 들어온다 — 이 객체는 `bool()`이
+참이라 `if meal_types:` 분기를 타서 `.in_(Query객체)`가 SQLAlchemy
+`ArgumentError`로 터진다. 이미 있던 `classification`/`exclude_take_out`
+파라미터는 우연히 비교 연산(`==`)에만 쓰여 이 문제가 드러나지 않았을
+뿐, 같은 함정을 안고 있다. 해결: `meal_types`는 `Query(...)` 래퍼 없이
+plain `None` 기본값으로 선언(다른 곳(`corner_analysis_trend`, `weekly_
+summary`)은 직접 호출되지 않아 `Query(...)`를 그대로 둬도 안전함을
+확인 후 유지).
+
+**프론트**: `HomePage.tsx`에 `mealTypeFilter: MealType[]` state(기본값
+3개 전부 체크 — 기존 "전체 합산" 동작과 동일)와 체크박스 3개를 분류
+`SegmentedControl` 옆에 추가. 최소 1개는 항상 체크돼 있어야 하며(다
+끄면 "필터 없음"과 구분이 안 돼 혼동되므로 `toggleMealType`이 마지막
+1개는 해제를 무시), `weekly`/`cornerTrend` 두 쿼리 모두 `mealTypeFilter`를
+쿼리키에 포함해 체크 조합이 바뀔 때마다 새로 조회한다. `qs()` 헬퍼
+(`api/client.ts`)는 배열 값을 반복 쿼리 파라미터(`meal_types=조식&
+meal_types=중식`)로 직렬화하도록 확장했다.
+
+**검증**: 신규 pytest 2건(`test_weekly_summary_filters_by_meal_types`,
+`test_corner_analysis_trend_filters_by_meal_types` — 조식만/조식+중식
+합산/미필터 3가지 케이스 확인) 포함 전체 267개 통과, 프론트 `tsc -b &&
+vite build` 클린. uvicorn 재시작 후(코드 수정이 실행 중이던 구 프로세스에
+반영 안 돼 있었던 걸 재시작으로 확인) Playwright로 실 데이터 기준 확인:
+해당 주는 실제로 전부 중식 데이터라 조식만 체크 시 누적 식수가
+488→0으로, 중식+석식 체크 시 488 그대로 나오는 것을 확인.
+
+**파일 요약**: `backend/app/api/dashboard.py`, `backend/app/api/analysis.py`,
+`backend/tests/test_api_ingest_and_analysis.py`, `frontend/src/api/client.ts`,
+`frontend/src/pages/HomePage.tsx`.

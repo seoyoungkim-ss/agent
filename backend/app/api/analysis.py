@@ -154,12 +154,18 @@ def division_analysis(
 
 
 def _load_corner_stats(
-    db: Session, period_start: dt.date, period_end: dt.date, classification: str | None
+    db: Session,
+    period_start: dt.date,
+    period_end: dt.date,
+    classification: str | None,
+    meal_types: list[MealType] | None = None,
 ) -> tuple[list[DailyCornerStats], dict[int, CornerMaster]]:
     query = db.query(DailyCornerStats).filter(DailyCornerStats.stat_date.between(period_start, period_end))
     query = _apply_classification_filter(
         query, DailyCornerStats.stat_date, DailyCornerStats.is_holiday, classification, period_start, period_end
     )
+    if meal_types:
+        query = query.filter(DailyCornerStats.meal_type.in_(meal_types))
     corners = {c.corner_id: c for c in db.query(CornerMaster).all()}
     return query.all(), corners
 
@@ -172,6 +178,11 @@ def corner_analysis(
     exclude_take_out: bool = Query(
         default=False, description="Take Out 코너 제외 — 착석 취식이 아니라 혼잡도/만족도 분석에 안 맞음"
     ),
+    # 이 함수는 chat_grounding.py/dashboard.py에서 라우트가 아니라 일반 파이썬
+    # 함수로도 직접 호출된다 — 그 경로에선 FastAPI가 Query() 기본값을 None으로
+    # 못 풀어주므로 plain None을 써야 한다(Query 객체 그대로 들어오면 .in_()에서
+    # 터짐, 2026-07).
+    meal_types: list[MealType] | None = None,
     db: Session = Depends(get_db),
 ):
     """PRD 6.2: 코너별 이용자 수/만족도/피크타임 서브속도.
@@ -179,7 +190,7 @@ def corner_analysis(
     그린미트(다이어트식, 매니아층 전용)는 항상 마지막 행으로 정렬한다 — 코너가
     나오는 화면 어디서든 일반 코너 비교에 섞이지 않도록.
     """
-    rows, corners = _load_corner_stats(db, period_start, period_end, classification)
+    rows, corners = _load_corner_stats(db, period_start, period_end, classification, meal_types)
 
     by_corner: dict[int, list[DailyCornerStats]] = {}
     for row in rows:
@@ -213,11 +224,14 @@ def corner_analysis_trend(
     granularity: Literal["daily", "weekly", "monthly"] = "weekly",
     classification: str | None = Query(default=None, description="평일 | 주말+공휴일 | 패밀리데이"),
     exclude_take_out: bool = Query(default=False),
+    meal_types: list[MealType] | None = Query(
+        default=None, description="조식/중식/석식 중 선택 — 여러 개면 합산, 생략 시 전체 합산"
+    ),
     db: Session = Depends(get_db),
 ):
     """PRD 6.2 확장: 코너별 만족도/피크타임 서브속도(및 식수)의 기간별(일간·주간·월간)
     추이. 홈 화면의 "코너별 주간 식수 추이"는 이 엔드포인트를 daily로 호출한다."""
-    rows, corners = _load_corner_stats(db, period_start, period_end, classification)
+    rows, corners = _load_corner_stats(db, period_start, period_end, classification, meal_types)
 
     buckets: dict[tuple[str, int], list[DailyCornerStats]] = {}
     for row in rows:

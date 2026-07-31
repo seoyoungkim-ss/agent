@@ -15,10 +15,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-function qs(params: Record<string, string | number | boolean | undefined | null>): string {
+function qs(params: Record<string, string | number | boolean | string[] | undefined | null>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== "") usp.set(k, String(v));
+    if (v === undefined || v === null || v === "") continue;
+    if (Array.isArray(v)) {
+      for (const item of v) usp.append(k, item);
+    } else {
+      usp.set(k, String(v));
+    }
   }
   const s = usp.toString();
   return s ? `?${s}` : "";
@@ -366,8 +371,12 @@ export interface ChatMessage {
 // ---- API 함수 ----
 
 export const api = {
-  weeklySummary: (params: { start_date?: string; end_date?: string; classification?: Classification }) =>
-    request<WeeklySummaryDay[]>(`/dashboard/weekly-summary${qs(params)}`),
+  weeklySummary: (params: {
+    start_date?: string;
+    end_date?: string;
+    classification?: Classification;
+    meal_types?: MealType[];
+  }) => request<WeeklySummaryDay[]>(`/dashboard/weekly-summary${qs(params)}`),
 
   menuHistory: (menuName: string) =>
     request<MenuHistoryEntry[]>(`/dashboard/menu-history/${encodeURIComponent(menuName)}`),
@@ -400,6 +409,7 @@ export const api = {
     period_end: string;
     classification?: Classification;
     exclude_take_out?: boolean;
+    meal_types?: MealType[];
   }) => request<CornerAnalysisRow[]>(`/analysis/corners${qs(params)}`),
 
   cornerAnalysisTrend: (params: {
@@ -408,6 +418,7 @@ export const api = {
     granularity: "daily" | "weekly" | "monthly";
     classification?: Classification;
     exclude_take_out?: boolean;
+    meal_types?: MealType[];
   }) => request<CornerTrendRow[]>(`/analysis/corners/trend${qs(params)}`),
 
   cornerMainMenuByDate: (params: { period_start: string; period_end: string }) =>

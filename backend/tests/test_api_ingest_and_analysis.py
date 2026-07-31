@@ -2095,6 +2095,58 @@ def _ingest_meal_log_with_meal_type(client, employee_id, taste, meal_type, menu_
     assert resp.status_code == 200, resp.text
 
 
+def test_weekly_summary_filters_by_meal_types(client, db_session):
+    from app.services.aggregation import aggregate_daily_stats
+
+    _ingest_meal_log_with_meal_type(client, "E1", "맛남", "조식", "토스트")
+    _ingest_meal_log_with_meal_type(client, "E2", "맛남", "중식", "제육볶음")
+    aggregate_daily_stats(db_session, MONDAY)
+
+    breakfast_only = client.get(
+        "/api/dashboard/weekly-summary",
+        params={"start_date": MONDAY.isoformat(), "end_date": MONDAY.isoformat(), "meal_types": ["조식"]},
+    )
+    assert breakfast_only.status_code == 200
+    assert breakfast_only.json()[0]["headcount"] == 1
+
+    combined = client.get(
+        "/api/dashboard/weekly-summary",
+        params={
+            "start_date": MONDAY.isoformat(),
+            "end_date": MONDAY.isoformat(),
+            "meal_types": ["조식", "중식"],
+        },
+    )
+    assert combined.json()[0]["headcount"] == 2
+
+    unfiltered = client.get(
+        "/api/dashboard/weekly-summary",
+        params={"start_date": MONDAY.isoformat(), "end_date": MONDAY.isoformat()},
+    )
+    assert unfiltered.json()[0]["headcount"] == 2
+
+
+def test_corner_analysis_trend_filters_by_meal_types(client, db_session):
+    from app.services.aggregation import aggregate_daily_stats
+
+    _ingest_meal_log_with_meal_type(client, "E1", "맛남", "조식", "토스트")
+    _ingest_meal_log_with_meal_type(client, "E2", "맛남", "중식", "제육볶음")
+    aggregate_daily_stats(db_session, MONDAY)
+
+    resp = client.get(
+        "/api/analysis/corners/trend",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": MONDAY.isoformat(),
+            "granularity": "daily",
+            "meal_types": ["조식"],
+        },
+    )
+    assert resp.status_code == 200
+    hansik = next(r for r in resp.json() if r["corner_name"] == "한식")
+    assert hansik["headcount"] == 1
+
+
 def test_menu_performance_by_meal_type_filters_to_selected_meal(client):
     _ingest_meal_log_with_meal_type(client, "E1", "맛남", "조식", "토스트")
     _ingest_meal_log_with_meal_type(client, "E2", "맛남", "조식", "토스트")

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.analysis import _corner_id_by_menu_from_meal_log, corner_analysis, menu_performance
 from app.config import get_settings
 from app.db import get_db
-from app.models.enums import TASTE_SCORE_POINTS, MenuRole
+from app.models.enums import TASTE_SCORE_POINTS, MealType, MenuRole
 from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import DailyDivisionStats, MenuPerformanceStats, MonthlyVoeCluster
@@ -43,6 +43,7 @@ def _compute_weekly_summary(
     start_date: dt.date | None,
     end_date: dt.date | None,
     classification: str | None,
+    meal_types: list[MealType] | None = None,
 ) -> list[dict]:
     if start_date is None:
         today = dt.date.today()
@@ -51,11 +52,10 @@ def _compute_weekly_summary(
         end_date = start_date + dt.timedelta(days=6)
 
     holiday_svc = HolidayService(db)
-    rows = (
-        db.query(DailyDivisionStats)
-        .filter(DailyDivisionStats.stat_date.between(start_date, end_date))
-        .all()
-    )
+    query = db.query(DailyDivisionStats).filter(DailyDivisionStats.stat_date.between(start_date, end_date))
+    if meal_types:
+        query = query.filter(DailyDivisionStats.meal_type.in_(meal_types))
+    rows = query.all()
     daily_totals: dict[dt.date, int] = {}
     for row in rows:
         daily_totals[row.stat_date] = daily_totals.get(row.stat_date, 0) + row.headcount
@@ -83,10 +83,13 @@ def weekly_summary(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
     classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
+    meal_types: list[MealType] | None = Query(
+        default=None, description="조식/중식/석식 중 선택 — 여러 개면 합산, 생략 시 전체 합산"
+    ),
     db: Session = Depends(get_db),
 ):
     """PRD 5.2: 실시간 주간 현황. 평일/주말+공휴일 필터를 공통으로 적용한다."""
-    return _compute_weekly_summary(db, start_date, end_date, classification)
+    return _compute_weekly_summary(db, start_date, end_date, classification, meal_types)
 
 
 @router.get("/weekly-summary/export")
@@ -94,10 +97,11 @@ def weekly_summary_export(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
     classification: str | None = Query(default=None, description="평일 | 주말+공휴일"),
+    meal_types: list[MealType] | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """PRD 5.2: 파트장/그룹장 보고용 엑셀 다운로드."""
-    rows = _compute_weekly_summary(db, start_date, end_date, classification)
+    rows = _compute_weekly_summary(db, start_date, end_date, classification, meal_types)
 
     buffer = io.BytesIO()
     workbook = xlsxwriter.Workbook(buffer, {"in_memory": True})

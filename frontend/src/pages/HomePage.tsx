@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
-import { api, type Classification, type CongestionForecastRow } from "../api/client";
+import { api, type Classification, type CongestionForecastRow, type MealType } from "../api/client";
 import {
   Button,
   Card,
@@ -74,12 +74,25 @@ const CLASSIFICATION_OPTIONS: { label: string; value: Classification | "전체" 
   { label: "패밀리데이", value: "패밀리데이" },
 ];
 
+const MEAL_TYPE_OPTIONS: MealType[] = ["조식", "중식", "석식"];
+
 export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) {
   const [classification, setClassification] = useState<Classification | "전체">("전체");
   // 토요일은 평일과 식수 규모가 달라 같은 추이 라인에 섞으면 오해하기 쉽다 —
   // 기본은 숨기고 버튼으로 켜서 볼 수 있게 한다("주간 식수 추이"/"코너별 주간
   // 식수 추이" 두 차트 공용 토글, 2026-07).
   const [showSaturday, setShowSaturday] = useState(false);
+  // 조식만 체크하면 조식 기준, 조식+중식 체크하면 둘을 합친 식수 — 최소 1개는
+  // 항상 체크돼 있어야 한다(다 끄면 "전체 합산"과 구분이 안 돼 혼동됨, 2026-07).
+  const [mealTypeFilter, setMealTypeFilter] = useState<MealType[]>(MEAL_TYPE_OPTIONS);
+  function toggleMealType(mealType: MealType) {
+    setMealTypeFilter((prev) => {
+      if (prev.includes(mealType)) {
+        return prev.length > 1 ? prev.filter((m) => m !== mealType) : prev;
+      }
+      return [...prev, mealType];
+    });
+  }
   const [menuName, setMenuName] = useState("");
   const [searchedMenu, setSearchedMenu] = useState<string | null>(null);
   const [exportStart, setExportStart] = useState(isoDaysAgo(30));
@@ -89,12 +102,13 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   const saturdayOfSelected = addDays(selectedMonday, 5);
 
   const weekly = useQuery({
-    queryKey: ["weekly-summary", selectedMonday, saturdayOfSelected, classification],
+    queryKey: ["weekly-summary", selectedMonday, saturdayOfSelected, classification, mealTypeFilter.join("|")],
     queryFn: () =>
       api.weeklySummary({
         start_date: selectedMonday,
         end_date: saturdayOfSelected,
         classification: classification === "전체" ? undefined : classification,
+        meal_types: mealTypeFilter,
       }),
   });
 
@@ -110,13 +124,20 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   });
 
   const cornerTrend = useQuery({
-    queryKey: ["corner-weekly-trend", selectedMonday, saturdayOfSelected, classification],
+    queryKey: [
+      "corner-weekly-trend",
+      selectedMonday,
+      saturdayOfSelected,
+      classification,
+      mealTypeFilter.join("|"),
+    ],
     queryFn: () =>
       api.cornerAnalysisTrend({
         period_start: selectedMonday,
         period_end: saturdayOfSelected,
         granularity: "daily",
         classification: classification === "전체" ? undefined : classification,
+        meal_types: mealTypeFilter,
       }),
   });
 
@@ -303,7 +324,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
 
   const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${selectedMonday}&end_date=${saturdayOfSelected}${
     classification !== "전체" ? `&classification=${encodeURIComponent(classification)}` : ""
-  }`;
+  }${mealTypeFilter.map((m) => `&meal_types=${encodeURIComponent(m)}`).join("")}`;
 
   const mealLogExportUrl = `/api/dashboard/meal-log/export?period_start=${exportStart}&period_end=${exportEnd}`;
 
@@ -333,6 +354,18 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
             </Button>
           </div>
           <SegmentedControl value={classification} options={CLASSIFICATION_OPTIONS} onChange={setClassification} />
+          <div className="flex items-center gap-2 rounded-md border px-2.5 py-1.5" style={{ borderColor: "var(--border)" }}>
+            {MEAL_TYPE_OPTIONS.map((mealType) => (
+              <label key={mealType} className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                <input
+                  type="checkbox"
+                  checked={mealTypeFilter.includes(mealType)}
+                  onChange={() => toggleMealType(mealType)}
+                />
+                {mealType}
+              </label>
+            ))}
+          </div>
           <Button variant="secondary" onClick={() => setShowSaturday((v) => !v)}>
             {showSaturday ? "토요일 숨기기" : "토요일 포함 보기"}
           </Button>
