@@ -257,8 +257,11 @@ def _compute_voe_by_category(db: Session, period: dt.date) -> dict:
     month_start_dt = dt.datetime.combine(month_start, dt.time())
 
     rows = (
-        db.query(MealLog.comment, MealLog.eaten_at, CornerMaster.corner_name, MealLog.voe_categories)
+        db.query(
+            MealLog.comment, MealLog.eaten_at, CornerMaster.corner_name, MenuMaster.menu_name, MealLog.voe_categories
+        )
         .join(CornerMaster, MealLog.corner_id == CornerMaster.corner_id)
+        .outerjoin(MenuMaster, MealLog.menu_id == MenuMaster.menu_id)  # menu_id는 nullable(2026-08)
         .filter(
             MealLog.eaten_at >= month_start_dt,
             MealLog.eaten_at < month_end_exclusive,
@@ -269,11 +272,16 @@ def _compute_voe_by_category(db: Session, period: dt.date) -> dict:
 
     buckets: dict[str, list[dict]] = {c: [] for c in [*VOE_CATEGORIES, OTHER_CATEGORY]}
     total_comments = 0
-    for comment, eaten_at, corner_name, voe_categories in rows:
+    for comment, eaten_at, corner_name, menu_name, voe_categories in rows:
         if not comment or not comment.strip():
             continue
         total_comments += 1
-        entry = {"eaten_at": eaten_at.isoformat(), "corner_name": corner_name, "comment": comment}
+        entry = {
+            "eaten_at": eaten_at.isoformat(),
+            "corner_name": corner_name,
+            "menu_name": menu_name,
+            "comment": comment,
+        }
         # voe_categories가 채워져 있으면 그 달 LLM 배치 결과(voe_category_llm.py)를
         # 쓰고, 아직 배치가 안 돈 경우(NULL)만 규칙 기반으로 그때그때 대체한다.
         matched = voe_categories if voe_categories is not None else classify_voe_categories(comment)
@@ -451,6 +459,7 @@ def menu_highlights(db: Session = Depends(get_db)):
             "prior_score": e.prior_score,
             "delta": e.delta,
             "evaluation_count": e.evaluation_count,
+            "date": e.recent_week.isoformat(),
         }
 
     def _new_menu(e):

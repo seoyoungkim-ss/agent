@@ -339,6 +339,9 @@ def test_menu_highlights_detects_rising_menu_and_new_menu_reaction(client):
     falling_names = {r["menu_name"] for r in body["falling"]}
     assert "제육볶음" in rising_names
     assert "제육볶음" not in falling_names
+    # date는 마지막으로 나온 주(MONDAY)의 월요일 — 홈 하이라이트 카드 날짜 표시용(2026-08)
+    rising_entry = next(r for r in body["rising"] if r["menu_name"] == "제육볶음")
+    assert rising_entry["date"] == MONDAY.isoformat()
 
     new_menu_names = {r["menu_name"] for r in body["new_menus"]}
     assert "신메뉴테스트" in new_menu_names
@@ -1696,6 +1699,44 @@ def test_corner_core_layer_summary_compares_all_corners_in_one_call(client):
     assert by_name["양식"]["non_core_employee_count"] == 3
 
 
+def test_corner_core_layer_summary_excludes_take_out(client):
+    # E1~E3: 한식 3번(코어층 판정에 딱 충분, share=1.0 — Take Out 방문이 섞이지
+    # 않았을 때 기준) + Take Out 10번. Take Out을 분모에서 안 빼면
+    # share=3/13≈0.23으로 min_share(0.3) 미달돼 코어층에서 빠지게 된다 —
+    # Take Out을 완전히 제외해야 원래 의도대로 코어층(share=1.0)으로 잡힌다.
+    for emp in ["E1", "E2", "E3"]:
+        for day_offset, menu in enumerate(["떡볶이", "짜장면", "떡볶이"]):
+            _ingest_meal_log(
+                client,
+                emp,
+                "맛남",
+                eaten_date=MONDAY + dt.timedelta(days=day_offset),
+                menu_name=menu,
+                corner_name="한식",
+            )
+        for day_offset in range(10):
+            _ingest_meal_log(
+                client,
+                emp,
+                "맛남",
+                eaten_date=MONDAY + dt.timedelta(days=day_offset),
+                menu_name="테이크아웃메뉴",
+                corner_name="Take Out",
+            )
+
+    resp = client.get(
+        "/api/analysis/corners/core-layer-summary",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=10)).isoformat()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    corner_names = {r["corner_name"] for r in body}
+    assert "Take Out" not in corner_names  # Take Out 자체는 요약 표에서 빠진다
+
+    by_name = {r["corner_name"]: r for r in body}
+    assert by_name["한식"]["core_employee_count"] == 3  # Take Out이 분모를 오염시키지 않음
+
+
 def test_corner_core_layer_menu_pairs_excludes_take_out_placeholder_menus(client, db_session):
     # 코너별 분석의 메뉴 쌍에서 "선택형 Take out" 같은 플레이스홀더 메뉴가
     # 계속 나오던 문제 — build_employee_menu_sets에서 걸러야 한다.
@@ -1940,6 +1981,17 @@ def test_voe_by_category_groups_comments_into_fixed_categories(client):
     assert categories["서비스"]["count"] == 1
     assert categories["기타"]["count"] == 1
     assert categories["기타"]["comments"][0]["comment"] == "그냥 평범했어요"
+
+
+def test_voe_by_category_comment_includes_menu_name(client):
+    # 어떤 메뉴에 대한 의견인지 알 수 있게 코멘트마다 menu_name도 함께 내려온다(2026-08).
+    _ingest_meal_log(client, "E1", "맛남", comment="정말 맛있어요", menu_name="제육볶음")
+
+    resp = client.get("/api/dashboard/voe-by-category", params={"period": f"{MONDAY.isoformat()[:7]}-01"})
+    assert resp.status_code == 200
+    body = resp.json()
+    taste_comments = next(c for c in body["categories"] if c["category"] == "맛")["comments"]
+    assert taste_comments[0]["menu_name"] == "제육볶음"
 
 
 def test_voe_by_category_multi_label_comment_counted_in_both_categories(client):

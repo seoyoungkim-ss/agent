@@ -42,6 +42,12 @@ function weekdayLabel(dateIso: string): string {
   return `${dateIso.slice(5)}(${WEEKDAY_KO[new Date(dateIso).getDay()]})`;
 }
 
+// 메뉴 하이라이트 카드의 날짜 표시 — "YYYY-MM-DD" → "M/D".
+function shortDate(dateIso: string): string {
+  const [, m, d] = dateIso.split("-");
+  return `${Number(m)}/${Number(d)}`;
+}
+
 // 마우스를 올리면 나오는 숫자(차트 툴팁)는 소수점 2자리까지만 보여준다.
 function formatTooltipNumber(value: number | string): string {
   return typeof value === "number" ? value.toFixed(2) : value;
@@ -139,6 +145,13 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
         classification: classification === "전체" ? undefined : classification,
         meal_types: mealTypeFilter,
       }),
+  });
+
+  // 코너별 주간 식수 추이 툴팁에 그날의 메인메뉴를 같이 보여주기 위한 매핑 —
+  // AnalysisPage.tsx의 buildMetricTooltipFormatter와 동일한 패턴(2026-07 도입).
+  const cornerMainMenu = useQuery({
+    queryKey: ["corner-main-menu-by-date", selectedMonday, saturdayOfSelected],
+    queryFn: () => api.cornerMainMenuByDate({ period_start: selectedMonday, period_end: saturdayOfSelected }),
   });
 
   const recomputeDailyStats = useMutation({
@@ -333,11 +346,33 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   const cornerLegendSelected = Object.fromEntries(
     trendCornersHome.map((c) => [c.corner_name, !LOW_PRIORITY_CORNER_NAMES.has(c.corner_name)]),
   );
+  const cornerIdByNameHome = new Map(stableHomeCorners.map((c) => [c.corner_name, c.corner_id]));
+  const mainMenuByCornerDateHome = new Map(
+    (cornerMainMenu.data ?? []).map((r) => [`${r.corner_id}|${r.plan_date}`, r.menu_name]),
+  );
+  // 이 차트만의 툴팁 — 식수는 정수로 반올림하고(2026-08 피드백: 소수점이 보기
+  // 불편함), 그날 그 코너의 메인메뉴를 다음 줄에 덧붙인다. 다른 차트가 공유하는
+  // axisTooltipFormatter/formatTooltipNumber(소수 2자리)는 만족도 등에도 쓰이므로
+  // 그대로 두고, 이 차트에만 로컬 포맷터를 따로 둔다.
+  function cornerTrendTooltipFormatter(
+    params: { axisValue?: string; marker: string; seriesName: string; value: unknown }[],
+  ): string {
+    const date = params[0]?.axisValue ?? "";
+    const lines = params.map((p) => {
+      const value = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
+      const headcountText = typeof value === "number" ? `${Math.round(value)}명` : String(value);
+      const cornerId = cornerIdByNameHome.get(p.seriesName);
+      const menu = cornerId != null ? mainMenuByCornerDateHome.get(`${cornerId}|${date}`) : undefined;
+      const menuLine = menu ? `<br/>&nbsp;&nbsp;메뉴: ${menu}` : "";
+      return `${p.marker}${p.seriesName}: ${headcountText}${menuLine}`;
+    });
+    return [date, ...lines].join("<br/>");
+  }
 
   const cornerTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 32, bottom: 28 },
-    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
+    tooltip: { trigger: "axis", formatter: cornerTrendTooltipFormatter },
     legend: {
       top: 0,
       textStyle: { color: chartTheme.text },
@@ -556,52 +591,58 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
         {menuHighlights.isLoading && <LoadingState />}
         {menuHighlights.isError && <ErrorState error={menuHighlights.error} />}
         {menuHighlights.data && (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <div>
-              <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                만족도 급상승
-              </p>
-              {menuHighlights.data.rising.length === 0 ? (
-                <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                  해당 없음
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  만족도 급상승
                 </p>
-              ) : (
-                <Table
-                  columns={[
-                    { key: "menu", label: "메뉴" },
-                    { key: "score", label: "만족도", align: "right" },
-                  ]}
-                  rows={menuHighlights.data.rising.map((r) => ({
-                    menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
-                    score: `${r.prior_score.toFixed(2)} → ${r.recent_score.toFixed(2)}`,
-                  }))}
-                  rowKey={(r, i) => `${r.menu as string}-${i}`}
-                />
-              )}
-            </div>
-            <div>
-              <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                만족도 급하락
-              </p>
-              {menuHighlights.data.falling.length === 0 ? (
-                <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                  해당 없음
+                {menuHighlights.data.rising.length === 0 ? (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    해당 없음
+                  </p>
+                ) : (
+                  <Table
+                    columns={[
+                      { key: "menu", label: "메뉴" },
+                      { key: "date", label: "날짜", align: "right" },
+                      { key: "score", label: "만족도", align: "right" },
+                    ]}
+                    rows={menuHighlights.data.rising.map((r) => ({
+                      menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
+                      date: shortDate(r.date),
+                      score: `${r.prior_score.toFixed(2)} → ${r.recent_score.toFixed(2)}`,
+                    }))}
+                    rowKey={(r, i) => `${r.menu as string}-${i}`}
+                  />
+                )}
+              </div>
+              <div>
+                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  만족도 급하락
                 </p>
-              ) : (
-                <Table
-                  columns={[
-                    { key: "menu", label: "메뉴" },
-                    { key: "score", label: "만족도", align: "right" },
-                  ]}
-                  rows={menuHighlights.data.falling.map((r) => ({
-                    menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
-                    score: `${r.prior_score.toFixed(2)} → ${r.recent_score.toFixed(2)}`,
-                  }))}
-                  rowKey={(r, i) => `${r.menu as string}-${i}`}
-                />
-              )}
+                {menuHighlights.data.falling.length === 0 ? (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    해당 없음
+                  </p>
+                ) : (
+                  <Table
+                    columns={[
+                      { key: "menu", label: "메뉴" },
+                      { key: "date", label: "날짜", align: "right" },
+                      { key: "score", label: "만족도", align: "right" },
+                    ]}
+                    rows={menuHighlights.data.falling.map((r) => ({
+                      menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
+                      date: shortDate(r.date),
+                      score: `${r.prior_score.toFixed(2)} → ${r.recent_score.toFixed(2)}`,
+                    }))}
+                    rowKey={(r, i) => `${r.menu as string}-${i}`}
+                  />
+                )}
+              </div>
             </div>
-            <div>
+            <div className="border-t pt-4" style={{ borderColor: "var(--border)" }}>
               <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
                 신메뉴 반응 (최근 30일 자동판정 + 관리자 직접 지정)
               </p>

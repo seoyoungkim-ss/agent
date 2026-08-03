@@ -66,6 +66,7 @@ export interface MenuCommentEntry {
 export interface VoeCategoryComment {
   eaten_at: string;
   corner_name: string | null;
+  menu_name: string | null;
   comment: string;
 }
 
@@ -97,6 +98,7 @@ export interface MenuTrendEntry {
   prior_score: number;
   delta: number;
   evaluation_count: number;
+  date: string; // 이 메뉴가 마지막으로 나온 주의 월요일(ISO)
 }
 
 export interface NewMenuEntry {

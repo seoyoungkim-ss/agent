@@ -26,6 +26,7 @@ class MenuTrendEntry:
     prior_score: float
     delta: float
     evaluation_count: int
+    recent_week: dt.date  # 이 메뉴가 마지막으로 나온 주의 월요일 — 홈 하이라이트 카드 날짜 표시용(2026-08)
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ def compute_menu_satisfaction_trends(
                 prior_score=prior.adjusted_score,
                 delta=recent.adjusted_score - prior.adjusted_score,
                 evaluation_count=recent.evaluation_count,
+                recent_week=recent_week,
             )
         )
 

@@ -2826,3 +2826,121 @@ DB에는 아직 `alembic upgrade head`를 안 돌린 상태로 8080 서버를 �
 
 **파일 요약**: `backend/app/services/weekly_menu_prediction.py`,
 `backend/tests/test_api_ingest_and_analysis.py`.
+
+## 46. "식당 AX 대시보드 수정 스펙" — 대부분 이미 구현돼 있었음 확인 + 남은 갭 처리 (2026-08)
+
+사용자가 홈/분석(메뉴별·코너별·사용자 분석)/VOE 탭 개편 스펙 문서를 전달.
+조사 결과 상당 부분이 **이미 §39("식당 AX 대시보드 개선 12개 항목",
+2026-07)·§42에서 구현돼 있었다** — 스펙 문서가 그 이전 버전으로 보인다.
+항목별로 "이미 됨" / "진짜 갭" / "최근 결정과 충돌"로 나눠 처리했다.
+
+**충돌 2건은 사용자에게 직접 확인 후 진행**:
+- 메뉴별 분석 사분면(46.5): 스펙은 X=만족도/Y=수요 + 단일 차트를 요구했는데,
+  기존(X=수요/Y=만족도, 분면별 패널 분리)은 39.6에서 사용자가 직접 확인해
+  정한 축이고 패널 분리는 42.2/42.4에서 겹침 문제를 두 번 고친 결과였다.
+  사용자 확인: "한눈에 보고 싶은 게 더 큼" → 패널 분리를 버리고 스펙대로
+  단일 통합 차트로 재설계(축도 반전), 겹침 완화는 패널 분리 대신 이후
+  라운드에 추가된 `labelLayout.hideOverlap`(43번, 패널 분리 이전엔 없던
+  기능)에 맡긴다.
+- 코너별 분석 통합 그래프(46.3): 스펙은 "이용자 수 vs 서브속도" 토글을
+  요구했는데, 이미 두 고정 조합(①식수+만족도, ②서브속도+점유율) 통합
+  그래프로 정리돼 있었다(42.3, 그때 비슷한 그래프 여러 개를 줄이려 이렇게
+  통합함). 사용자 확인: "지표 선택형 단일 그래프로 재설계" → 두 고정
+  조합 차트를 없애고 좌/우 축 지표를 사용자가 직접 고르는 단일 그래프
+  하나로 대체.
+
+### 46.1 홈 — 코너별 주간 식수 추이 툴팁
+
+`HomePage.tsx::cornerTrendOption`에 로컬 `tooltip.formatter`(
+`cornerTrendTooltipFormatter`)를 새로 추가 — 식수를 `Math.round`로 정수
+표시하고, 그날 그 코너의 메인메뉴를 다음 줄에 덧붙인다. 다른 차트가
+공유하는 `axisTooltipFormatter`/`formatTooltipNumber`(소수 2자리, 만족도
+등에도 쓰임)는 그대로 두고 이 차트에만 로컬 포맷터를 적용했다 — 전역
+포맷을 바꾸면 다른 곳의 소수 표기가 깨진다. 메뉴 매핑은 `AnalysisPage.tsx`
+가 이미 쓰던 패턴(`api.cornerMainMenuByDate` → `Map<"${corner_id}|
+${date}", menu_name>`)을 그대로 이식 — 신규 쿼리 1개 추가.
+
+### 46.2 홈 — 메뉴 하이라이트 날짜 + 레이아웃
+
+`menu_highlights.py::compute_menu_satisfaction_trends`가 내부적으로 이미
+계산하던 `recent_week`(그 메뉴가 마지막으로 나온 주의 월요일)를 그동안
+버리고 있었다 — `MenuTrendEntry`에 필드로 담아 `dashboard.py`
+직렬화(`"date"`)에 노출만 하면 됐다(새 계산 없음). 프론트는 급상승/급하락
+을 `grid-cols-2` 한 행으로, 신메뉴는 별도 행(아래)으로 재배치하고 각
+항목에 "날짜"(M/D) 컬럼 추가.
+
+### 46.3 코너별 분석 — 지표 선택형 단일 그래프
+
+`CornerAnalysisTab`의 `headcountSatisfactionOption`(식수+만족도)과
+`throughputShareOption`(서브속도+점유율) 두 함수를 없애고
+`cornerMetricOption` 하나로 통합. 왼쪽/오른쪽 축 드롭다운(식수/만족도/
+서브속도/점유율 중 선택, 같은 지표 중복 선택 시 자동으로 서로 교체)으로
+어떤 조합이든 볼 수 있다 — `cornerAnalysisTrend`가 이미 식수/만족도/
+서브속도를 한 응답에 반환하고 점유율은 기존처럼 프론트에서 파생하므로
+신규 쿼리 없음. 서브속도가 축 중 하나면 "전체 평균" 회색 점선을 데이터
+없는 전용 시리즈(코너별 중복 방지)에 markLine으로 표시.
+
+### 46.4 코너별 분석 — 피크타임 서브속도 메뉴별 비교 Top5/Bottom5
+
+`buildMenuThroughputOption`(전체 메뉴 막대)은 `CornerLoyaltySection`에서는
+그대로 두고(범위 밖), `CornerAnalysisTab`의 "메뉴별 비교" 모드만 신규
+`buildMenuThroughputRankingOption`(막대 색이 리스트 전체 고정)로 서브
+가장 느린 Top5(`--critical`, 빨강)/가장 빠른 Top5(`--good`, 초록) 두
+리스트를 나란히 보여주도록 교체 — 프론트에서 `avg_throughput` 기준 정렬
+후 슬라이스만 하면 되므로 백엔드 변경 없음.
+
+### 46.5 메뉴별 분석 — 단일 통합 사분면 차트
+
+`buildQuadrantScatterOption`(분면별 패널 반복 렌더) → `buildUnified
+QuadrantOption`(하나의 산점도) 교체. X=만족도, Y=수요로 축 반전. 분면별로
+시리즈를 나눠(기존 분면 필터 버튼이 그대로 어떤 시리즈를 렌더할지 결정)
+한 차트 안에 겹쳐 그리고, 배경엔 데이터 없는 전용 시리즈에 `markArea`(4개
+사분면 음영+라벨)와 `markLine`(기준값 십자선)을 얹었다. 배경 음영은 순수
+수요/만족도 임계값 기준이라, 만족도 추세 하락·로열티로 실제 분류가
+override된 점은 점 색(진짜 분류)과 배경 음영이 어긋나 보일 수 있다 —
+의도된 것으로, 툴팁에 추세/로열티 이유를 표기해 설명한다. 겹침 완화는
+기존 `labelLayout: { hideOverlap: true, moveOverlap: "shiftY" }`와
+`appearance_count` 내림차순 정렬 그대로 유지.
+
+### 46.6 코너 코어층 — Take Out 제외
+
+`corner_core_layer.py::build_employee_corner_counts`에 `exclude_corner_
+ids` 키워드 인자 추가(기존 호출부는 기본값 `None`이라 영향 없음).
+`analysis.py::corner_core_layer_summary`에서 Take Out corner_id를 조회해
+요약 표 행 목록과 `employee_corner_counts` 분모 양쪽에서 제외 — 분모만
+빼면 Take Out 자체는 안 보여도 다른 코너의 `corner_share`가 왜곡되므로
+반드시 같이 빼야 한다. 그린미트/미캠회관(전골)은 스펙에 명시되지 않아
+이번엔 포함 상태 유지. 회귀 테스트로 확인: Take Out 방문을 대량으로
+섞어도(분모 오염 시나리오) 다른 코너의 코어층 인원수가 그대로인지 검증.
+
+### 46.7 사용자 분석 — 라인차트 + 표 아코디언
+
+`DivisionAnalysisSection`의 막대 시리즈를 라인(`type: "line"`)으로 교체,
+하단 표를 `CornerAnalysisTab`의 `showCornerTable` 패턴과 동일하게
+`useState(false)` + 토글 버튼으로 기본 접힘 처리.
+
+### 46.8 VOE — 코너·메뉴 매핑 + 최다 코너/메뉴 요약
+
+`_compute_voe_by_category`가 `CornerMaster`만 join하던 것에 `MenuMaster`
+outer join(`MealLog.menu_id`가 nullable) 추가, 코멘트 엔트리에 `menu_name`
+필드 추가. 프론트 코멘트 표는 "코너"/"코멘트" 2컬럼에서 "코너·메뉴"(
+`코너명 · 메뉴명` 병합 표기)/"코멘트"로 변경. "이달의 VOE 최다 코너/메뉴"
+요약 카드는 새 백엔드 집계 없이, 이미 받아온 카테고리별 코멘트를 프론트
+에서 dedupe(다중 라벨로 같은 코멘트가 여러 카테고리에 겹쳐 잡히므로) 후
+`corner_name`/`menu_name` 기준 tally해 최다 1건씩 뽑는다.
+
+**검증**: 신규 회귀 테스트 3건(메뉴 하이라이트 date 필드, 코어층 Take
+Out 분모 오염 방지, VOE menu_name 노출) 포함 전체 283개 통과. 프론트
+`tsc -b && vite build` 클린. uvicorn+vite로 Playwright 확인 — 홈 툴팁
+정수+메뉴 표시, 하이라이트 카드 2단+날짜, 메뉴별 분석 단일 사분면(배경
+음영+십자선+분면별 색), 코너별 분석 지표 드롭다운 4개 조합, 서브속도
+Top5/Bottom5(빨강/초록), 코어층 표에서 Take Out 행 사라짐, 사용자 분석
+라인차트+표 접기, VOE "코너·메뉴" 컬럼 + "이달의 VOE 최다 코너/메뉴"
+카드(그린미트 11건/닭가슴살샐러드 10건 확인) 모두 콘솔/네트워크 에러
+없이 정상 렌더 확인.
+
+**파일 요약**: `backend/app/services/menu_highlights.py`,
+`backend/app/services/corner_core_layer.py`, `backend/app/api/
+analysis.py`, `backend/app/api/dashboard.py`, `backend/tests/
+test_api_ingest_and_analysis.py`, `frontend/src/api/client.ts`,
+`frontend/src/pages/HomePage.tsx`, `frontend/src/pages/AnalysisPage.tsx`.

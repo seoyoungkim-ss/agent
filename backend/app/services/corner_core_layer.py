@@ -47,22 +47,27 @@ def classify_corner_core_layer(
 
 
 def build_employee_corner_counts(
-    db: Session, period_start: dt.date, period_end: dt.date
+    db: Session, period_start: dt.date, period_end: dt.date, *, exclude_corner_ids: set[int] | None = None
 ) -> dict[str, dict[int, int]]:
     """meal_log에서 기간 내 사번별 코너별 방문 횟수를 센다.
 
     기간 필터는 menu_affinity.py::build_employee_menu_sets와 동일한
     [period_start, period_end+1일 배타적상한] 패턴(레포 전역 컨벤션).
+
+    exclude_corner_ids로 제외한 코너는 그 코너 자체의 카운트뿐 아니라
+    total(분모)에도 안 잡히게 한다 — 안 그러면 그 코너를 뺀 요약 표에서도
+    다른 코너들의 corner_share가 실제보다 낮게 나온다(2026-08, 코어층
+    분석에서 Take Out 제외).
     """
     period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
     period_start_dt = dt.datetime.combine(period_start, dt.time())
-    rows = (
-        db.query(MealLog.employee_id, MealLog.corner_id)
-        .filter(MealLog.eaten_at >= period_start_dt, MealLog.eaten_at < period_end_exclusive)
-        .all()
+    query = db.query(MealLog.employee_id, MealLog.corner_id).filter(
+        MealLog.eaten_at >= period_start_dt, MealLog.eaten_at < period_end_exclusive
     )
+    if exclude_corner_ids:
+        query = query.filter(MealLog.corner_id.notin_(exclude_corner_ids))
     counts: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
-    for employee_id, corner_id in rows:
+    for employee_id, corner_id in query.all():
         counts[employee_id][corner_id] += 1
     return {emp: dict(c) for emp, c in counts.items()}
 

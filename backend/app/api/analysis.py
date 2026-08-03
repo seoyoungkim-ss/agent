@@ -421,9 +421,19 @@ def corner_core_layer_summary(
     되므로, `build_employee_corner_counts`(전체 코너를 이미 한 번에 스캔함)
     를 한 번만 호출한 뒤 코너별로 `classify_corner_core_layer`만 루프 돈다
     (메뉴 쌍 계산 생략).
+
+    Take Out은 착석 취식이 아니라 "이 코너를 반복해서 찾는 충성 고객"이라는
+    코어층 개념과 안 맞아 제외한다(2026-08) — corner_analysis의
+    exclude_take_out과 같은 이유. 그린미트/미캠회관(전골)은 다른 코너별
+    분석에서는 제외 대상이지만 코어층 분석 범위에는 포함되지 않아 이번엔
+    건드리지 않는다.
     """
-    corners = db.query(CornerMaster).all()
-    employee_corner_counts = build_employee_corner_counts(db, period_start, period_end)
+    take_out = db.query(CornerMaster).filter(CornerMaster.corner_name == TAKE_OUT_CORNER_NAME).one_or_none()
+    exclude_corner_ids = {take_out.corner_id} if take_out else None
+    corners = db.query(CornerMaster).filter(CornerMaster.corner_name != TAKE_OUT_CORNER_NAME).all()
+    employee_corner_counts = build_employee_corner_counts(
+        db, period_start, period_end, exclude_corner_ids=exclude_corner_ids
+    )
     total_employees = len(employee_corner_counts)
 
     result = []
