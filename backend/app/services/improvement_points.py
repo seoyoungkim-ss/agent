@@ -136,8 +136,10 @@ def _build_voe_summary_prompt(category: str, comments: list[str]) -> str:
 
 
 def _fallback_voe_summary(category: str, comments: list[str]) -> str:
+    # 미설정 상태뿐 아니라 설정은 됐지만 게이트웨이 호출이 실패한 경우에도
+    # 재사용하므로(2026-08) "미설정"으로 단정하지 않는 문구로 통일한다.
     sample = comments[0] if comments else ""
-    return f"'{category}' 관련 코멘트 예시: \"{sample}\" 등 (사내 LLM 미설정 — 원문 예시만 표시)"
+    return f"'{category}' 관련 코멘트 예시: \"{sample}\" 등 (사내 LLM 요약 사용 불가 — 원문 예시만 표시)"
 
 
 async def summarize_voe_comments(
@@ -150,6 +152,13 @@ async def summarize_voe_comments(
     sample = comments[:_VOE_SUMMARY_SAMPLE_SIZE]
     if llm_client.is_configured:
         prompt = _build_voe_summary_prompt(category, sample)
-        summary = await llm_client.chat_complete([{"role": "user", "content": prompt}])
-        return summary.strip()
+        try:
+            summary = await llm_client.chat_complete([{"role": "user", "content": prompt}])
+            return summary.strip()
+        except Exception:
+            # 사내 LLM 게이트웨이 타임아웃/연결실패/오류응답이 이 예외처리 없이
+            # 그대로 전파돼 "개선 필요 포인트" 카드 전체를 500으로 죽이던 문제
+            # (2026-08 신고) — 이 축(VOE)만 원문 예시로 조용히 대체하고
+            # 혼잡도/만족도 포인트는 정상 응답하게 한다.
+            return _fallback_voe_summary(category, sample)
     return _fallback_voe_summary(category, sample)

@@ -73,3 +73,19 @@ async def test_summarize_voe_comments_falls_back_to_sample_quote_when_llm_unconf
     summary = await summarize_voe_comments(llm_client, "위생", ["위생이 너무 안 좋아요"])
     assert "위생" in summary
     assert "위생이 너무 안 좋아요" in summary
+
+
+@pytest.mark.asyncio
+async def test_summarize_voe_comments_falls_back_when_llm_call_raises(monkeypatch):
+    # 사내 LLM은 설정돼 있지만(is_configured=True) 게이트웨이가 타임아웃/연결실패/
+    # 오류응답을 내는 상황 — 예외가 카드 전체를 500으로 죽이지 않고 원문 예시
+    # 폴백으로 조용히 대체돼야 한다(2026-08 신고 수정 회귀 테스트).
+    llm_client = InternalLLMClient(Settings(internal_llm_base_url="http://unreachable.invalid"))
+
+    async def _raise(*args, **kwargs):
+        raise ConnectionError("boom")
+
+    monkeypatch.setattr(llm_client, "chat_complete", _raise)
+    summary = await summarize_voe_comments(llm_client, "위생", ["위생이 너무 안 좋아요"])
+    assert "위생" in summary
+    assert "위생이 너무 안 좋아요" in summary

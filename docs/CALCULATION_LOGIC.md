@@ -2719,3 +2719,56 @@ menu_performance`가 로열티 있는 저수요 메뉴를 실제로 숨은강자
 aggregation.py`, `backend/app/api/analysis.py`, `backend/tests/
 test_menu_performance.py`, `backend/tests/test_api_ingest_and_analysis.py`,
 `frontend/src/api/client.ts`, `frontend/src/pages/AnalysisPage.tsx`.
+
+## 44. "개선 필요 포인트" 카드 500 에러 수정 (2026-08)
+
+홈 화면 "개선 필요 포인트" 카드에서 Internal Server Error 신고. 원인:
+`GET /dashboard/improvement-points`(`dashboard.py::improvement_points`)가
+VOE 축 포인트마다 `improvement_points.py::summarize_voe_comments`를 호출해
+사내 LLM에 주관식 코멘트 요약을 요청하는데, 이 LLM 호출(`InternalLLMClient.
+chat_complete` → `httpx` POST) 주변에 예외처리가 전혀 없었다 — 게이트웨이가
+타임아웃/연결실패/오류응답을 내면 예외가 그대로 전파돼 카드 전체가 500으로
+죽었다. `INTERNAL_LLM_BASE_URL`을 불가 도달 주소로 두고 실제로 재현 확인함
+(`httpx.ConnectError` 전파 → 500).
+
+이전 라운드에 `dashboard.py::recompute_voe_clusters`에서 이미 한 번 같은
+유형의 버그를 고친 전례가 있었는데(그 수정 주석: *"이 경로는 사내 LLM
+임베딩 게이트웨이 호출을 포함해 외부 의존성이 많다 — 원인 불명 500 대신
+어떤 예외였는지 detail에 남겨 디버깅 가능하게 한다"*), `improvement_
+points()`에는 반영이 안 돼 있었다.
+
+**수정 방식은 그 전례와 다르게 택함**: `recompute_voe_clusters`는 POST
+재계산 전용이라 실패 시 502로 명확히 알리는 게 맞지만, `improvement_
+points()`는 혼잡도/만족도/VOE 세 축을 한 번에 반환하는 GET이고 VOE 요약은
+그중 "있으면 좋은" 부가 정보다 — LLM 호출 하나가 실패했다고 이미 계산된
+혼잡도/만족도 포인트까지 전부 못 보여주는 건 과하다. 그래서 `summarize_
+voe_comments`의 LLM 호출을 `try/except Exception`으로 감싸고, 실패 시
+(LLM 미설정 시와 동일하게) `_fallback_voe_summary`(원문 코멘트 예시)로
+조용히 대체하는 쪽을 택했다 — 나머지 두 축은 정상 응답. 겸사겸사
+`_fallback_voe_summary`의 안내 문구도 "사내 LLM 미설정"(설정은 됐지만
+호출만 실패한 경우엔 부정확한 말)에서 "사내 LLM 요약 사용 불가"로
+고쳤다 — 이 함수가 이제 "미설정"과 "설정했지만 실패" 두 경우 모두에
+재사용되기 때문.
+
+**조사 중 발견한 별개 버그(이번 범위 아님)**: `corner_analysis`
+(analysis.py)가 라우트가 아니라 `chat_grounding.py`/`dashboard.py`에서
+일반 파이썬 함수로 직접 호출되는데, `exclude_take_out` 파라미터가 여전히
+`Query(default=False, ...)` 기본값이라 직접 호출 시 `Query` 객체 자체가
+truthy로 들어와 항상 `exclude_take_out=True`처럼 동작한다(Take Out이
+항상 제외됨, 의도한 기본값과 반대) — 크래시는 안 나는 조용한 동작
+오류라 이번엔 범위에서 제외(사용자 확인). 매일 새벽 스케줄러가 집계하는
+기간(어제 기준 180일)과 홈 화면이 조회하는 기간(오늘 기준 180일)이 하루
+어긋나 "만족도 개선필요" 축이 조용히 빈 결과만 나올 수 있는 것도 별개
+건으로 남겨둠.
+
+**검증**: 회귀 테스트 1건 추가(`test_summarize_voe_comments_falls_back_
+when_llm_call_raises` — `is_configured=True`인 클라이언트의 `chat_complete`
+가 예외를 던지도록 monkeypatch, 폴백 문구로 정상 반환되는지 확인) 포함
+전체 280개 통과. uvicorn을 `INTERNAL_LLM_BASE_URL=http://127.0.0.1:59999`
+(불가 도달)로 띄운 채 `GET /api/dashboard/improvement-points` 재현 —
+더는 500이 아니라 200으로 응답하고 VOE 포인트만 폴백 문구가 붙는 것을
+확인. 정상(미설정) 상태로 재기동 후 Playwright로 홈 화면 확인 시
+`improvement-points` 요청이 200이고 페이지 에러 없음.
+
+**파일 요약**: `backend/app/services/improvement_points.py`,
+`backend/tests/test_improvement_points.py`.
