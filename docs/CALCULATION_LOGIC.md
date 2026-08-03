@@ -2772,3 +2772,57 @@ when_llm_call_raises` — `is_configured=True`인 클라이언트의 `chat_compl
 
 **파일 요약**: `backend/app/services/improvement_points.py`,
 `backend/tests/test_improvement_points.py`.
+
+## 45. "전체 예측 비교"/"개선 필요 포인트" 500 재신고 — 회귀 수정 + 실제 원인 (2026-08)
+
+사용자가 본인 uvicorn(8080)에서 "주간식단표관리 → 전체 예측 비교"와
+"홈 → 개선 필요 포인트" 두 화면에서만 API 500이 뜬다고 신고(다른 화면은
+정상). 두 가지를 확인했다.
+
+**1) 확정된 회귀(코드 버그, 수정함)**: `weekly_menu_prediction.py::
+compute_predicted_numbers`가 `simulation.py::_baseline_headcount`를 호출할
+때 `is_holiday`(**bool**)를 넘기고 있었는데, `_baseline_headcount`의
+시그니처는 이전 "패밀리데이" 라운드에서 `classification: DayClassification`
+(enum)으로 바뀌었다 — `what_if`/`congestion_forecast`(simulation.py)는 그때
+같이 고쳐졌지만 이 파일의 호출부는 빠졌던 것. `classification ==
+DayClassification.HOLIDAY` 비교는 bool을 받아도 예외 없이 그냥 False로
+평가돼(파이썬은 타입이 달라도 `==` 자체는 안 터짐) 크래시는 안 나고,
+대신 **주말/공휴일/패밀리데이에 계획된 메뉴도 매번 "평일 이력"만으로
+baseline을 계산하는 조용한 오류**였다 — `_baseline_headcount`가 항상
+`is_holiday.is_(False)` 풀에서만 이력을 가져왔기 때문. 회귀 테스트로
+재현 확인: 평일 이력(2명)과 주말(토요일) 이력(20명)을 뚜렷이 다르게
+시딩하고, 실제 계획일이 토요일인 슬롯의 예측 식수를 확인하면 수정 전엔
+2명(평일 이력만 사용, 틀림), 수정 후엔 20명대(주말 이력 정상 사용)로
+나온다(`test_predicted_impact_uses_holiday_history_for_holiday_plan_date`).
+`holiday_svc.is_holiday(plan.plan_date)` 대신 `holiday_svc.classify(plan.
+plan_date)`로 교체해 `what_if`/`congestion_forecast`와 동일한 패턴으로
+맞췄다.
+
+**2) 실제 500의 원인(코드 버그 아님, 별도 스크래치 DB로 재현·확정)**: 위
+회귀는 `==` 비교가 안전해 크래시를 안 낸다 — 그래서 이 세션의 dev DB(이미
+`alembic upgrade head` 적용됨)에서는 두 엔드포인트 모두 200으로 정상
+응답했다. 진짜 500 원인을 확인하려고 별도의 1회성 스크래치 Postgres DB를
+만들어 `alembic upgrade head` 후 `alembic downgrade -1`로 **바로 직전
+라운드(43번 항목)에서 추가한 `d6ad762b4b92`(menu_performance_stats에
+`satisfaction_trend`/`has_loyal_following` 컬럼 추가) 마이그레이션만
+빠진 상태**를 재현해보니, `MenuPerformanceStats`를 조회하는 쿼리마다
+`psycopg.errors.UndefinedColumn: column menu_performance_stats.
+satisfaction_trend does not exist`가 그대로 전파돼 500이 났다(스크래치
+DB는 확인 후 즉시 삭제). `compute_predicted_numbers`(전체 예측 비교의
+숫자 계산 경로)와 `analysis.py::menu_performance`(개선 필요 포인트가
+만족도 축에 쓰는 함수) 둘 다 `MenuPerformanceStats`를 조회하므로 이
+설명과 정확히 들어맞는다 — **사용자가 최신 코드를 pull한 뒤 자신의
+DB에는 아직 `alembic upgrade head`를 안 돌린 상태로 8080 서버를 띄운
+것으로 보인다.** 코드로 고칠 수 있는 문제가 아니라 배포 절차 문제라,
+사용자에게 `cd backend && alembic upgrade head`를 실행한 뒤 재기동해
+달라고 안내했다.
+
+**검증**: 신규 회귀 테스트 포함 전체 281개 통과. uvicorn 재기동 후 실제
+데이터로 `GET /analysis/weekly-menu/predicted-impact-summary`, `GET
+/dashboard/improvement-points` 둘 다 200 확인. Playwright로 "분석 →
+주간 식단표 관리" 탭에서 "전체 예측 비교" 버튼을 실제로 클릭해 콘솔/
+네트워크 에러 없이 예측 요약이 렌더되는 것과, 홈 화면 전체가 콘솔/네트워크
+에러 없이 뜨는 것을 확인.
+
+**파일 요약**: `backend/app/services/weekly_menu_prediction.py`,
+`backend/tests/test_api_ingest_and_analysis.py`.

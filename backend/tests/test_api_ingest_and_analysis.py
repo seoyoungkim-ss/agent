@@ -549,6 +549,61 @@ def test_predicted_impact_computes_expected_wait_minutes_from_peak_time_throughp
     assert expected_wait >= 0
 
 
+def test_predicted_impact_uses_holiday_history_for_holiday_plan_date(client):
+    """회귀 테스트: weekly_menu_prediction.py::compute_predicted_numbers가
+    _baseline_headcount에 bool(is_holiday)을 넘기던 버그(2026-08 발견) —
+    DayClassification과 비교가 항상 False로 평가돼 주말/공휴일 계획도 매번
+    평일 이력만으로 baseline을 계산했다. 평일 이력(식수 낮음)과 주말 이력
+    (식수 높음)을 뚜렷이 다르게 시딩해, 실제 계획일이 토요일(주말+공휴일)
+    이면 주말 이력이 쓰이는지 확인한다."""
+    weekday_history_date = dt.date(2026, 7, 13)  # 월요일
+    holiday_history_date = dt.date(2026, 7, 18)  # 토요일
+    plan_date = dt.date(2026, 7, 25)  # 토요일 — 이 날짜의 예측이 검증 대상
+
+    for i in range(2):
+        _ingest_meal_log(client, f"W{i}", "맛남", eaten_date=weekday_history_date, menu_name="제육볶음")
+    for i in range(20):
+        _ingest_meal_log(client, f"H{i}", "맛남", eaten_date=holiday_history_date, menu_name="제육볶음")
+
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": weekday_history_date.isoformat(), "period_end": holiday_history_date.isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+
+    rows = [
+        {
+            "plan_date": plan_date.isoformat(),
+            "meal_type": "중식",
+            "corner_name": "한식",
+            "menu_name": "제육볶음",
+            "menu_role": "메인",
+            "source_row_raw": "제육볶음",
+        }
+    ]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu", params={"period_start": plan_date.isoformat(), "period_end": plan_date.isoformat()}
+    )
+    main_plan_id = next(s for s in resp.json() if s["corner_name"] == "한식")["main"]["plan_id"]
+
+    resp = client.get(f"/api/analysis/weekly-menu/{main_plan_id}/predicted-impact")
+    assert resp.status_code == 200, resp.text
+    predicted_headcount = resp.json()["prediction"]["predicted_headcount"]
+    # 버그가 있으면 평일 이력(2명)만 써서 5명 미만이 나온다 — 주말 이력(20명)을
+    # 정상적으로 썼다면 그 근방(배수 적용 후에도 두 자릿수)이어야 한다.
+    assert predicted_headcount >= 10
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/predicted-impact-summary",
+        params={"period_start": plan_date.isoformat(), "period_end": plan_date.isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()[0]["prediction"]["predicted_headcount"] >= 10
+
+
 def test_new_menu_status_unknown_menu_name_404s(client):
     resp = client.put(
         "/api/analysis/menus/new-menu-status", json={"menu_name": "존재안함", "is_new": True}

@@ -191,7 +191,7 @@ def compute_predicted_numbers(db: Session, plan_id: int) -> dict | None:
     )
 
     holiday_svc = HolidayService(db)
-    is_holiday = holiday_svc.is_holiday(plan.plan_date)
+    classification = holiday_svc.classify(plan.plan_date)
 
     share_multiplier = _menu_popularity_multiplier(db, plan.corner_id, plan.menu_id)
     throughput_days = build_corner_daily_throughput(db, plan.corner_id, period_start, period_end)
@@ -207,7 +207,7 @@ def compute_predicted_numbers(db: Session, plan_id: int) -> dict | None:
 
     corner_headcounts: dict[int, float] = {}
     for c in db.query(CornerMaster).all():
-        baseline = _baseline_headcount(db, c.corner_id, plan.meal_type, is_holiday)
+        baseline = _baseline_headcount(db, c.corner_id, plan.meal_type, classification)
         if c.corner_id == plan.corner_id:
             corner_headcounts[c.corner_id] = baseline * target_multiplier
             continue
