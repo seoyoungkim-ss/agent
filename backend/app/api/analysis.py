@@ -9,9 +9,16 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.models.enums import TASTE_SCORE_POINTS, FoodVectorSource, MealType, MenuRole, TrendDirection
+from app.models.enums import (
+    TASTE_SCORE_POINTS,
+    Division,
+    FoodVectorSource,
+    MealType,
+    MenuRole,
+    TrendDirection,
+)
 from app.models.logs import MealLog, WeeklyMenuPlan
-from app.models.master import CornerMaster, MenuMaster
+from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import (
     DailyCornerStats,
     DailyDivisionStats,
@@ -38,7 +45,7 @@ from app.services.food_vector import (
     describe_average_bias,
 )
 from app.services.food_vector_tagging import run_llm_food_vector_tagging
-from app.services.holidays import DayClassification, family_day_dates_in_range
+from app.services.holidays import DayClassification, HolidayService, family_day_dates_in_range
 from app.services.llm_client import InternalLLMClient
 from app.services.master_data import PLACEHOLDER_MENU_NAMES, TAKE_OUT_CORNER_NAME
 from app.services.menu_performance import (
@@ -160,6 +167,85 @@ def division_analysis(
     ]
 
 
+@router.get("/headcount-trend")
+def headcount_trend(
+    period_start: dt.date,
+    period_end: dt.date,
+    granularity: Literal["daily", "weekly", "monthly"] = "daily",
+    group_by: Literal["total", "corner", "division", "meal_type"] = "total",
+    meal_types: list[MealType] | None = Query(
+        default=None, description="조식/중식/석식 필터 — 생략 시 전체"
+    ),
+    corner_ids: list[int] | None = Query(default=None, description="코너 필터 — 생략 시 전체"),
+    divisions: list[Division] | None = Query(
+        default=None, description="본사/계열사/기타 필터 — 생략 시 전체"
+    ),
+    classification: str | None = Query(default=None, description="평일 | 주말+공휴일 | 패밀리데이"),
+    db: Session = Depends(get_db),
+):
+    """현황 화면의 통합 식수 추이 — 조·중·석식 × 코너 × 회사구분 3축을 동시에 필터한다.
+
+    **왜 집계 테이블을 안 쓰는가**: `daily_corner_stats`는 (날짜, 코너, 끼니),
+    `daily_division_stats`는 (날짜, 회사구분, 끼니)로 각각 2축까지만 집계돼 있어
+    "중식 × 한식코너 × 계열사" 같은 교차 셀이 어느 집계 테이블에도 없다. 3축이
+    동시에 존재하는 유일한 소스가 원천 로그라서 `meal_log ⋈ employee_master`를
+    요청 시점에 집계한다. 새 집계 테이블을 만드는 대신 이 방식을 택한 이유는
+    이 레포가 집계 테이블 미갱신으로 화면이 비는 문제를 이미 두 번 겪었고
+    (22절, 45절), meal_log에 eaten_at/corner_id/employee_id 인덱스가 이미
+    있으며, 캠퍼스 1개 규모라 기간 스캔이 감당 가능하기 때문이다(2026-08).
+
+    `group_by`는 **필터와 별개로** "무엇을 선으로 그릴지"를 정한다 — 예를 들어
+    회사구분을 계열사로 좁힌 뒤 코너별로 나눠 보는 식의 조합이 가능하다.
+    """
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+
+    query = (
+        db.query(MealLog.eaten_at, MealLog.corner_id, MealLog.meal_type, EmployeeMaster.division)
+        # 사번이 employee_master에 없을 수 있다 — aggregation.py::aggregate_daily_stats가
+        # 그런 행을 Division.OTHER로 집계하므로(dict.get 기본값) 여기서도 버리지 않고
+        # 같은 규칙으로 맞춰야 daily_division_stats와 합계가 어긋나지 않는다.
+        .outerjoin(EmployeeMaster, MealLog.employee_id == EmployeeMaster.employee_id)
+        .filter(MealLog.eaten_at >= period_start_dt, MealLog.eaten_at < period_end_exclusive)
+    )
+    if meal_types:
+        query = query.filter(MealLog.meal_type.in_(meal_types))
+    if corner_ids:
+        query = query.filter(MealLog.corner_id.in_(corner_ids))
+
+    corner_names = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+    # meal_log엔 is_holiday 컬럼이 없어 _apply_classification_filter(집계 테이블 전용)를
+    # 못 쓴다 — HolidayService가 holiday_calendar를 한 번만 캐싱하므로 행별 분류가 싸다.
+    holiday_svc = HolidayService(db)
+    division_filter = set(divisions) if divisions else None
+
+    totals: dict[tuple[str, str, str], int] = {}
+    for eaten_at, corner_id, meal_type, division in query.all():
+        division = division or Division.OTHER
+        if division_filter is not None and division not in division_filter:
+            continue
+        stat_date = eaten_at.date()
+        if classification and holiday_svc.classify(stat_date).value != classification:
+            continue
+
+        if group_by == "corner":
+            series_key, series_label = str(corner_id), corner_names.get(corner_id) or "코너 미배정"
+        elif group_by == "division":
+            series_key = series_label = division.value
+        elif group_by == "meal_type":
+            series_key = series_label = meal_type.value
+        else:
+            series_key = series_label = "전체"
+
+        key = (_period_bucket(stat_date, granularity), series_key, series_label)
+        totals[key] = totals.get(key, 0) + 1
+
+    return [
+        {"period": period, "series_key": series_key, "series_label": series_label, "headcount": headcount}
+        for (period, series_key, series_label), headcount in sorted(totals.items())
+    ]
+
+
 def _load_corner_stats(
     db: Session,
     period_start: dt.date,
@@ -265,6 +351,22 @@ def corner_analysis_trend(
             }
         )
     return result
+
+
+@router.get("/corners/list")
+def corner_list(db: Session = Depends(get_db)):
+    """코너 목록만 — corner_master를 그대로 읽는다(통계 없음).
+
+    `/analysis/corners`는 daily_corner_stats(배치 집계)를 읽어 배치가 안 돌면
+    빈 배열이 된다. 현황 화면의 **코너 필터 선택지**는 배치 상태와 무관하게 항상
+    떠 있어야 하므로(headcount-trend가 배치에 의존하지 않는 것과 같은 이유)
+    마스터를 직접 읽는 경로를 따로 둔다(2026-08).
+    """
+    corners = db.query(CornerMaster).order_by(CornerMaster.corner_id).all()
+    return [
+        {"corner_id": c.corner_id, "corner_name": c.corner_name, "is_diet_corner": c.is_diet_corner}
+        for c in corners
+    ]
 
 
 @router.get("/corners/main-menu-by-date")

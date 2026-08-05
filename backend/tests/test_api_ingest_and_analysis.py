@@ -1983,6 +1983,127 @@ def test_voe_by_category_groups_comments_into_fixed_categories(client):
     assert categories["기타"]["comments"][0]["comment"] == "그냥 평범했어요"
 
 
+def _corner_id(db_session, corner_name: str) -> int:
+    """corner_master에서 직접 읽는다 — /api/analysis/corners는 배치 집계
+    (daily_corner_stats)를 읽으므로 recompute 전에는 비어 있다."""
+    from app.models.master import CornerMaster
+
+    return db_session.query(CornerMaster).filter_by(corner_name=corner_name).one().corner_id
+
+
+def _seed_headcount_trend_fixture(client):
+    """코너 × 회사구분 교차 셀을 구분할 수 있게 시딩한다.
+
+    MONDAY(평일): 한식×삼성전자(본사) 2건, 한식×삼성SDI(계열사) 1건,
+                  분식×삼성전자(본사) 1건 — 중식
+    MONDAY+5(토, 주말): 한식×삼성전자 1건 — 중식
+    MONDAY(평일) 조식: 한식×삼성전자 1건
+    """
+    for i in range(2):
+        _ingest_meal_log(client, f"HQ{i}", "맛남", company_name="삼성전자", corner_name="한식")
+    _ingest_meal_log(client, "AF1", "맛남", company_name="삼성SDI", corner_name="한식")
+    _ingest_meal_log(client, "HQ9", "맛남", company_name="삼성전자", corner_name="분식")
+    _ingest_meal_log(
+        client, "HQW", "맛남", company_name="삼성전자", corner_name="한식",
+        eaten_date=MONDAY + dt.timedelta(days=5),
+    )
+    # 조식 1건 — meal_type 필터가 실제로 걸리는지 확인용
+    client.post(
+        "/api/ingest/meal-log",
+        json={
+            "rows": [
+                {
+                    "eaten_at": dt.datetime.combine(MONDAY, dt.time(8, 0)).isoformat(),
+                    "employee_id": "HQB",
+                    "meal_type": "조식",
+                    "corner_name": "한식",
+                    "taste_score": "맛남",
+                    "company_name": "삼성전자",
+                }
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+
+
+def _trend(client, **params):
+    resp = client.get("/api/analysis/headcount-trend", params=params)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_headcount_trend_crosses_corner_and_division(client, db_session):
+    """기존 엔드포인트로는 불가능했던 '코너 × 회사구분' 교차 필터(2026-08)."""
+    _seed_headcount_trend_fixture(client)
+    period = {"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=6)).isoformat()}
+
+    # 한식 코너 + 본사만 = MONDAY 중식 2건 + MONDAY 조식 1건 + 토요일 1건 = 4건
+    corner_id = _corner_id(db_session, "한식")
+    rows = _trend(client, **period, corner_ids=[corner_id], divisions=["본사"])
+    assert sum(r["headcount"] for r in rows) == 4
+
+    # 같은 코너에서 계열사만 = 1건 (교차가 실제로 갈라지는지)
+    rows = _trend(client, **period, corner_ids=[corner_id], divisions=["계열사"])
+    assert sum(r["headcount"] for r in rows) == 1
+
+
+def test_headcount_trend_meal_type_and_classification_filters(client):
+    _seed_headcount_trend_fixture(client)
+    period = {"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=6)).isoformat()}
+
+    # 중식만 = 전체 6건 중 조식 1건 제외한 5건
+    assert sum(r["headcount"] for r in _trend(client, **period, meal_types=["중식"])) == 5
+    # 평일만 = 토요일 1건 제외한 5건
+    assert sum(r["headcount"] for r in _trend(client, **period, classification="평일")) == 5
+    # 주말+공휴일만 = 토요일 1건
+    assert sum(r["headcount"] for r in _trend(client, **period, classification="주말+공휴일")) == 1
+
+
+def test_headcount_trend_group_by_axes(client):
+    _seed_headcount_trend_fixture(client)
+    period = {"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=6)).isoformat()}
+
+    by_division = _trend(client, **period, group_by="division")
+    totals = {}
+    for r in by_division:
+        totals[r["series_label"]] = totals.get(r["series_label"], 0) + r["headcount"]
+    assert totals == {"본사": 5, "계열사": 1}
+
+    by_corner = _trend(client, **period, group_by="corner")
+    corner_totals = {}
+    for r in by_corner:
+        corner_totals[r["series_label"]] = corner_totals.get(r["series_label"], 0) + r["headcount"]
+    assert corner_totals == {"한식": 5, "분식": 1}
+
+    # group_by=total이면 시리즈가 하나로 합쳐진다
+    assert {r["series_label"] for r in _trend(client, **period)} == {"전체"}
+
+
+def test_headcount_trend_total_matches_division_analysis(client):
+    """신규 런타임 집계가 기존 배치 집계(daily_division_stats)와 합계가 일치하는지 —
+    사번이 employee_master에 없을 때 Division.OTHER로 넣는 규칙까지 동일해야 한다."""
+    _seed_headcount_trend_fixture(client)
+    period_end = MONDAY + dt.timedelta(days=6)
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": period_end.isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/divisions",
+        params={"period_start": MONDAY.isoformat(), "period_end": period_end.isoformat()},
+    )
+    assert resp.status_code == 200
+    legacy_total = sum(r["headcount"] for r in resp.json())
+
+    new_total = sum(
+        r["headcount"]
+        for r in _trend(client, period_start=MONDAY.isoformat(), period_end=period_end.isoformat())
+    )
+    assert new_total == legacy_total
+
+
 def test_voe_by_category_comment_includes_menu_name(client):
     # 어떤 메뉴에 대한 의견인지 알 수 있게 코멘트마다 menu_name도 함께 내려온다(2026-08).
     _ingest_meal_log(client, "E1", "맛남", comment="정말 맛있어요", menu_name="제육볶음")

@@ -1,7 +1,15 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
-import { api, type Classification, type CongestionForecastRow, type MealType } from "../api/client";
+import {
+  api,
+  type Classification,
+  type CongestionForecastRow,
+  type Division,
+  type Granularity,
+  type HeadcountGroupBy,
+  type MealType,
+} from "../api/client";
 import {
   Button,
   Card,
@@ -31,11 +39,9 @@ function isoDaysAgo(days: number): string {
 
 const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
 
-// 이 3개 코너는 니치 코너(테이크아웃/소규모 별관/다이어트식)라 일반 코너
-// 추이 비교에서 기본으로는 안 보이게 하고, 범례 맨 뒤로 보내 필요할 때만
-// 클릭해서 켜게 한다(analysis.py::corner_analysis의 그린미트 정렬 관례와
-// 같은 취지 — 니치 코너는 항상 뒤로).
-const LOW_PRIORITY_CORNER_NAMES = new Set(["Take Out", "미캠회관(전골)", "그린미트"]);
+// 니치 코너(Take Out/미캠회관/그린미트)를 범례에서 기본 숨기던 규칙은 제거됐다
+// (2026-08 현황 재편) — 통합 추이 차트에 명시적인 "코너 필터"가 생겨, 숨겨진
+// 기본값보다 사용자가 직접 고르는 쪽이 더 분명하다.
 
 // x축 날짜를 "MM-DD(요일)"로 보여줘 월~일 순서가 한눈에 보이게 한다.
 function weekdayLabel(dateIso: string): string {
@@ -129,29 +135,53 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
     queryFn: () => api.cornerAnalysis({ period_start: selectedMonday, period_end: saturdayOfSelected }),
   });
 
-  const cornerTrend = useQuery({
+  // ---- 통합 식수 추이 (2026-08 현황 재편) ----
+  // 조·중·석식 × 코너 × 회사구분 3축을 한 그래프에서 필터한다. 기간 단위는
+  // 조회 범위까지 같이 정한다(일=최근 30일 / 주=최근 12주 / 월=최근 12개월) —
+  // 위 요약 카드들의 "선택한 주"와 달리 추이는 더 긴 흐름을 봐야 의미가 있다.
+  const [trendGranularity, setTrendGranularity] = useState<Granularity>("daily");
+  const [trendGroupBy, setTrendGroupBy] = useState<HeadcountGroupBy>("total");
+  const [trendCornerIds, setTrendCornerIds] = useState<number[]>([]);
+  const [trendDivisions, setTrendDivisions] = useState<Division[]>([]);
+  const TREND_LOOKBACK_DAYS: Record<Granularity, number> = { daily: 30, weekly: 84, monthly: 365 };
+  const trendPeriodStart = isoDaysAgo(TREND_LOOKBACK_DAYS[trendGranularity]);
+  const trendPeriodEnd = isoDaysAgo(0);
+
+  const cornerListQuery = useQuery({
+    queryKey: ["corner-list"],
+    queryFn: () => api.cornerList(),
+  });
+  // 일간 × 코너별로 볼 때 툴팁에 그날 그 코너의 메인메뉴를 덧붙인다(2026-07 요청,
+  // 코너별 주간 추이 차트에 있던 기능을 통합 차트로 옮겨옴). 그 조합일 때만 조회한다.
+  const trendMainMenuEnabled = trendGranularity === "daily" && trendGroupBy === "corner";
+  const cornerMainMenu = useQuery({
+    queryKey: ["corner-main-menu-by-date", trendPeriodStart, trendPeriodEnd],
+    queryFn: () => api.cornerMainMenuByDate({ period_start: trendPeriodStart, period_end: trendPeriodEnd }),
+    enabled: trendMainMenuEnabled,
+  });
+  const headcountTrend = useQuery({
     queryKey: [
-      "corner-weekly-trend",
-      selectedMonday,
-      saturdayOfSelected,
-      classification,
+      "headcount-trend",
+      trendPeriodStart,
+      trendPeriodEnd,
+      trendGranularity,
+      trendGroupBy,
       mealTypeFilter.join("|"),
+      trendCornerIds.join("|"),
+      trendDivisions.join("|"),
+      classification,
     ],
     queryFn: () =>
-      api.cornerAnalysisTrend({
-        period_start: selectedMonday,
-        period_end: saturdayOfSelected,
-        granularity: "daily",
-        classification: classification === "전체" ? undefined : classification,
+      api.headcountTrend({
+        period_start: trendPeriodStart,
+        period_end: trendPeriodEnd,
+        granularity: trendGranularity,
+        group_by: trendGroupBy,
         meal_types: mealTypeFilter,
+        corner_ids: trendCornerIds.length > 0 ? trendCornerIds : undefined,
+        divisions: trendDivisions.length > 0 ? trendDivisions : undefined,
+        classification: classification === "전체" ? undefined : classification,
       }),
-  });
-
-  // 코너별 주간 식수 추이 툴팁에 그날의 메인메뉴를 같이 보여주기 위한 매핑 —
-  // AnalysisPage.tsx의 buildMetricTooltipFormatter와 동일한 패턴(2026-07 도입).
-  const cornerMainMenu = useQuery({
-    queryKey: ["corner-main-menu-by-date", selectedMonday, saturdayOfSelected],
-    queryFn: () => api.cornerMainMenuByDate({ period_start: selectedMonday, period_end: saturdayOfSelected }),
   });
 
   const recomputeDailyStats = useMutation({
@@ -226,57 +256,11 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   const holidayColor = resolveColor("var(--critical)");
   const familyDayColor = resolveColor("var(--series-3)");
 
-  // 패밀리데이는 한 주에 최대 1일뿐이라 "주간 식수 추이"로는 서로 비교가 안 된다
-  // — 패밀리데이를 선택하면 대신 월별로 패밀리데이끼리 식수를 비교하는 별도
-  // 추이를 보여준다(2026-07, division_analysis를 재사용 — 이미 classification=
-  // 패밀리데이+월간 집계를 지원함).
-  const familyDayTrend = useQuery({
-    queryKey: ["family-day-monthly-trend"],
-    queryFn: () =>
-      api.divisionAnalysis({
-        period_start: isoDaysAgo(365),
-        period_end: isoDaysAgo(0),
-        granularity: "monthly",
-        classification: "패밀리데이",
-      }),
-    enabled: classification === "패밀리데이",
-  });
-  const familyDayHeadcountByMonth = new Map<string, number>();
-  for (const row of familyDayTrend.data ?? []) {
-    familyDayHeadcountByMonth.set(row.period, (familyDayHeadcountByMonth.get(row.period) ?? 0) + row.headcount);
-  }
-  const familyDayMonths = [...familyDayHeadcountByMonth.keys()].sort();
-  const familyDayTrendOption = {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 48, right: 16, top: 16, bottom: 28 },
-    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
-    xAxis: {
-      type: "category",
-      data: familyDayMonths,
-      axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: { color: chartTheme.text },
-      axisTick: { show: false },
-    },
-    yAxis: {
-      type: "value",
-      name: "식수",
-      axisLabel: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-    },
-    series: [
-      {
-        name: "패밀리데이 식수",
-        type: "line" as const,
-        symbol: "circle",
-        symbolSize: 8,
-        lineStyle: { width: 2, color: seriesFamilyDay },
-        itemStyle: { color: seriesFamilyDay, borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
-        data: familyDayMonths.map((m) => familyDayHeadcountByMonth.get(m) ?? 0),
-      },
-    ],
-  };
-  // "주간 식수 추이"/"코너별 주간 식수 추이" 두 차트 전용 — 토요일 토글이 꺼져
-  // 있으면 두 차트에서만 토요일을 뺀다(누적 식수 스탯 타일은 영향 없음).
+  // 패밀리데이 월별 추이 카드는 제거됐다(2026-08 현황 재편) — 아래 "식수 추이"
+  // 통합 차트에서 classification=패밀리데이 + 기간단위=월간으로 같은 걸 볼 수 있다.
+
+  // "주간 식수 추이" 차트 전용 — 토요일 토글이 꺼져 있으면 이 차트에서만
+  // 토요일을 뺀다(누적 식수 스탯 타일은 영향 없음).
   const chartWeeklyData = showSaturday
     ? (weekly.data ?? [])
     : (weekly.data ?? []).filter((d) => new Date(d.date).getDay() !== 6);
@@ -327,63 +311,50 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
     ],
   };
 
-  // 색은 코너 인기 순위가 아니라 corner_id 기준으로 고정한다(dataviz 스킬: 색은
-  // 개체를 따라가야 하고 순위를 따라가면 안 된다) — cornerSummary.data는 이미
-  // 백엔드에서 그린미트 항상 마지막 정렬로 온다(analysis.py::corner_analysis).
-  const stableHomeCorners = [...(cornerSummary.data ?? [])].sort((a, b) => a.corner_id - b.corner_id);
-  const homeCornerColor = new Map(stableHomeCorners.map((c, i) => [c.corner_id, `var(--series-${(i % 8) + 1})`]));
-  const cornerTrendDays = chartWeeklyData.map((d) => d.date);
-  const trendByCornerHome = new Map<string, Map<string, number>>();
-  for (const row of cornerTrend.data ?? []) {
-    if (!trendByCornerHome.has(row.corner_name)) trendByCornerHome.set(row.corner_name, new Map());
-    trendByCornerHome.get(row.corner_name)!.set(row.period, row.headcount);
-  }
-  // 니치 코너(LOW_PRIORITY_CORNER_NAMES)는 범례 맨 뒤로 보내고 기본 숨김 —
-  // 나머지 코너는 기존 순서(corner_analysis 반환 순서) 그대로 유지.
-  const trendCornersHome = [...(cornerSummary.data ?? [])]
-    .filter((c) => trendByCornerHome.has(c.corner_name))
-    .sort((a, b) => Number(LOW_PRIORITY_CORNER_NAMES.has(a.corner_name)) - Number(LOW_PRIORITY_CORNER_NAMES.has(b.corner_name)));
-  const cornerLegendSelected = Object.fromEntries(
-    trendCornersHome.map((c) => [c.corner_name, !LOW_PRIORITY_CORNER_NAMES.has(c.corner_name)]),
+  // 툴팁은 시리즈 "이름"(코너명)만 알 수 있는데 main-menu-by-date는 corner_id로
+  // 오므로, 코너 목록으로 id→이름을 옮겨 코너명 기준 키로 맞춘다.
+  const cornerNameById = new Map((cornerListQuery.data ?? []).map((c) => [c.corner_id, c.corner_name]));
+  const mainMenuByCornerDate = new Map(
+    (cornerMainMenu.data ?? []).map((r) => [
+      `${cornerNameById.get(r.corner_id) ?? r.corner_id}|${r.plan_date}`,
+      r.menu_name,
+    ]),
   );
-  const cornerIdByNameHome = new Map(stableHomeCorners.map((c) => [c.corner_name, c.corner_id]));
-  const mainMenuByCornerDateHome = new Map(
-    (cornerMainMenu.data ?? []).map((r) => [`${r.corner_id}|${r.plan_date}`, r.menu_name]),
-  );
-  // 이 차트만의 툴팁 — 식수는 정수로 반올림하고(2026-08 피드백: 소수점이 보기
-  // 불편함), 그날 그 코너의 메인메뉴를 다음 줄에 덧붙인다. 다른 차트가 공유하는
-  // axisTooltipFormatter/formatTooltipNumber(소수 2자리)는 만족도 등에도 쓰이므로
-  // 그대로 두고, 이 차트에만 로컬 포맷터를 따로 둔다.
-  function cornerTrendTooltipFormatter(
-    params: { axisValue?: string; marker: string; seriesName: string; value: unknown }[],
-  ): string {
-    const date = params[0]?.axisValue ?? "";
-    const lines = params.map((p) => {
-      const value = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
-      const headcountText = typeof value === "number" ? `${Math.round(value)}명` : String(value);
-      const cornerId = cornerIdByNameHome.get(p.seriesName);
-      const menu = cornerId != null ? mainMenuByCornerDateHome.get(`${cornerId}|${date}`) : undefined;
-      const menuLine = menu ? `<br/>&nbsp;&nbsp;메뉴: ${menu}` : "";
-      return `${p.marker}${p.seriesName}: ${headcountText}${menuLine}`;
-    });
-    return [date, ...lines].join("<br/>");
-  }
 
-  const cornerTrendOption = {
+  // 통합 식수 추이 차트 — series_key로 시리즈를 가르고 period를 x축으로 쓴다.
+  const trendRows = headcountTrend.data ?? [];
+  const trendPeriods = [...new Set(trendRows.map((r) => r.period))].sort();
+  const trendSeriesMeta = new Map<string, string>();
+  for (const r of trendRows) trendSeriesMeta.set(r.series_key, r.series_label);
+  const trendValueBySeries = new Map<string, Map<string, number>>();
+  for (const r of trendRows) {
+    if (!trendValueBySeries.has(r.series_key)) trendValueBySeries.set(r.series_key, new Map());
+    trendValueBySeries.get(r.series_key)!.set(r.period, r.headcount);
+  }
+  // 시리즈가 많으면(코너별 등) 색이 뒤섞이지 않게 series_key 기준으로 색을 고정한다.
+  const trendSeriesKeys = [...trendSeriesMeta.keys()].sort();
+  const headcountTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 32, bottom: 28 },
-    tooltip: { trigger: "axis", formatter: cornerTrendTooltipFormatter },
-    legend: {
-      top: 0,
-      textStyle: { color: chartTheme.text },
-      data: trendCornersHome.map((c) => c.corner_name),
-      selected: cornerLegendSelected,
+    tooltip: {
+      trigger: "axis",
+      formatter: (params: { axisValue?: string; marker: string; seriesName: string; value: unknown }[]) => {
+        const header = params[0]?.axisValue ?? "";
+        const lines = params.map((p) => {
+          const v = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
+          const menu = trendMainMenuEnabled ? mainMenuByCornerDate.get(`${p.seriesName}|${header}`) : undefined;
+          const menuLine = menu ? `<br/>&nbsp;&nbsp;메뉴: ${menu}` : "";
+          return `${p.marker}${p.seriesName}: ${typeof v === "number" ? Math.round(v) : v}명${menuLine}`;
+        });
+        return [header, ...lines].join("<br/>");
+      },
     },
+    legend: { top: 0, textStyle: { color: chartTheme.text }, data: trendSeriesKeys.map((k) => trendSeriesMeta.get(k)!) },
     xAxis: {
       type: "category",
-      data: cornerTrendDays,
+      data: trendPeriods,
       axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: weekdayAxisLabel,
+      axisLabel: { color: chartTheme.text },
       axisTick: { show: false },
     },
     yAxis: {
@@ -392,19 +363,18 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
       axisLabel: { color: chartTheme.text },
       splitLine: { lineStyle: { color: chartTheme.grid } },
     },
-    series: trendCornersHome.map((c) => ({
-      name: c.corner_name,
-      type: "line" as const,
-      symbol: "circle",
-      symbolSize: 8,
-      lineStyle: { width: 2, color: resolveColor(homeCornerColor.get(c.corner_id) ?? "var(--series-1)") },
-      itemStyle: {
-        color: resolveColor(homeCornerColor.get(c.corner_id) ?? "var(--series-1)"),
-        borderColor: resolveColor("var(--surface)"),
-        borderWidth: 2,
-      },
-      data: cornerTrendDays.map((d) => trendByCornerHome.get(c.corner_name)?.get(d) ?? 0),
-    })),
+    series: trendSeriesKeys.map((key, i) => {
+      const color = resolveColor(`var(--series-${(i % 8) + 1})`);
+      return {
+        name: trendSeriesMeta.get(key)!,
+        type: "line" as const,
+        symbol: "circle",
+        symbolSize: 7,
+        lineStyle: { width: 2, color },
+        itemStyle: { color, borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
+        data: trendPeriods.map((p) => trendValueBySeries.get(key)?.get(p) ?? 0),
+      };
+    }),
   };
 
   const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${selectedMonday}&end_date=${saturdayOfSelected}${
@@ -553,34 +523,111 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
           </div>
         )}
         {weekly.data && <ReactECharts option={chartOption} style={{ height: 280 }} />}
-        {weekly.data && weekly.data.length > 0 && (
-          <div className="mt-4">
-            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-              코너별 주간 식수 추이
-            </p>
-            {cornerTrend.isLoading && <LoadingState />}
-            {cornerTrend.isError && <ErrorState error={cornerTrend.error} />}
-            {cornerTrend.data && trendCornersHome.length > 0 && (
-              <ReactECharts option={cornerTrendOption} style={{ height: 280 }} />
+      </Card>
+
+      <Card title="식수 추이 — 기간 단위 · 끼니 · 코너 · 회사구분">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          {trendPeriodStart} ~ {trendPeriodEnd} 기준입니다. 왼쪽에서 기간 단위와 "무엇을 선으로 나눠 볼지"를
+          고르고, 오른쪽 필터로 범위를 좁힙니다 — 필터와 나누는 기준은 별개라 "계열사만 골라 코너별로 보기"
+          같은 조합이 가능합니다. 끼니 필터와 평일/주말 구분은 위 "주간 식수 추이"와 공유합니다.
+        </p>
+        <div className="mb-3 flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            기간 단위
+            <SegmentedControl
+              value={trendGranularity}
+              options={[
+                { label: "일간", value: "daily" as Granularity },
+                { label: "주간", value: "weekly" as Granularity },
+                { label: "월간", value: "monthly" as Granularity },
+              ]}
+              onChange={setTrendGranularity}
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            나누기
+            <SegmentedControl
+              value={trendGroupBy}
+              options={[
+                { label: "전체", value: "total" as HeadcountGroupBy },
+                { label: "코너별", value: "corner" as HeadcountGroupBy },
+                { label: "회사구분별", value: "division" as HeadcountGroupBy },
+                { label: "끼니별", value: "meal_type" as HeadcountGroupBy },
+              ]}
+              onChange={setTrendGroupBy}
+            />
+          </label>
+        </div>
+        <div className="mb-3 flex flex-wrap items-start gap-x-6 gap-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+              코너 필터
+            </span>
+            {(cornerListQuery.data ?? []).map((c) => {
+              const active = trendCornerIds.includes(c.corner_id);
+              return (
+                <button
+                  key={c.corner_id}
+                  onClick={() =>
+                    setTrendCornerIds((cur) =>
+                      cur.includes(c.corner_id) ? cur.filter((id) => id !== c.corner_id) : [...cur, c.corner_id],
+                    )
+                  }
+                  className="rounded border px-2 py-0.5 text-xs transition-colors"
+                  style={{
+                    borderColor: active ? "var(--accent)" : "var(--border)",
+                    background: active ? "var(--surface-2)" : "var(--surface)",
+                    color: active ? "var(--ink)" : "var(--ink-secondary)",
+                  }}
+                >
+                  {c.corner_name}
+                </button>
+              );
+            })}
+            {trendCornerIds.length > 0 && (
+              <button className="text-xs underline" style={{ color: "var(--ink-muted)" }} onClick={() => setTrendCornerIds([])}>
+                전체
+              </button>
             )}
           </div>
-        )}
-        {classification === "패밀리데이" && (
-          <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
-            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-              월별 패밀리데이 식수 추이 — 패밀리데이는 한 주에 하루뿐이라 평일과 비교하는 대신 지난
-              1년간 패밀리데이끼리 월별로 비교합니다.
-            </p>
-            {familyDayTrend.isLoading && <LoadingState />}
-            {familyDayTrend.isError && <ErrorState error={familyDayTrend.error} />}
-            {familyDayTrend.data && familyDayMonths.length === 0 && (
-              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                최근 1년 내 패밀리데이 식수 데이터가 없습니다.
-              </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+              회사구분
+            </span>
+            {(["본사", "계열사", "기타"] as Division[]).map((d) => {
+              const active = trendDivisions.includes(d);
+              return (
+                <button
+                  key={d}
+                  onClick={() =>
+                    setTrendDivisions((cur) => (cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]))
+                  }
+                  className="rounded border px-2 py-0.5 text-xs transition-colors"
+                  style={{
+                    borderColor: active ? "var(--accent)" : "var(--border)",
+                    background: active ? "var(--surface-2)" : "var(--surface)",
+                    color: active ? "var(--ink)" : "var(--ink-secondary)",
+                  }}
+                >
+                  {d}
+                </button>
+              );
+            })}
+            {trendDivisions.length > 0 && (
+              <button className="text-xs underline" style={{ color: "var(--ink-muted)" }} onClick={() => setTrendDivisions([])}>
+                전체
+              </button>
             )}
-            {familyDayMonths.length > 0 && <ReactECharts option={familyDayTrendOption} style={{ height: 280 }} />}
           </div>
+        </div>
+        {headcountTrend.isLoading && <LoadingState />}
+        {headcountTrend.isError && <ErrorState error={headcountTrend.error} />}
+        {headcountTrend.data && trendPeriods.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이 조건에 해당하는 취식 데이터가 없습니다.
+          </p>
         )}
+        {trendPeriods.length > 0 && <ReactECharts option={headcountTrendOption} style={{ height: 320 }} />}
       </Card>
 
       <Card title="메뉴 하이라이트">

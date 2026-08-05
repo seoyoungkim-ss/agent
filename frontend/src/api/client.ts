@@ -15,12 +15,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-function qs(params: Record<string, string | number | boolean | string[] | undefined | null>): string {
+function qs(
+  params: Record<string, string | number | boolean | string[] | number[] | undefined | null>,
+): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null || v === "") continue;
     if (Array.isArray(v)) {
-      for (const item of v) usp.append(k, item);
+      // corner_ids처럼 숫자 배열도 넘어온다 — FastAPI는 같은 키 반복을 리스트로 받는다.
+      for (const item of v) usp.append(k, String(item));
     } else {
       usp.set(k, String(v));
     }
@@ -168,6 +171,23 @@ export type Granularity = "daily" | "weekly" | "monthly";
 export interface DivisionRow {
   period: string;
   division: string; // 본사 | 계열사 | 기타
+  headcount: number;
+}
+
+export interface CornerListRow {
+  corner_id: number;
+  corner_name: string;
+  is_diet_corner: boolean;
+}
+
+export type Division = "본사" | "계열사" | "기타";
+// 현황 통합 추이 차트에서 "무엇을 선으로 그릴지" — 필터(끼니/코너/회사구분)와 별개 축.
+export type HeadcountGroupBy = "total" | "corner" | "division" | "meal_type";
+
+export interface HeadcountTrendRow {
+  period: string;
+  series_key: string;
+  series_label: string;
   headcount: number;
 }
 
@@ -430,6 +450,9 @@ export const api = {
     meal_types?: MealType[];
   }) => request<CornerTrendRow[]>(`/analysis/corners/trend${qs(params)}`),
 
+  // 코너 목록만(통계 없음) — 배치 집계 상태와 무관하게 필터 선택지를 채우려는 용도.
+  cornerList: () => request<CornerListRow[]>("/analysis/corners/list"),
+
   cornerMainMenuByDate: (params: { period_start: string; period_end: string }) =>
     request<CornerMainMenuByDateRow[]>(`/analysis/corners/main-menu-by-date${qs(params)}`),
 
@@ -439,6 +462,20 @@ export const api = {
     granularity?: Granularity;
     classification?: Classification;
   }) => request<DivisionRow[]>(`/analysis/divisions${qs(params)}`),
+
+  // 현황 통합 추이 — 조·중·석식 × 코너 × 회사구분 3축을 동시에 필터한다.
+  // 집계 테이블엔 코너×회사구분 교차 셀이 없어 meal_log를 런타임 집계하는 신규
+  // 엔드포인트다(2026-08). 배치 재계산에 의존하지 않는다.
+  headcountTrend: (params: {
+    period_start: string;
+    period_end: string;
+    granularity?: Granularity;
+    group_by?: HeadcountGroupBy;
+    meal_types?: MealType[];
+    corner_ids?: number[];
+    divisions?: Division[];
+    classification?: Classification;
+  }) => request<HeadcountTrendRow[]>(`/analysis/headcount-trend${qs(params)}`),
 
   recomputeDailyStats: (params: { period_start: string; period_end: string }) =>
     request<{ days_processed: number }>(`/analysis/daily-stats/recompute${qs(params)}`, {
