@@ -1595,6 +1595,18 @@ function MenuComboSection() {
   // → 코너로 좁혀 볼 수 있게 한다(2026-08 요청).
   const [comboCornerId, setComboCornerId] = useState<number | null>(null);
   const cornersQuery = useQuery({ queryKey: ["corner-list"], queryFn: () => api.cornerList() });
+  // 검색해야만 보이면 "뭘 검색할지"부터 막힌다는 피드백(2026-08) → 조합에 따라
+  // 만족도 편차가 큰 메인메뉴를 먼저 띄운다. 편차가 크다 = 부찬을 바꾸면
+  // 만족도가 실제로 움직인다 = 손볼 가치가 있다.
+  const rankingQuery = useQuery({
+    queryKey: ["menu-combination-spread-ranking", comboCornerId],
+    queryFn: () =>
+      api.menuCombinationSpreadRanking({
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+        ...(comboCornerId != null ? { corner_id: comboCornerId } : {}),
+      }),
+  });
   const query = useQuery({
     queryKey: ["menu-combinations", searched, comboCornerId],
     queryFn: () =>
@@ -1640,6 +1652,54 @@ function MenuComboSection() {
           ]}
           onChange={(v) => setComboCornerId(v === "" ? null : Number(v))}
         />
+      </div>
+      <div className="mb-4 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+        <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+          <strong>부찬을 바꿀 때 효과가 큰 메인메뉴</strong> — 조합에 따라 만족도가 크게 갈리는 순서입니다.
+          편차가 작은 메뉴는 뭘 붙여도 결과가 같으니 손볼 필요가 없습니다. 행을 클릭하면 아래에 상세가
+          열립니다.
+        </p>
+        {rankingQuery.isLoading && <LoadingState />}
+        {rankingQuery.isError && <ErrorState error={rankingQuery.error} />}
+        {rankingQuery.data && rankingQuery.data.items.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            비교 가능한 조합(평가가 있는 조합 2개 이상)을 가진 메인메뉴가 아직 없습니다.
+          </p>
+        )}
+        {rankingQuery.data && rankingQuery.data.items.length > 0 && (
+          <Table
+            columns={[
+              { key: "menu", label: "메인메뉴" },
+              { key: "spread", label: "만족도 편차", align: "right" },
+              { key: "best", label: "가장 좋았던 조합" },
+              { key: "worst", label: "가장 나빴던 조합" },
+            ]}
+            rows={rankingQuery.data.items.map((r) => ({
+              menuId: r.menu_id,
+              menuName: r.menu_name ?? "",
+              menu: (
+                <button
+                  className="underline"
+                  style={{ color: "var(--accent)" }}
+                  onClick={() => {
+                    setMenuName(r.menu_name ?? "");
+                    setSearched(r.menu_name ?? "");
+                  }}
+                >
+                  {r.menu_name}
+                </button>
+              ),
+              spread: r.spread.toFixed(2),
+              best: `${r.best.sides.filter(Boolean).join(" + ") || "부찬 없음"} (${
+                r.best.avg_satisfaction?.toFixed(2) ?? "-"
+              })`,
+              worst: `${r.worst.sides.filter(Boolean).join(" + ") || "부찬 없음"} (${
+                r.worst.avg_satisfaction?.toFixed(2) ?? "-"
+              })`,
+            }))}
+            rowKey={(r) => String(r.menuId)}
+          />
+        )}
       </div>
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
@@ -2576,32 +2636,64 @@ const ROTATION_FLAG_COLOR: Record<string, string> = {
 };
 // 기본값은 "고칠 것만 보기" — 적정/이력 없음까지 다 띄우면 한 주에 수십 줄이라
 // 정작 봐야 할 경고가 묻힌다.
-const ROTATION_WARNING_FLAGS = new Set(["같은 날 중복", "재편성 과다", "평소보다 이름"]);
+// "같은 날 중복"(코너 간 같은 날 중복 편성)은 담당자가 볼 필요 없다고 해서
+// 기본 경고에서 뺐다(2026-08). 백엔드 판정은 그대로라 되살리려면 여기만 고치면 된다.
+const ROTATION_WARNING_FLAGS = new Set(["재편성 과다", "평소보다 이름"]);
 
-function MenuRotationSection() {
+// 기간 선택 — 식단표 8개월치가 적재돼 PERIOD_START(180일 고정) 너머를 볼 수단이
+// 필요해졌다(2026-08). 기본 6개월인 이유: 적재 이전 구간은 편성 이력이 비어 있어
+// 편성 횟수가 실제보다 적게 나온다.
+const PLAN_PERIOD_OPTIONS = [
+  { label: "3개월", value: "90" },
+  { label: "6개월", value: "180" },
+  { label: "12개월", value: "365" },
+];
+
+function usePlanPeriod(defaultDays = "180") {
+  const [days, setDays] = useState(defaultDays);
+  return {
+    days,
+    setDays,
+    periodStart: isoDaysAgo(Number(days)),
+    periodEnd: isoDaysAgo(0),
+  };
+}
+
+/**
+ * 중복 점검 — 축이 둘이다.
+ *  왼쪽: 기간 내 같은 메뉴 반복 ("이 메뉴 최근에 또 내보내지 않았나")
+ *  오른쪽: 슬롯 내 재료·특성 중복 ("이 한 끼 구성이 겹치지 않나")
+ * 주 이동 컨트롤을 하나만 두는 이유: 카드가 따로면 주가 어긋나 "회전 이력은
+ * 이번 주, 조합은 지난 주"를 보게 된다(2026-08).
+ */
+function DuplicationCheckSection() {
   const [selectedMonday, setSelectedMonday] = useState(() => weeklyMondayOf(new Date()));
   const [warningsOnly, setWarningsOnly] = useState(true);
   const periodEnd = weeklyAddDays(selectedMonday, 6);
-  const query = useQuery({
+
+  const rotation = useQuery({
     queryKey: ["weekly-menu-rotation", selectedMonday],
     queryFn: () => api.weeklyMenuRotation({ period_start: selectedMonday, period_end: periodEnd }),
   });
+  const clash = useQuery({
+    queryKey: ["weekly-menu-combination-check", selectedMonday],
+    queryFn: () =>
+      api.weeklyMenuCombinationCheck({ period_start: selectedMonday, period_end: periodEnd }),
+  });
 
-  const items = (query.data?.items ?? []).filter(
+  const rotationItems = (rotation.data?.items ?? []).filter(
     (r) => !warningsOnly || ROTATION_WARNING_FLAGS.has(r.flag),
   );
-  const warningCount = (query.data?.items ?? []).filter((r) => ROTATION_WARNING_FLAGS.has(r.flag)).length;
+  const rotationWarnings = (rotation.data?.items ?? []).filter((r) =>
+    ROTATION_WARNING_FLAGS.has(r.flag),
+  ).length;
+  const clashSlots = (clash.data?.slots ?? []).filter(
+    (s) => s.ingredient_clashes.length > 0 || s.vector_clashes.length > 0,
+  );
 
   return (
-    <Card title="메뉴 회전 이력 — 중복 편성 점검">
-      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        그 주에 편성된 메뉴가 <strong>직전에 언제 나왔는지</strong>를 과거 편성 이력(식단표 기준, 최근
-        {query.data ? ` ${query.data.lookback_days}` : ""}일)과 비교합니다. 절대 기준
-        {query.data ? ` ${query.data.min_rotation_gap_days}` : " 14"}일을 못 채우면 "재편성 과다",
-        기준은 넘었어도 그 메뉴의 평소 주기보다 눈에 띄게 이르면 "평소보다 이름"입니다. 메인·부찬·건강가든을
-        모두 함께 봅니다.
-      </p>
-      <div className="mb-3 flex flex-wrap items-center gap-3">
+    <Card title="중복 점검 — 같은 메뉴 반복 · 한 끼 구성 겹침">
+      <div className="mb-4 flex flex-wrap items-center gap-3">
         <Button variant="secondary" onClick={() => setSelectedMonday(weeklyAddDays(selectedMonday, -7))}>
           ◀ 이전 주
         </Button>
@@ -2615,74 +2707,373 @@ function MenuRotationSection() {
           <input type="checkbox" checked={warningsOnly} onChange={(e) => setWarningsOnly(e.target.checked)} />
           경고만 보기
         </label>
-        {query.data && (
-          <span className="text-xs" style={{ color: warningCount > 0 ? "var(--critical)" : "var(--ink-muted)" }}>
-            경고 {warningCount}건 / 편성 {query.data.items.length}건
-          </span>
-        )}
       </div>
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        {/* 축 1 — 기간 내 같은 메뉴 반복 */}
+        <div>
+          <p className="mb-1 text-[13px] font-medium">이 메뉴 최근에 또 내보내지 않았나</p>
+          <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+            직전에 언제 나왔는지를 과거 편성 이력(식단표 기준
+            {rotation.data ? ` 최근 ${rotation.data.lookback_days}일` : ""})과 비교합니다. 절대 기준
+            {rotation.data ? ` ${rotation.data.min_rotation_gap_days}` : " 14"}일을 못 채우면 "재편성 과다",
+            기준은 넘었어도 그 메뉴의 평소 주기보다 눈에 띄게 이르면 "평소보다 이름"입니다.
+          </p>
+          {rotation.data && (
+            <p
+              className="mb-2 text-xs"
+              style={{ color: rotationWarnings > 0 ? "var(--critical)" : "var(--ink-muted)" }}
+            >
+              경고 {rotationWarnings}건 / 편성 {rotation.data.items.length}건
+            </p>
+          )}
+          {rotation.isLoading && <LoadingState />}
+          {rotation.isError && <ErrorState error={rotation.error} />}
+          {rotation.data && rotationItems.length === 0 && (
+            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+              {rotation.data.items.length === 0
+                ? "이 주에 등록된 식단표가 없습니다."
+                : "반복 편성 경고가 없습니다."}
+            </p>
+          )}
+          {rotationItems.length > 0 && (
+            <Table
+              columns={[
+                { key: "date", label: "날짜" },
+                { key: "menu", label: "메뉴" },
+                { key: "flag", label: "판정" },
+                { key: "gap", label: "직전 이후", align: "right" },
+              ]}
+              rows={rotationItems.map((r, i) => ({
+                key: `${r.plan_date}-${r.corner_id}-${r.menu_id}-${i}`,
+                date: weekdayLabel(r.plan_date),
+                menu: `${r.menu_name} (${r.corner_name})`,
+                flag: (
+                  <span style={{ color: ROTATION_FLAG_COLOR[r.flag] ?? "var(--ink-muted)" }}>{r.flag}</span>
+                ),
+                gap:
+                  r.gap_days == null
+                    ? "-"
+                    : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`,
+              }))}
+              rowKey={(r) => r.key as string}
+            />
+          )}
+          {rotation.data && rotation.data.overused.length > 0 && (
+            <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+              <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+                이 주에 여러 번 들어간 메뉴 — 역할(메인/부찬/건강가든)을 가로질러 셉니다.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {rotation.data.overused.map((o) => (
+                  <span
+                    key={o.menu_name}
+                    className="rounded-md border px-2 py-1 text-xs"
+                    style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+                  >
+                    {o.menu_name} ({o.menu_role}) · {o.count}회
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 축 2 — 슬롯 내 재료·특성 중복 */}
+        <div>
+          <p className="mb-1 text-[13px] font-medium">이 한 끼 구성이 겹치지 않나</p>
+          <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+            같은 날·같은 코너·같은 끼니 안에서 메인·부찬·건강가든끼리 재료가 겹치거나(콩나물국밥 +
+            콩나물무침) 특성이 겹치는지(둘 다 매움, 둘 다 탄수화물) 봅니다. 재료 판정은 키워드 사전
+            기반이라 사전에 없는 재료는 못 잡습니다.
+          </p>
+          {clash.data != null && clash.data.untagged_menu_count > 0 && (
+            <p className="mb-2 text-xs" style={{ color: "var(--warning)" }}>
+              {clash.data.untagged_menu_count}개 메뉴는 음식벡터 미태깅이라 특성 중복을 못 봤습니다
+              (관리 탭에서 태깅).
+            </p>
+          )}
+          {clash.isLoading && <LoadingState />}
+          {clash.isError && <ErrorState error={clash.error} />}
+          {clash.data && clashSlots.length === 0 && (
+            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+              {clash.data.slots.length === 0
+                ? "이 주에 등록된 식단표가 없습니다."
+                : "구성 겹침이 발견되지 않았습니다."}
+            </p>
+          )}
+          <div className="space-y-2">
+            {clashSlots.map((s) => (
+              <div
+                key={`${s.plan_date}-${s.corner_id}-${s.meal_type}`}
+                className="rounded-md border p-3"
+                style={{ borderColor: "var(--border)" }}
+              >
+                <div className="text-[13px] font-medium">
+                  {weekdayLabel(s.plan_date)} · {s.corner_name} ({s.meal_type})
+                </div>
+                <div className="mt-0.5 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  {s.main ?? "메인 미배정"}
+                  {s.sides.length > 0 && ` · 부찬: ${s.sides.join(", ")}`}
+                  {s.health_garden.length > 0 && ` · 건강가든: ${s.health_garden.join(", ")}`}
+                </div>
+                <ul className="mt-2 space-y-1 text-xs">
+                  {s.ingredient_clashes.map((c, i) => (
+                    <li key={`ing-${i}`} style={{ color: "var(--critical)" }}>
+                      재료 중복 — {c.menu_a} ↔ {c.menu_b}: {c.shared.join(", ")}
+                    </li>
+                  ))}
+                  {s.vector_clashes.map((c, i) => (
+                    <li key={`vec-${i}`} style={{ color: "var(--warning)" }}>
+                      {c.label_ko} 중복 — {c.menu_a} ↔ {c.menu_b}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+const PLANNING_ACTION_COLOR: Record<string, string> = {
+  "감편 검토": "var(--critical)",
+  "증편 후보": "var(--good)",
+  "주력 유지": "var(--accent)",
+  "취식 기록 없음": "var(--warning)",
+};
+
+/**
+ * 편성 빈도 × 성과 — "다음 주 뭘 빼고 뭘 넣을까".
+ * 기존 4분면(/menu-performance)의 X축은 meal_log의 취식 발생 일수라 편성만 되고
+ * 아무도 안 먹은 메뉴가 아예 안 나타난다. 이 화면은 weekly_menu_plan 기준이라
+ * 그게 보이고, 그게 가장 강한 감편 신호다(2026-08).
+ */
+function MenuPlanPerformanceSection() {
+  const { days, setDays, periodStart, periodEnd } = usePlanPeriod();
+  const chartTheme = useChartTheme();
+  const query = useQuery({
+    queryKey: ["menu-plan-performance", periodStart, periodEnd],
+    queryFn: () => api.menuPlanPerformance({ period_start: periodStart, period_end: periodEnd }),
+  });
+
+  const items = query.data?.items ?? [];
+  const scatterPoints = items
+    .filter((r) => r.avg_satisfaction != null)
+    .map((r) => ({
+      name: r.menu_name,
+      value: [r.plan_count, r.avg_satisfaction as number, r.headcount_per_plan],
+      itemStyle: { color: resolveColor(PLANNING_ACTION_COLOR[r.action] ?? "var(--ink-muted)") },
+    }));
+  const maxPerPlan = Math.max(1, ...items.map((r) => r.headcount_per_plan));
+
+  const option = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 56, right: 28, top: 24, bottom: 44 },
+    tooltip: {
+      trigger: "item",
+      formatter: (p: { name: string; value: number[] }) =>
+        `${p.name}<br/>편성 ${p.value[0]}회 · 만족도 ${p.value[1].toFixed(2)}<br/>1회 편성당 ${p.value[2]}명`,
+    },
+    xAxis: {
+      type: "value",
+      name: "편성 횟수",
+      nameLocation: "middle",
+      nameGap: 26,
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    yAxis: {
+      type: "value",
+      name: "만족도",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: [
+      {
+        type: "scatter" as const,
+        data: scatterPoints,
+        symbolSize: (v: number[]) => 8 + (v[2] / maxPerPlan) * 24,
+        markLine: {
+          silent: true,
+          symbol: "none" as const,
+          lineStyle: { color: chartTheme.axis, type: "dashed" as const },
+          // 기본 위치(선 끝)면 라벨이 그리드 밖으로 잘린다 — 안쪽에 붙인다.
+          label: { color: chartTheme.text, fontSize: 10, position: "insideEndTop" as const },
+          data: [
+            { xAxis: query.data?.median_plan_count ?? 0, label: { formatter: "편성 중앙값" } },
+            { yAxis: query.data?.median_satisfaction ?? 0, label: { formatter: "만족도 중앙값" } },
+          ],
+        },
+      },
+    ],
+  };
+
+  const actionRows = items.filter((r) => r.action === "감편 검토" || r.action === "증편 후보");
+  const noIntake = items.filter((r) => r.action === "취식 기록 없음");
+
+  return (
+    <Card title="편성 빈도 × 성과 — 다음 주 편성 조정">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        식단표에 <strong>몇 번 올렸는지</strong>(편성 횟수)와 실제 반응(만족도·1회 편성당 식수)을
+        교차합니다. 편성 횟수는 담당자가 직접 통제하는 변수라 다음 주에 바꿀 수 있습니다. 기준선은 그
+        기간 전체의 중앙값이며, 취식 데이터가 메인메뉴 기준이라 <strong>메인메뉴만</strong> 봅니다.
+      </p>
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          조회 기간
+        </span>
+        <SegmentedControl value={days} options={PLAN_PERIOD_OPTIONS} onChange={setDays} />
+      </div>
+
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
       {query.data && items.length === 0 && (
         <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          {query.data.items.length === 0
-            ? "이 주에 등록된 식단표가 없습니다."
-            : "중복 편성 경고가 없습니다."}
+          이 기간에 등록된 식단표가 없습니다.
         </p>
       )}
-      {items.length > 0 && (
-        <Table
-          columns={[
-            { key: "date", label: "날짜" },
-            { key: "corner", label: "코너" },
-            { key: "menu", label: "메뉴" },
-            { key: "role", label: "역할" },
-            { key: "flag", label: "판정" },
-            { key: "gap", label: "직전 이후", align: "right" },
-            { key: "avg", label: "평소 주기", align: "right" },
-          ]}
-          rows={items.map((r, i) => ({
-            key: `${r.plan_date}-${r.corner_id}-${r.menu_id}-${i}`,
-            date: weekdayLabel(r.plan_date), // 이미 "08-04(화)" 형태를 돌려준다
-            corner: r.corner_name,
-            menu: r.menu_name,
-            role: r.menu_role,
-            flag: (
-              <span style={{ color: ROTATION_FLAG_COLOR[r.flag] ?? "var(--ink-muted)" }}>{r.flag}</span>
-            ),
-            gap:
-              r.gap_days == null
-                ? "-"
-                : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`,
-            avg: r.avg_interval_days == null ? "-" : `${r.avg_interval_days}일`,
-          }))}
-          rowKey={(r) => r.key as string}
-        />
-      )}
-      {query.data && query.data.overused.length > 0 && (
-        <div className="mt-4 border-t pt-3" style={{ borderColor: "var(--border)" }}>
-          <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-            이 주에 여러 번 들어간 메뉴 — 역할(메인/부찬/건강가든)을 가로질러 셉니다. 같은 나물이 어떤 날은
-            부찬, 어떤 날은 건강가든으로 들어가도 먹는 사람에겐 중복이기 때문입니다.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {query.data.overused.map((o) => (
-              <span
-                key={o.menu_name}
-                className="rounded-md border px-2 py-1 text-xs"
-                style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
-              >
-                {o.menu_name} ({o.menu_role}) · {o.count}회 ·{" "}
-                {o.dates.map((d) => d.slice(5)).join(", ")}
-              </span>
-            ))}
+
+      {query.data && items.length > 0 && (
+        <>
+          <div
+            className="mb-3 rounded-md border p-2 text-xs"
+            style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+          >
+            식단표↔취식기록 매칭: 이어진 메뉴 {query.data.matching.matched}개 · 편성만 되고 취식 0인 메뉴{" "}
+            {query.data.matching.plan_only.length}개 · 취식만 있고 식단표에 없는 메뉴{" "}
+            {query.data.matching.log_only.length}개.{" "}
+            <strong>취식 0은 진짜 안 팔린 것일 수도, 메뉴명 표기가 달라 매칭이 안 된 것일 수도</strong>{" "}
+            있으니 아래 목록에서 확인하세요.
           </div>
-        </div>
+          {scatterPoints.length > 0 && <ReactECharts option={option} style={{ height: 340 }} />}
+
+          {actionRows.length > 0 && (
+            <div className="mt-4">
+              <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+                편성 조정 후보
+              </p>
+              <Table
+                columns={[
+                  { key: "menu", label: "메뉴" },
+                  { key: "action", label: "판정" },
+                  { key: "plans", label: "편성", align: "right" },
+                  { key: "score", label: "만족도", align: "right" },
+                  { key: "perPlan", label: "1회당 식수", align: "right" },
+                ]}
+                rows={actionRows.map((r) => ({
+                  menu: r.menu_name,
+                  action: (
+                    <span style={{ color: PLANNING_ACTION_COLOR[r.action] ?? "var(--ink-muted)" }}>
+                      {r.action}
+                    </span>
+                  ),
+                  plans: `${r.plan_count}회`,
+                  score: r.avg_satisfaction?.toFixed(2) ?? "-",
+                  perPlan: `${r.headcount_per_plan}명`,
+                }))}
+                rowKey={(r) => r.menu as string}
+              />
+            </div>
+          )}
+
+          {noIntake.length > 0 && (
+            <div className="mt-4 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+              <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+                편성됐지만 취식 기록이 0인 메뉴 — 기존 "메뉴별 분석" 4분면에는 아예 안 나타나는
+                메뉴들입니다. 메뉴명 표기 불일치가 아닌지 먼저 확인하세요.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {noIntake.map((r) => (
+                  <span
+                    key={r.menu_id}
+                    className="rounded-md border px-2 py-1 text-xs"
+                    style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+                  >
+                    {r.menu_name} · {r.plan_count}회 편성
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </Card>
   );
 }
 
+/** 코너별 레퍼토리 진단 — 몇 종을 돌렸고 얼마나 쏠렸나. */
+function MenuRepertoireSection() {
+  const { days, setDays, periodStart, periodEnd } = usePlanPeriod();
+  const query = useQuery({
+    queryKey: ["menu-plan-repertoire", periodStart, periodEnd],
+    queryFn: () => api.menuPlanRepertoire({ period_start: periodStart, period_end: periodEnd }),
+  });
+
+  return (
+    <Card title="코너별 레퍼토리 — 메뉴 다양성 진단">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        코너가 그 기간에 <strong>몇 종을 돌렸고</strong> 상위 5개에 얼마나 쏠렸는지 봅니다. 집중도(HHI)는
+        0에 가까울수록 고르게 분산된 것입니다. 종수가 적어도 고르게 돌리면 체감 다양성은 나쁘지 않고,
+        종수가 많아도 몇 개에 쏠리면 단조롭게 느껴지므로 두 지표를 같이 봅니다.
+      </p>
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          조회 기간
+        </span>
+        <SegmentedControl value={days} options={PLAN_PERIOD_OPTIONS} onChange={setDays} />
+      </div>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {query.data && query.data.items.length === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          이 기간에 등록된 식단표가 없습니다.
+        </p>
+      )}
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        {(query.data?.items ?? []).map((r) => (
+          <div
+            key={`${r.corner_name}-${r.menu_role}`}
+            className="rounded-md border p-3"
+            style={{ borderColor: "var(--border)" }}
+          >
+            <div className="flex items-baseline justify-between">
+              <span className="text-[13px] font-medium">
+                {r.corner_name} · {r.menu_role}
+              </span>
+              <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                {r.unique_menus}종 / {r.total_slots}회 편성
+              </span>
+            </div>
+            <div className="mt-1 text-xs" style={{ color: "var(--ink-secondary)" }}>
+              상위 5개 비중 {(r.top_share * 100).toFixed(0)}% · 집중도(HHI) {r.hhi.toFixed(3)}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {r.top_menus.map((m) => (
+                <span
+                  key={m.menu_name}
+                  className="rounded-md border px-1.5 py-0.5 text-xs"
+                  style={{ borderColor: "var(--border)", color: "var(--ink-muted)" }}
+                >
+                  {m.menu_name} {m.count}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+
+// ---- 2026-08 화면 재편으로 생긴 최상위 화면 3개 ----
+// 기존 "분석" 탭(서브탭 5개)을 해체하고, 담당자 협의에서 정한 5개 축
+// (현황 / 메뉴 편성·운영 / 만족도·VoE / Agent 채팅 / 관리)에 맞춰 재배치했다.
+
+/** 메뉴 편성·운영 — "다음 주 식단을 어떻게 짤까"에 답하는 화면. */
 export function MenuPlanningPage() {
   // 메뉴 동반 선택 쌍은 코너 목록이 필요한데, 배치 집계(daily_corner_stats)에
   // 의존하지 않는 마스터 기반 목록을 쓴다(집계 전에도 코너가 보이도록).
@@ -2690,8 +3081,10 @@ export function MenuPlanningPage() {
   return (
     <div className="space-y-6">
       <WeeklyMenuReviewTab />
-      <MenuRotationSection />
+      <DuplicationCheckSection />
+      <MenuPlanPerformanceSection />
       <MenuComboSection />
+      <MenuRepertoireSection />
       <MenuPairAnalysisSection corners={cornersQuery.data ?? []} />
     </div>
   );

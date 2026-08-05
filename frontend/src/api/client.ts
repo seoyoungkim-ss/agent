@@ -359,6 +359,110 @@ export interface MenuRotationResponse {
   overused: { menu_name: string; menu_role: string; count: number; dates: string[] }[];
 }
 
+// 슬롯 내 재료·특성 중복 진단 (2026-08). menu_rotation과 축이 다르다 —
+// 저쪽은 "이 메뉴 최근에 또 내보내지 않았나", 이쪽은 "이 한 끼 구성이 겹치지 않나".
+export interface IngredientClash {
+  menu_a: string;
+  menu_b: string;
+  shared: string[];
+}
+
+export interface VectorClash {
+  menu_a: string;
+  menu_b: string;
+  dimension: string;
+  label_ko: string;
+  value_a: number;
+  value_b: number;
+}
+
+export interface CombinationCheckSlot {
+  plan_date: string;
+  corner_id: number;
+  corner_name: string;
+  meal_type: MealType;
+  main: string | null;
+  sides: string[];
+  health_garden: string[];
+  ingredient_clashes: IngredientClash[];
+  vector_clashes: VectorClash[];
+  untagged: string[];
+}
+
+export interface CombinationCheckResponse {
+  period_start: string;
+  period_end: string;
+  slots: CombinationCheckSlot[];
+  untagged_menu_count: number;
+}
+
+export interface ComboSpreadEntry {
+  sides: (string | null)[];
+  avg_satisfaction: number | null;
+  day_count: number;
+}
+
+export interface ComboSpreadRow {
+  menu_id: number;
+  menu_name: string | null;
+  combo_count: number;
+  spread: number;
+  best: ComboSpreadEntry;
+  worst: ComboSpreadEntry;
+}
+
+export interface ComboSpreadResponse {
+  period_start: string;
+  period_end: string;
+  corner_id: number | null;
+  min_day_count: number;
+  items: ComboSpreadRow[];
+}
+
+export type PlanningAction =
+  | "감편 검토"
+  | "증편 후보"
+  | "주력 유지"
+  | "현행 유지"
+  | "표본 부족"
+  | "취식 기록 없음";
+
+export interface PlanPerformanceRow {
+  menu_id: number;
+  menu_name: string;
+  plan_count: number;
+  total_headcount: number;
+  headcount_per_plan: number;
+  evaluation_count: number;
+  avg_satisfaction: number | null;
+  action: PlanningAction;
+}
+
+export interface PlanPerformanceResponse {
+  period_start: string;
+  period_end: string;
+  median_plan_count: number;
+  median_satisfaction: number;
+  items: PlanPerformanceRow[];
+  matching: { matched: number; plan_only: string[]; log_only: string[] };
+}
+
+export interface RepertoireRow {
+  corner_name: string;
+  menu_role: string;
+  total_slots: number;
+  unique_menus: number;
+  top_share: number;
+  hhi: number;
+  top_menus: { menu_name: string; count: number }[];
+}
+
+export interface RepertoireResponse {
+  period_start: string;
+  period_end: string;
+  items: RepertoireRow[];
+}
+
 export interface WeeklyMenuFeedbackRow {
   id: number;
   plan_date: string;
@@ -576,6 +680,27 @@ export const api = {
     request<MenuCombinationsResponse>(
       `/analysis/menu-combinations/${encodeURIComponent(menuName)}${qs(params)}`,
     ),
+
+  weeklyMenuCombinationCheck: (params: { period_start: string; period_end: string }) =>
+    request<CombinationCheckResponse>(`/analysis/weekly-menu/combination-check${qs(params)}`),
+
+  menuCombinationSpreadRanking: (params: {
+    period_start: string;
+    period_end: string;
+    min_day_count?: number;
+    top_n?: number;
+    corner_id?: number;
+  }) => request<ComboSpreadResponse>(`/analysis/menu-combinations/spread-ranking${qs(params)}`),
+
+  menuPlanPerformance: (params: {
+    period_start: string;
+    period_end: string;
+    meal_type?: MealType;
+    corner_id?: number;
+  }) => request<PlanPerformanceResponse>(`/analysis/menu-plan/performance${qs(params)}`),
+
+  menuPlanRepertoire: (params: { period_start: string; period_end: string }) =>
+    request<RepertoireResponse>(`/analysis/menu-plan/repertoire${qs(params)}`),
 
   weeklyMenuRotation: (params: { period_start: string; period_end: string; lookback_days?: number }) =>
     request<MenuRotationResponse>(`/analysis/weekly-menu/rotation${qs(params)}`),

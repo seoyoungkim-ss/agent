@@ -63,14 +63,22 @@ from app.services.menu_affinity import (
     is_obvious_pair,
 )
 from app.services.menu_combination import (
+    build_side_combos_bulk,
     build_side_combos_for_main_menu,
     compute_combo_nutrition_profile,
     compute_combo_satisfaction_summary,
+    compute_combo_spread,
 )
 from app.services.menu_throughput import build_corner_daily_throughput, compute_menu_throughput_summary
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
 from app.services.weekly_menu_prediction import compute_predicted_impact, compute_predicted_numbers_for_period
+from app.services.menu_clash import find_ingredient_clashes, find_vector_clashes
+from app.services.menu_plan_analytics import (
+    classify_planning_action,
+    compute_repertoire,
+    median_or_zero,
+)
 from app.services.menu_rotation import (
     MIN_ROTATION_GAP_DAYS,
     RotationFlag,
@@ -1101,6 +1109,101 @@ def update_health_garden(payload: HealthGardenUpdateRequest, db: Session = Depen
     }
 
 
+@router.get("/weekly-menu/combination-check")
+def weekly_menu_combination_check(
+    period_start: dt.date,
+    period_end: dt.date,
+    db: Session = Depends(get_db),
+):
+    """한 끼 구성 안에서 메인·부찬·건강가든의 재료·특성이 겹치는지 진단한다
+    (2026-08 요청). 판정은 `app/services/menu_clash.py`의 순수 함수가 한다.
+
+    `/weekly-menu/rotation`과 축이 다르다 — 저쪽은 "이 메뉴 최근에 또 내보내지
+    않았나"(기간 내 같은 메뉴 반복), 이쪽은 "이 한 끼 구성이 겹치지 않나".
+
+    건강가든도 부찬과 함께 넣어 본다(요청이 "메인/부찬/건강가든 조합"이었다).
+    """
+    slots = build_weekly_menu_slots(db, period_start, period_end)
+    if not slots:
+        return {
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "slots": [],
+            "untagged_menu_count": 0,
+        }
+
+    # food_vector를 슬롯마다 조회하면 N+1이 되므로 등장 메뉴를 한 번에 읽는다.
+    menu_ids = {
+        item.menu_id
+        for s in slots
+        for item in [*( [s.main] if s.main else []), *s.sides, *s.health_garden]
+    }
+    vectors: dict[int, list[float] | None] = {}
+    if menu_ids:
+        for m in db.query(MenuMaster).filter(MenuMaster.menu_id.in_(menu_ids)).all():
+            vectors[m.menu_id] = [float(x) for x in m.food_vector] if m.food_vector is not None else None
+
+    results = []
+    untagged_all: set[str] = set()
+    for s in slots:
+        # 부찬과 건강가든을 함께 "곁들임"으로 본다 — 먹는 사람에겐 둘 다
+        # 메인 옆에 놓이는 반찬이라 중복 여부 판단이 같다.
+        accompaniments = [*s.sides, *s.health_garden]
+        main_name = s.main.menu_name if s.main else None
+
+        ingredient_clashes = find_ingredient_clashes(
+            main_name, [item.menu_name for item in accompaniments]
+        )
+        vector_clashes, untagged = find_vector_clashes(
+            (s.main.menu_name, vectors.get(s.main.menu_id)) if s.main else None,
+            [(item.menu_name, vectors.get(item.menu_id)) for item in accompaniments],
+        )
+        untagged_all.update(untagged)
+
+        results.append(
+            {
+                "plan_date": s.plan_date.isoformat(),
+                "corner_id": s.corner_id,
+                "corner_name": s.corner_name,
+                "meal_type": s.meal_type,
+                "main": main_name,
+                "sides": [item.menu_name for item in s.sides],
+                "health_garden": [item.menu_name for item in s.health_garden],
+                "ingredient_clashes": [
+                    {"menu_a": c.menu_a, "menu_b": c.menu_b, "shared": c.shared}
+                    for c in ingredient_clashes
+                ],
+                "vector_clashes": [
+                    {
+                        "menu_a": c.menu_a,
+                        "menu_b": c.menu_b,
+                        "dimension": c.dimension,
+                        "label_ko": c.label_ko,
+                        "value_a": c.value_a,
+                        "value_b": c.value_b,
+                    }
+                    for c in vector_clashes
+                ],
+                "untagged": untagged,
+            }
+        )
+
+    # 충돌이 많은 슬롯을 위로 — 담당자가 고쳐야 할 것부터 보여야 한다.
+    results.sort(
+        key=lambda r: (
+            -(len(r["ingredient_clashes"]) + len(r["vector_clashes"])),
+            r["plan_date"],
+            r["corner_name"],
+        )
+    )
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "slots": results,
+        "untagged_menu_count": len(untagged_all),
+    }
+
+
 @router.get("/weekly-menu/rotation")
 def weekly_menu_rotation(
     period_start: dt.date,
@@ -1319,6 +1422,257 @@ def menu_affinity(
             status_code=404, detail=f"'{menu_name}' 메뉴의 취식 기록이 이 기간에 없습니다."
         )
     return [{"menu_name": r.menu_name, "co_count": r.co_count, "lift": r.lift} for r in results]
+
+
+@router.get("/menu-plan/performance")
+def menu_plan_performance(
+    period_start: dt.date,
+    period_end: dt.date,
+    meal_type: MealType | None = None,
+    corner_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """편성 횟수 × 반응 — "다음 주 뭘 빼고 뭘 넣을까"에 답한다 (2026-08).
+
+    **메인메뉴만 본다.** 맛평가·취식 데이터는 그 사람이 고른 **메인** 기준이고
+    부찬은 취식 기록에 따로 안 남는다(담당자 확인) — 부찬을 넣으면 전부 취식 0이
+    되어 무의미하다.
+
+    기존 4분면(`/menu-performance`)과 결정적으로 다른 점: 저쪽 X축은 `meal_log`의
+    취식 발생 일수라 **편성했는데 아무도 안 먹은 메뉴가 아예 안 나타난다.**
+    여기선 `weekly_menu_plan` 기준이라 그게 보이고, 그게 가장 강한 감편 신호다.
+
+    응답의 `matching`은 식단표 메뉴명과 취식기록 메뉴명이 실제로 이어졌는지를
+    보여준다. 표기가 달라 매칭이 안 된 메뉴가 "아무도 안 먹은 메뉴"로 둔갑해
+    감편 리스트를 오염시키는 걸 담당자가 직접 걸러낼 수 있어야 한다.
+    """
+    plan_filters = [
+        WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+        WeeklyMenuPlan.plan_date.between(period_start, period_end),
+    ]
+    if meal_type is not None:
+        plan_filters.append(WeeklyMenuPlan.meal_type == meal_type)
+    if corner_id is not None:
+        plan_filters.append(WeeklyMenuPlan.corner_id == corner_id)
+
+    plan_rows = (
+        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name, WeeklyMenuPlan.plan_date)
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .filter(*plan_filters)
+        .all()
+    )
+    plan_count: dict[int, int] = {}
+    plan_name: dict[int, str] = {}
+    for menu_id, menu_name, _plan_date in plan_rows:
+        plan_count[menu_id] = plan_count.get(menu_id, 0) + 1
+        plan_name[menu_id] = menu_name
+
+    log_start = dt.datetime.combine(period_start, dt.time())
+    log_end = dt.datetime.combine(period_end, dt.time()) + dt.timedelta(days=1)
+    log_filters = [MealLog.eaten_at >= log_start, MealLog.eaten_at < log_end]
+    if meal_type is not None:
+        log_filters.append(MealLog.meal_type == meal_type)
+    if corner_id is not None:
+        log_filters.append(MealLog.corner_id == corner_id)
+    log_rows = (
+        db.query(MealLog.menu_id, MealLog.taste_score).filter(*log_filters).all()
+    )
+    headcount: dict[int, int] = {}
+    scores: dict[int, list[float]] = {}
+    for menu_id, taste_score in log_rows:
+        if menu_id is None:
+            continue
+        headcount[menu_id] = headcount.get(menu_id, 0) + 1
+        if taste_score is not None:
+            scores.setdefault(menu_id, []).append(TASTE_SCORE_POINTS[taste_score])
+
+    # 기준선은 그 기간 전체의 중앙값 — 기존 4분면(aggregation.py)과 같은 방식
+    median_plan = median_or_zero([float(c) for c in plan_count.values()])
+    satisfaction_values = [
+        statistics.fmean(v) for v in scores.values() if v
+    ]
+    median_satisfaction = median_or_zero(satisfaction_values)
+
+    items = []
+    for menu_id, count in plan_count.items():
+        menu_scores = scores.get(menu_id, [])
+        avg_satisfaction = statistics.fmean(menu_scores) if menu_scores else None
+        total_headcount = headcount.get(menu_id, 0)
+        action = classify_planning_action(
+            count,
+            avg_satisfaction,
+            len(menu_scores),
+            total_headcount,
+            median_plan_count=median_plan,
+            median_satisfaction=median_satisfaction,
+        )
+        items.append(
+            {
+                "menu_id": menu_id,
+                "menu_name": plan_name[menu_id],
+                "plan_count": count,
+                "total_headcount": total_headcount,
+                "headcount_per_plan": round(total_headcount / count, 1) if count else 0.0,
+                "evaluation_count": len(menu_scores),
+                "avg_satisfaction": round(avg_satisfaction, 2) if avg_satisfaction is not None else None,
+                "action": action.value,
+            }
+        )
+    items.sort(key=lambda r: (-r["plan_count"], r["menu_name"]))
+
+    # 매칭 진단 — 식단표 MAIN과 취식기록이 실제로 이어졌는지
+    planned_ids = set(plan_count)
+    logged_ids = {mid for mid in headcount if headcount[mid] > 0}
+    plan_only_ids = planned_ids - logged_ids
+    log_only_ids = logged_ids - planned_ids
+    log_only_names = {
+        m.menu_id: m.menu_name
+        for m in db.query(MenuMaster).filter(MenuMaster.menu_id.in_(log_only_ids)).all()
+    } if log_only_ids else {}
+
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "median_plan_count": median_plan,
+        "median_satisfaction": round(median_satisfaction, 2),
+        "items": items,
+        "matching": {
+            "matched": len(planned_ids & logged_ids),
+            # 편성됐는데 취식 0 — "진짜 아무도 안 먹음"과 "메뉴명이 안 맞아
+            # 매칭 실패"가 섞여 있으므로 목록째 넘겨 담당자가 판단하게 한다.
+            "plan_only": sorted(plan_name[mid] for mid in plan_only_ids),
+            # 취식은 있는데 그 기간 식단표에 MAIN으로 없는 메뉴
+            "log_only": sorted(log_only_names.values()),
+        },
+    }
+
+
+@router.get("/menu-plan/repertoire")
+def menu_plan_repertoire(
+    period_start: dt.date,
+    period_end: dt.date,
+    db: Session = Depends(get_db),
+):
+    """코너 × 역할(메인/부찬/건강가든)별 레퍼토리 다양성 (2026-08).
+
+    "이 코너는 8개월간 몇 종을 돌렸나, 상위 몇 개에 얼마나 쏠렸나"를 본다.
+    `top_share`와 `hhi`를 둘 다 내는 이유는 `menu_plan_analytics`의 docstring 참고.
+    """
+    rows = (
+        db.query(
+            CornerMaster.corner_name,
+            WeeklyMenuPlan.menu_role,
+            MenuMaster.menu_name,
+        )
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
+        .filter(WeeklyMenuPlan.plan_date.between(period_start, period_end))
+        .all()
+    )
+    buckets: dict[tuple[str, str], dict[str, int]] = {}
+    for corner_name, menu_role, menu_name in rows:
+        role_value = menu_role.value if hasattr(menu_role, "value") else str(menu_role)
+        counts = buckets.setdefault((corner_name, role_value), {})
+        counts[menu_name] = counts.get(menu_name, 0) + 1
+
+    results = []
+    for (corner_name, role_value), counts in buckets.items():
+        stats = compute_repertoire(counts)
+        results.append(
+            {
+                "corner_name": corner_name,
+                "menu_role": role_value,
+                "total_slots": stats.total_slots,
+                "unique_menus": stats.unique_menus,
+                "top_share": stats.top_share,
+                "hhi": stats.hhi,
+                "top_menus": [{"menu_name": n, "count": c} for n, c in stats.top_menus],
+            }
+        )
+    results.sort(key=lambda r: (r["corner_name"], r["menu_role"]))
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "items": results,
+    }
+
+
+@router.get("/menu-combinations/spread-ranking")
+def menu_combination_spread_ranking(
+    period_start: dt.date,
+    period_end: dt.date,
+    min_day_count: int = 2,
+    top_n: int = 10,
+    corner_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """조합에 따라 만족도 **편차가 큰 메인메뉴**를 먼저 보여준다 (2026-08 요청).
+
+    부찬 조합 비교가 메뉴명 검색으로만 열리다 보니 "뭘 검색해야 하는지"부터
+    막힌다는 피드백이 있었다. 편차가 크다 = 부찬을 바꾸면 만족도가 실제로
+    움직인다 = 손볼 가치가 있다. 편차가 0에 가까운 메뉴는 뭘 붙여도 결과가
+    같으니 볼 필요가 없다.
+
+    `min_day_count` 기본 2: 1일짜리 조합은 그날 컨디션이 그대로 편차가 되어
+    랭킹 상위가 전부 우연으로 찬다.
+    """
+    combos_by_menu = build_side_combos_bulk(db, period_start, period_end, corner_id=corner_id)
+    if not combos_by_menu:
+        return {
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "corner_id": corner_id,
+            "min_day_count": min_day_count,
+            "items": [],
+        }
+
+    all_menu_ids: set[int] = set(combos_by_menu)
+    summaries_by_menu: dict[int, list] = {}
+    for main_menu_id, days in combos_by_menu.items():
+        summaries = compute_combo_satisfaction_summary(days, min_day_count=min_day_count)
+        summaries_by_menu[main_menu_id] = summaries
+        for s in summaries:
+            all_menu_ids.update(s.side_menu_ids)
+
+    menu_names = {
+        m.menu_id: m.menu_name
+        for m in db.query(MenuMaster).filter(MenuMaster.menu_id.in_(all_menu_ids)).all()
+    }
+
+    def _combo_payload(summary) -> dict:
+        return {
+            "sides": [menu_names.get(sid) for sid in sorted(summary.side_menu_ids)],
+            "avg_satisfaction": summary.avg_satisfaction,
+            "day_count": summary.day_count,
+        }
+
+    items = []
+    for main_menu_id, summaries in summaries_by_menu.items():
+        spread = compute_combo_spread(summaries)
+        if spread is None:
+            continue  # 평가 있는 조합이 1개 이하 — 비교 자체가 불가능
+        # compute_combo_satisfaction_summary가 이미 만족도 내림차순(평가 없는
+        # 조합은 맨 뒤)으로 정렬해 두므로, 평가 있는 것 중 처음/마지막이 최고/최저다.
+        scored = [s for s in summaries if s.avg_satisfaction is not None]
+        items.append(
+            {
+                "menu_id": main_menu_id,
+                "menu_name": menu_names.get(main_menu_id),
+                "combo_count": len(summaries),
+                "spread": round(spread, 2),
+                "best": _combo_payload(scored[0]),
+                "worst": _combo_payload(scored[-1]),
+            }
+        )
+
+    items.sort(key=lambda r: -r["spread"])
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "corner_id": corner_id,
+        "min_day_count": min_day_count,
+        "items": items[:top_n],
+    }
 
 
 @router.get("/menu-combinations/{menu_name}")

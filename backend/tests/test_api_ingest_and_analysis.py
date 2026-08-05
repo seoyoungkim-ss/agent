@@ -2785,3 +2785,349 @@ def test_menu_combinations_corner_filter_narrows_slots(client, db_session):
     ).json()
     assert only_hansik["corner_id"] is not None
     assert [c["sides"] for c in only_hansik["combos"]] == [["계란후라이"]]
+
+
+def _combination_check(client, **params):
+    resp = client.get("/api/analysis/weekly-menu/combination-check", params=params)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_combination_check_flags_ingredient_overlap_between_main_and_side(client):
+    """담당자가 든 실제 예시 — 콩나물국밥(메인) + 콩나물무침(부찬)."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "콩나물국밥", "메인"),
+                _plan_row(MONDAY, "콩나물무침", "부찬"),
+                _plan_row(MONDAY, "깍두기", "부찬"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    data = _combination_check(
+        client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat()
+    )
+    slot = data["slots"][0]
+    shared = [c["shared"] for c in slot["ingredient_clashes"]]
+    assert ["콩나물"] in shared
+    assert slot["main"] == "콩나물국밥"
+
+
+def test_combination_check_includes_health_garden_in_the_comparison(client, db_session):
+    """건강가든도 부찬과 같이 본다 — 요청이 "메인/부찬/건강가든 조합"이었다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY, "두부김치", "메인")]},
+        headers=AUTH_HEADERS,
+    )
+    corner_id = _corner_id(db_session, "한식")
+    client.put(
+        "/api/analysis/weekly-menu/health-garden",
+        json={
+            "plan_date": MONDAY.isoformat(),
+            "corner_id": corner_id,
+            "meal_type": "중식",
+            "menu_names_raw": "두부샐러드",
+        },
+    )
+    data = _combination_check(
+        client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat()
+    )
+    slot = data["slots"][0]
+    assert slot["health_garden"] == ["두부샐러드"]
+    pairs = {(c["menu_a"], c["menu_b"]) for c in slot["ingredient_clashes"]}
+    assert ("두부김치", "두부샐러드") in pairs
+
+
+def test_combination_check_reports_untagged_menus_instead_of_passing_them(client):
+    """food_vector 미태깅 메뉴를 조용히 '충돌 없음'으로 넘기면 안 된다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                # 규칙 키워드에 안 걸리는 이름 → food_vector가 NULL로 남는다
+                _plan_row(MONDAY, "그라탱", "메인"),
+                _plan_row(MONDAY, "라따뚜이", "부찬"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    data = _combination_check(
+        client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat()
+    )
+    assert data["untagged_menu_count"] == 2
+    assert set(data["slots"][0]["untagged"]) == {"그라탱", "라따뚜이"}
+
+
+def test_combination_check_sorts_slots_with_more_clashes_first(client):
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                # 월: 충돌 없음
+                _plan_row(MONDAY, "돈까스", "메인", corner_name="일품"),
+                _plan_row(MONDAY, "미역국", "부찬", corner_name="일품"),
+                # 화: 재료 중복 있음
+                _plan_row(MONDAY + dt.timedelta(days=1), "감자탕", "메인", corner_name="일품"),
+                _plan_row(MONDAY + dt.timedelta(days=1), "감자조림", "부찬", corner_name="일품"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    data = _combination_check(
+        client,
+        period_start=MONDAY.isoformat(),
+        period_end=(MONDAY + dt.timedelta(days=5)).isoformat(),
+    )
+    assert len(data["slots"][0]["ingredient_clashes"]) > 0
+
+
+def test_bulk_combo_loader_matches_single_menu_loader(client, db_session):
+    """랭킹(bulk)과 상세(단건)가 같은 ComboDay를 내야 한다.
+
+    두 경로가 갈라지면 화면에서 랭킹과 상세가 서로 다른 만족도를 보여준다.
+    bulk는 쿼리 3개로 끝내는 최적화 버전이라 이 동치성이 유일한 안전장치다.
+    """
+    from app.models.master import MenuMaster
+    from app.services.menu_combination import (
+        build_side_combos_bulk,
+        build_side_combos_for_main_menu,
+    )
+
+    rows = [
+        _plan_row(MONDAY, "제육볶음", "메인"),
+        _plan_row(MONDAY, "계란후라이", "부찬"),
+        _plan_row(MONDAY + dt.timedelta(days=2), "제육볶음", "메인"),
+        _plan_row(MONDAY + dt.timedelta(days=2), "미역국", "부찬"),
+        _plan_row(MONDAY + dt.timedelta(days=1), "돈까스", "메인", corner_name="일품"),
+        _plan_row(MONDAY + dt.timedelta(days=1), "단무지", "부찬", corner_name="일품"),
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    # 취식 + 맛평가를 섞어 넣어 평균 만족도가 실제로 계산되게 한다
+    _ingest_meal_log(client, "E1", "맛남", corner_name="한식", menu_name="제육볶음")
+    _ingest_meal_log(client, "E2", "보통", corner_name="한식", menu_name="제육볶음")
+    _ingest_meal_log(
+        client, "E3", "개선", corner_name="한식", menu_name="제육볶음",
+        eaten_date=MONDAY + dt.timedelta(days=2),
+    )
+
+    period_start, period_end = MONDAY, MONDAY + dt.timedelta(days=5)
+    bulk = build_side_combos_bulk(db_session, period_start, period_end)
+
+    menus = {m.menu_name: m.menu_id for m in db_session.query(MenuMaster).all()}
+    for menu_name in ("제육볶음", "돈까스"):
+        menu_id = menus[menu_name]
+        single = build_side_combos_for_main_menu(db_session, menu_id, period_start, period_end)
+        assert sorted(bulk.get(menu_id, []), key=lambda d: d.plan_date) == sorted(
+            single, key=lambda d: d.plan_date
+        ), f"{menu_name}에서 bulk와 단건 결과가 다름"
+
+
+def test_bulk_combo_loader_respects_corner_filter(client, db_session):
+    from app.models.master import MenuMaster
+    from app.services.menu_combination import build_side_combos_bulk
+
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "제육볶음", "메인", corner_name="한식"),
+                _plan_row(MONDAY + dt.timedelta(days=1), "제육볶음", "메인", corner_name="일품"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    menu_id = db_session.query(MenuMaster).filter_by(menu_name="제육볶음").one().menu_id
+    everything = build_side_combos_bulk(db_session, MONDAY, MONDAY + dt.timedelta(days=5))
+    only_hansik = build_side_combos_bulk(
+        db_session, MONDAY, MONDAY + dt.timedelta(days=5), corner_id=_corner_id(db_session, "한식")
+    )
+    assert len(everything[menu_id]) == 2
+    assert len(only_hansik[menu_id]) == 1
+
+
+def test_spread_ranking_puts_biggest_satisfaction_gap_first(client):
+    """부찬 조합에 따라 만족도가 크게 갈리는 메인메뉴가 맨 위에 와야 한다."""
+    rows = [
+        # 제육볶음: 조합A는 맛있음, 조합B는 맛없음 → 편차 큼
+        _plan_row(MONDAY, "제육볶음", "메인"),
+        _plan_row(MONDAY, "계란후라이", "부찬"),
+        _plan_row(MONDAY + dt.timedelta(days=1), "제육볶음", "메인"),
+        _plan_row(MONDAY + dt.timedelta(days=1), "단무지", "부찬"),
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    _ingest_meal_log(client, "E1", "맛남", corner_name="한식", menu_name="제육볶음")
+    _ingest_meal_log(
+        client, "E2", "개선", corner_name="한식", menu_name="제육볶음",
+        eaten_date=MONDAY + dt.timedelta(days=1),
+    )
+
+    resp = client.get(
+        "/api/analysis/menu-combinations/spread-ranking",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=5)).isoformat(),
+            "min_day_count": 1,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["items"]
+    assert items, "편차가 있는 메뉴가 하나도 안 나왔다"
+    top = items[0]
+    assert top["menu_name"] == "제육볶음"
+    assert top["spread"] > 0
+    # best/worst가 실제로 서로 다른 조합이어야 한다
+    assert top["best"]["sides"] != top["worst"]["sides"]
+    assert top["best"]["avg_satisfaction"] > top["worst"]["avg_satisfaction"]
+
+
+def test_spread_ranking_skips_menus_with_single_scored_combo(client):
+    """평가 있는 조합이 1개뿐이면 비교가 불가능하므로 랭킹에서 빠진다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "갈비탕", "메인"),
+                _plan_row(MONDAY, "깍두기", "부찬"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    _ingest_meal_log(client, "E1", "맛남", corner_name="한식", menu_name="갈비탕")
+    resp = client.get(
+        "/api/analysis/menu-combinations/spread-ranking",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=5)).isoformat(),
+            "min_day_count": 1,
+        },
+    )
+    assert [i["menu_name"] for i in resp.json()["items"]] == []
+
+
+def _plan_performance(client, **params):
+    resp = client.get("/api/analysis/menu-plan/performance", params=params)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_plan_performance_shows_menus_that_were_planned_but_never_eaten(client):
+    """기존 4분면과의 결정적 차이 — 편성만 되고 취식 0인 메뉴가 보여야 한다.
+
+    /menu-performance의 X축은 meal_log의 취식 발생 일수라 이런 메뉴는 아예
+    나타나지 않는다. 그게 가장 강한 감편 신호인데 안 보이는 게 문제였다.
+    """
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "제육볶음", "메인"),
+                _plan_row(MONDAY + dt.timedelta(days=1), "아무도안먹은메뉴", "메인"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    _ingest_meal_log(client, "E1", "맛남", corner_name="한식", menu_name="제육볶음")
+
+    data = _plan_performance(
+        client,
+        period_start=MONDAY.isoformat(),
+        period_end=(MONDAY + dt.timedelta(days=5)).isoformat(),
+    )
+    by_name = {i["menu_name"]: i for i in data["items"]}
+    assert "아무도안먹은메뉴" in by_name
+    assert by_name["아무도안먹은메뉴"]["total_headcount"] == 0
+    assert by_name["아무도안먹은메뉴"]["action"] == "취식 기록 없음"
+    # 매칭 진단에도 잡혀야 한다 — 이름 불일치인지 담당자가 확인할 수 있게
+    assert "아무도안먹은메뉴" in data["matching"]["plan_only"]
+    assert data["matching"]["matched"] == 1
+
+
+def test_plan_performance_excludes_side_dishes(client):
+    """취식 데이터가 메인 기준이라 부찬을 넣으면 전부 취식 0이 되어 무의미하다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "제육볶음", "메인"),
+                _plan_row(MONDAY, "계란후라이", "부찬"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    data = _plan_performance(
+        client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat()
+    )
+    assert [i["menu_name"] for i in data["items"]] == ["제육볶음"]
+
+
+def test_plan_performance_counts_plan_appearances_not_intake_days(client):
+    """편성 횟수는 식단표 기준 — 같은 날 여러 명이 먹어도 1회 편성이다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "돈까스", "메인"),
+                _plan_row(MONDAY + dt.timedelta(days=2), "돈까스", "메인"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    for i in range(4):
+        _ingest_meal_log(client, f"E{i}", "맛남", corner_name="한식", menu_name="돈까스")
+
+    data = _plan_performance(
+        client,
+        period_start=MONDAY.isoformat(),
+        period_end=(MONDAY + dt.timedelta(days=5)).isoformat(),
+    )
+    row = next(i for i in data["items"] if i["menu_name"] == "돈까스")
+    assert row["plan_count"] == 2  # 편성 2회
+    assert row["total_headcount"] == 4  # 취식 4건
+    assert row["headcount_per_plan"] == 2.0
+
+
+def test_plan_performance_reports_log_only_menus(client):
+    """취식은 있는데 그 기간 식단표에 MAIN으로 없는 메뉴도 알려준다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY, "제육볶음", "메인")]},
+        headers=AUTH_HEADERS,
+    )
+    _ingest_meal_log(client, "E1", "맛남", corner_name="한식", menu_name="식단표에없는메뉴")
+
+    data = _plan_performance(
+        client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat()
+    )
+    assert "식단표에없는메뉴" in data["matching"]["log_only"]
+
+
+def test_repertoire_reports_diversity_per_corner_and_role(client):
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "돈까스", "메인", corner_name="일품"),
+                _plan_row(MONDAY + dt.timedelta(days=1), "돈까스", "메인", corner_name="일품"),
+                _plan_row(MONDAY + dt.timedelta(days=2), "우동", "메인", corner_name="일품"),
+                _plan_row(MONDAY, "단무지", "부찬", corner_name="일품"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    resp = client.get(
+        "/api/analysis/menu-plan/repertoire",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=5)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    items = {(i["corner_name"], i["menu_role"]): i for i in resp.json()["items"]}
+    main = items[("일품", "메인")]
+    assert main["total_slots"] == 3
+    assert main["unique_menus"] == 2
+    assert main["top_menus"][0] == {"menu_name": "돈까스", "count": 2}
+    assert ("일품", "부찬") in items

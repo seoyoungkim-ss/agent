@@ -3124,3 +3124,134 @@ analysis.py`, `backend/alembic/versions/e7b4c2915f30_*.py`,
 `backend/tests/test_menu_rotation.py`(신규), `backend/tests/
 test_api_ingest_and_analysis.py`, `frontend/src/api/client.ts`,
 `frontend/src/pages/AnalysisPage.tsx`.
+
+---
+
+## 49. 식단표 8개월치로 가능해진 분석 4종 (2026-08)
+
+주간 식단표 엑셀 31개(8개월치)가 적재됐다. 그전까지 `weekly_menu_plan`은 최근
+몇 주치뿐이라 **편성 이력 자체를 분석 대상으로 쓸 수 없었다.**
+
+### 49.1 전제 — 편성 횟수 ≠ 취식 발생 일수
+
+기존 "메뉴별 분석" 4분면의 X축 `appearance_count`는 `meal_log`의 **취식 발생
+일수**다(`aggregation.py`의 `[r.eaten_at.date() for r in rows]`). 즉 **편성했는데
+아무도 안 먹은 메뉴는 `by_menu`에 안 들어와 4분면에서 아예 사라진다.**
+
+편성 횟수는 담당자가 **직접 통제하는 유일한 변수**다 — 만족도·식수는 결과지만
+편성 횟수는 다음 주에 바꿀 수 있다. 그래서 §49.3의 화면은 `weekly_menu_plan`을
+기준으로 다시 센다.
+
+### 49.2 중복은 축이 둘이다
+
+| 축 | 질문 | 구현 |
+|---|---|---|
+| 기간 내 같은 메뉴 반복 | "이 메뉴 최근에 또 내보내지 않았나" | §48 회전 이력(`menu_rotation.py`) — 유지 |
+| **슬롯 내 재료·특성 중복** | "이 한 끼 구성이 겹치지 않나" | **신규 `menu_clash.py`** |
+
+담당자 예시: 콩나물국밥(메인) + 콩나물무침(부찬) = 재료 중복 /
+순두부찌개 + 매운양념 부찬 = 맛 중복 / 메인이 탄수화물인데 부찬도 탄수화물.
+
+`GET /analysis/weekly-menu/combination-check` — 같은 (날짜, 코너, 끼니) 안에서
+메인↔부찬, 부찬↔부찬 모든 쌍을 본다. 건강가든도 부찬과 함께 넣는다.
+
+**재료 중복**은 `_INGREDIENT_TOKENS` 사전으로 메뉴명에서 식재료를 뽑아 교집합을
+본다. `food_vector_tagging._KEYWORD_RULES`는 *차원*(매운맛/탄수화물) 키워드지
+재료 사전이 아니라("콩나물"이 없다) 별도로 뒀다.
+**한계**: 사전에 없는 재료는 못 잡는다. 1자 토큰("무")은 "무침"·"무국"에
+오탐하므로 **2자 이상만** 넣는다. 이 레포의 3단계 패턴(규칙 → LLM → 수동)에서
+1단계만 한 셈이고, 커버리지가 부족하면 LLM 재료 추출이 다음 단계다.
+
+**특성 중복**은 `food_vector`를 재사용한다. 대상 차원은
+`spicy/carb/fried/oily/soup_based/salty` 6개뿐이다 — **`protein`과
+`vegetable_ratio`는 뺐다. 단백질이나 채소가 겹치는 건 문제가 아니라 오히려
+좋다.** 겹쳐서 물리거나 영양이 쏠리는 차원만 본다. `sweet`/`sour`는 판단이
+애매해 v0에서 제외했다. 임계값 0.6은 규칙 태깅(0.85/0.2 이분법)과 LLM
+태깅(연속값)을 같은 기준으로 다루기 위한 값이다.
+
+**`food_vector`가 NULL인 메뉴는 조용히 넘기지 않고 `untagged`로 따로 센다** —
+태깅이 안 된 것뿐인데 "구성이 괜찮다"고 오해하면 안 된다.
+
+화면은 회전 이력과 **한 카드로 합쳤다**(`DuplicationCheckSection`). 카드가
+따로면 주 이동이 어긋나 "회전 이력은 이번 주, 조합은 지난 주"를 보게 된다.
+협의 결정에 따라 `RotationFlag.SAME_DAY`(코너 간 같은 날 중복)는 프론트의 기본
+경고 집합에서 뺐다 — 백엔드 판정·테스트는 그대로라 되살리려면 한 줄이다.
+
+### 49.3 편성 빈도 × 성과 + 메뉴명 매칭 진단
+
+`GET /analysis/menu-plan/performance` — 편성 횟수(weekly_menu_plan)와
+반응(meal_log)을 교차해 감편/증편 방향을 낸다. 기준선은 **그 기간 전체의
+중앙값**으로, 기존 4분면(`aggregation.py`)과 같은 방식이다 — 화면마다 다른
+기준을 쓰면 담당자의 판정 감각이 어긋난다.
+
+판정 우선순위: **취식 0 → 표본 부족 → 4분면**. 취식이 아예 없으면 만족도 비교
+자체가 성립하지 않는다.
+
+**메인메뉴만 본다.** 맛평가·취식 데이터는 그 사람이 고른 **메인** 기준이고
+부찬은 취식 기록에 따로 안 남는다(담당자 확인) — 부찬을 넣으면 전부 취식 0이
+되어 무의미하다.
+
+**매칭 진단이 이 화면의 핵심 안전장치다.** 식단표 메뉴와 취식기록 메뉴는 둘 다
+`get_or_create_menu(db, menu_name)`을 거치므로 이름이 같으면 자동으로 같은
+`menu_id`가 되지만, 표기가 다르면 별개 메뉴가 된다(이 레포는 §3 원산지 정규화,
+§4 `&미니우동` 파싱 등 표기 문제를 이미 겪었다). 응답의 `matching`이
+`matched` / `plan_only`(편성됐는데 취식 0) / `log_only`를 그대로 실어 보내
+담당자가 **"진짜 안 팔린 것"과 "이름이 안 맞아 매칭 실패한 것"을 직접 구분**할
+수 있게 한다. 이게 없으면 감편 리스트가 매칭 실패 메뉴로 가득 찬다.
+
+### 49.4 부찬 조합 편차 랭킹 — 검색 없이 먼저 보이게
+
+부찬 조합 비교가 메뉴명 검색으로만 열려 "뭘 검색해야 하는지"부터 막힌다는
+피드백. **조합에 따라 만족도 편차가 큰 메인메뉴**를 먼저 띄운다 — 편차가 크다 =
+부찬을 바꾸면 만족도가 실제로 움직인다. 편차가 0에 가까우면 뭘 붙여도 결과가
+같으니 볼 필요가 없다.
+
+`GET /analysis/menu-combinations/spread-ranking`. `min_day_count` 기본 2인 이유:
+1일짜리 조합은 그날 컨디션이 그대로 편차가 되어 랭킹 상위가 우연으로 찬다.
+
+**성능**: 기존 `build_side_combos_for_main_menu`는 **슬롯마다 `meal_log` 쿼리를
+1번씩** 던진다. 단건 상세엔 그게 더 가볍지만 기간 전체 랭킹에선 8개월 × 코너 7 ×
+주 6일 = 1000+ 쿼리가 된다. 그래서 **쿼리 3개로 끝내는 `build_side_combos_bulk`**
+를 따로 뒀고, 기존 단건 함수는 그대로 남겼다.
+
+두 경로가 갈라지면 랭킹과 상세가 다른 숫자를 보여주므로
+`test_bulk_combo_loader_matches_single_menu_loader`가 **동치성을 못박는다.**
+이게 이 배치의 핵심 안전장치다.
+
+⚠️ **라우트 순서 함정**: `/menu-combinations/spread-ranking`을
+`/menu-combinations/{menu_name}` **뒤에** 두면 `{menu_name}`이 "spread-ranking"을
+잡아먹는다(FastAPI는 선언 순서로 매칭). `/corners/list`와 같은 함정이라 이번에도
+고정 경로를 먼저 선언했다.
+
+### 49.5 코너별 레퍼토리 진단
+
+`GET /analysis/menu-plan/repertoire` — 코너 × 역할별로 편성 슬롯 수, 고유 메뉴
+종수, 상위 5개 비중, HHI(허핀달 지수).
+
+**`top_share`와 `hhi`를 둘 다 내는 이유**: 종수가 `top_n` 이하면 `top_share`는
+무조건 1.0이라 아무것도 구분 못 한다 — 바로 그 구간을 HHI가 잡는다. 반대로
+종수가 많으면 `top_share`가 쏠림을 직관적으로 보여준다. 한 지표만 보면 오진한다
+(`test_hhi_discriminates_where_unique_count_and_top_share_cannot`가 이걸 고정).
+
+### 49.6 조회 기간
+
+§49.3~49.5 화면에 기간 선택(3/6/12개월)을 붙이고 **기본 6개월**로 뒀다.
+`AnalysisPage.tsx`의 `PERIOD_START`는 `isoDaysAgo(180)` 고정이라 8개월치를 볼
+수단이 없었다. 기본값을 12개월로 올리진 않는다 — **적재 이전 구간은 편성 이력이
+비어 있어 편성 횟수가 실제보다 적게 나온다.**
+
+### 49.7 남은 후속 과제
+
+- **LLM 기반 재료 추출** — 규칙 사전 커버리지가 부족할 때(3단계 패턴 2단계)
+- 요일·월별 편성 패턴 히트맵, 신메뉴 정착률(이번에 안 고른 2개)
+- 회전 이력 임계값(14일/0.6/3회) 실측 보정 — 8개월치가 쌓여 이제 실제 분포를
+  보고 조정할 수 있다
+- 3순위 알람, 4순위 만족도·VoE 정리, 5순위 채팅 그라운딩 갱신
+
+**파일 요약**: `backend/app/services/menu_clash.py`(신규),
+`backend/app/services/menu_plan_analytics.py`(신규),
+`backend/app/services/menu_combination.py`, `backend/app/api/analysis.py`,
+`backend/tests/test_menu_clash.py`(신규),
+`backend/tests/test_menu_plan_analytics.py`(신규),
+`backend/tests/test_api_ingest_and_analysis.py`,
+`frontend/src/api/client.ts`, `frontend/src/pages/AnalysisPage.tsx`.

@@ -151,3 +151,100 @@ def compute_combo_nutrition_profile(
         FOOD_VECTOR_LABELS_KO.get(dim, dim): round(statistics.fmean(v[i] for v in vectors), 2)
         for i, dim in enumerate(FOOD_VECTOR_DIMENSIONS)
     }
+
+
+# ---------------------------------------------------------------------------
+# 기간 전체 일괄 조회 + 조합 편차 (2026-08)
+# ---------------------------------------------------------------------------
+# build_side_combos_for_main_menu는 슬롯마다 meal_log 쿼리를 1번씩 던진다.
+# 단건 상세 조회엔 그게 더 가볍지만, "편차가 큰 메인메뉴 랭킹"처럼 기간 내 모든
+# 메인을 훑어야 하는 화면에선 8개월 × 코너 7개 × 주 6일 = 1000+ 쿼리가 되어
+# 못 쓴다. 그래서 쿼리 3개로 끝내고 메모리에서 묶는 배치 버전을 따로 둔다.
+#
+# 두 함수는 **같은 ComboDay를 내야 한다** — 랭킹과 상세가 다른 숫자를 보여주면
+# 안 되므로 동치성 테스트로 고정한다(tests/test_api_ingest_and_analysis.py).
+
+
+def build_side_combos_bulk(
+    db: Session, period_start: dt.date, period_end: dt.date, *, corner_id: int | None = None
+) -> dict[int, list[ComboDay]]:
+    """기간 내 모든 메인메뉴에 대해 {main_menu_id: [ComboDay, ...]}를 만든다."""
+    main_filters = [
+        WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+        WeeklyMenuPlan.plan_date.between(period_start, period_end),
+    ]
+    if corner_id is not None:
+        main_filters.append(WeeklyMenuPlan.corner_id == corner_id)
+    main_slots = (
+        db.query(
+            WeeklyMenuPlan.menu_id,
+            WeeklyMenuPlan.plan_date,
+            WeeklyMenuPlan.corner_id,
+            WeeklyMenuPlan.meal_type,
+        )
+        .filter(*main_filters)
+        .distinct()
+        .all()
+    )
+    if not main_slots:
+        return {}
+
+    side_rows = (
+        db.query(
+            WeeklyMenuPlan.plan_date,
+            WeeklyMenuPlan.corner_id,
+            WeeklyMenuPlan.meal_type,
+            WeeklyMenuPlan.menu_id,
+        )
+        .filter(
+            WeeklyMenuPlan.menu_role == MenuRole.SIDE,
+            WeeklyMenuPlan.plan_date.between(period_start, period_end),
+        )
+        .all()
+    )
+    sides_by_slot: dict[tuple[dt.date, int, str], set[int]] = {}
+    for plan_date, slot_corner_id, meal_type, menu_id in side_rows:
+        sides_by_slot.setdefault((plan_date, slot_corner_id, meal_type), set()).add(menu_id)
+
+    # 취식 기록은 (메뉴, 코너, 날짜)로 묶어 한 번에 읽는다. 단건 함수가 슬롯마다
+    # 날짜 경계로 필터하던 것과 같은 범위를 여기서 한 번에 가져온다.
+    log_start = dt.datetime.combine(period_start, dt.time())
+    log_end = dt.datetime.combine(period_end, dt.time()) + dt.timedelta(days=1)
+    log_rows = (
+        db.query(MealLog.menu_id, MealLog.corner_id, MealLog.eaten_at, MealLog.taste_score)
+        .filter(MealLog.eaten_at >= log_start, MealLog.eaten_at < log_end)
+        .all()
+    )
+    logs_by_key: dict[tuple[int, int, dt.date], list] = {}
+    for menu_id, log_corner_id, eaten_at, taste_score in log_rows:
+        if menu_id is None:
+            continue
+        logs_by_key.setdefault((menu_id, log_corner_id, eaten_at.date()), []).append(taste_score)
+
+    results: dict[int, list[ComboDay]] = {}
+    for main_menu_id, plan_date, slot_corner_id, meal_type in main_slots:
+        scores = logs_by_key.get((main_menu_id, slot_corner_id, plan_date), [])
+        score_values = [TASTE_SCORE_POINTS[s] for s in scores if s is not None]
+        results.setdefault(main_menu_id, []).append(
+            ComboDay(
+                plan_date=plan_date,
+                side_menu_ids=frozenset(
+                    sides_by_slot.get((plan_date, slot_corner_id, meal_type), set())
+                ),
+                avg_satisfaction=statistics.fmean(score_values) if score_values else None,
+                headcount=len(scores),
+            )
+        )
+    return results
+
+
+def compute_combo_spread(summaries: list[ComboSummary]) -> float | None:
+    """순수 함수 — 조합별 만족도의 (최고 - 최저).
+
+    편차가 크다 = 부찬을 바꾸면 만족도가 실제로 움직인다 = 손볼 가치가 있다.
+    평가가 있는 조합이 2개 미만이면 비교 자체가 불가능하므로 None.
+    """
+    scored = [s.avg_satisfaction for s in summaries if s.avg_satisfaction is not None]
+    if len(scored) < 2:
+        return None
+    return max(scored) - min(scored)
