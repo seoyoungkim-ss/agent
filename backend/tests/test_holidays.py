@@ -4,12 +4,45 @@ from app.models.enums import HolidayType
 from app.models.master import HolidayCalendar
 from app.services.holidays import (
     DayClassification,
+    HolidayAdjacency,
     HolidayService,
+    classify_holiday_adjacency,
     family_day_dates_in_range,
     family_day_of_month,
     is_family_day,
     is_weekend,
 )
+
+
+def _non_working(dates: set[dt.date]):
+    """주말 + 지정한 공휴일을 휴일로 보는 판정 함수(테스트용)."""
+    return lambda d: is_weekend(d) or d in dates
+
+
+def test_holiday_adjacency_ignores_plain_weekend():
+    """평범한 토·일(2일)은 연휴가 아니다 — 아니면 모든 금/월이 연휴 전후가 된다."""
+    plain = _non_working(set())
+    assert classify_holiday_adjacency(dt.date(2026, 7, 24), plain) == HolidayAdjacency.NONE  # 금
+    assert classify_holiday_adjacency(dt.date(2026, 7, 27), plain) == HolidayAdjacency.NONE  # 월
+
+
+def test_holiday_adjacency_detects_before_and_after_long_break():
+    # 2026-07-27(월)이 공휴일이면 토·일·월 3일 연휴 → 직전 금요일=연휴 전, 직후 화요일=연휴 후
+    with_holiday = _non_working({dt.date(2026, 7, 27)})
+    assert classify_holiday_adjacency(dt.date(2026, 7, 24), with_holiday) == HolidayAdjacency.BEFORE_LONG_BREAK
+    assert classify_holiday_adjacency(dt.date(2026, 7, 28), with_holiday) == HolidayAdjacency.AFTER_LONG_BREAK
+
+
+def test_holiday_adjacency_holiday_itself_is_none():
+    with_holiday = _non_working({dt.date(2026, 7, 27)})
+    assert classify_holiday_adjacency(dt.date(2026, 7, 27), with_holiday) == HolidayAdjacency.NONE
+    assert classify_holiday_adjacency(dt.date(2026, 7, 25), with_holiday) == HolidayAdjacency.NONE  # 토
+
+
+def test_holiday_adjacency_prefers_before_when_both_sides_are_breaks():
+    # 앞뒤가 모두 연휴인 낀 근무일 — "연휴 전"을 우선한다
+    both = _non_working({dt.date(2026, 7, 27), dt.date(2026, 7, 29), dt.date(2026, 7, 30), dt.date(2026, 7, 31)})
+    assert classify_holiday_adjacency(dt.date(2026, 7, 28), both) == HolidayAdjacency.BEFORE_LONG_BREAK
 
 
 def test_is_weekend():

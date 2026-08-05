@@ -2104,6 +2104,67 @@ def test_headcount_trend_total_matches_division_analysis(client):
     assert new_total == legacy_total
 
 
+def test_weekly_congestion_forecast_skips_holidays_and_applies_multipliers(client, db_session):
+    """현황 "금주 예상 식수" — 주 단위 래퍼(2026-08).
+
+    휴일(토·일)은 식당이 안 열어 아예 빠지고, 날씨·연휴 전후 배수가 곱해진다.
+    """
+    from app.models.enums import HolidayType
+    from app.models.master import HolidayCalendar
+
+    # 과거 이력 시딩 — baseline이 0이 아니게 만든다
+    for offset in (14, 7):
+        for i in range(4):
+            _ingest_meal_log(client, f"C{offset}_{i}", "맛남", eaten_date=MONDAY - dt.timedelta(days=offset))
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={
+            "period_start": (MONDAY - dt.timedelta(days=14)).isoformat(),
+            "period_end": (MONDAY - dt.timedelta(days=7)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+
+    # MONDAY+7(월)을 공휴일로 등록 → 토·일·월 3일 연휴가 되어 직전 금요일이 "연휴 전"
+    long_break_monday = MONDAY + dt.timedelta(days=7)
+    db_session.add(
+        HolidayCalendar(
+            calendar_date=long_break_monday,
+            holiday_type=HolidayType.STATUTORY,
+            holiday_name="테스트공휴일",
+        )
+    )
+    db_session.commit()
+
+    resp = client.get(
+        "/api/simulation/congestion-forecast/weekly",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=6)).isoformat(),
+            "meal_type": "중식",
+            "weather": "비",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    returned_dates = {d["target_date"] for d in body["days"]}
+    # 토(MONDAY+5)·일(MONDAY+6)은 휴일이라 빠진다
+    assert (MONDAY + dt.timedelta(days=5)).isoformat() not in returned_dates
+    assert (MONDAY + dt.timedelta(days=6)).isoformat() not in returned_dates
+    assert MONDAY.isoformat() in returned_dates
+
+    friday = next(d for d in body["days"] if d["target_date"] == (MONDAY + dt.timedelta(days=4)).isoformat())
+    assert friday["holiday_adjacency"] == "연휴 전"
+    # 비(0.90) × 연휴 전(0.85) = 0.765
+    assert friday["applied_multiplier"] == 0.765
+
+    monday = next(d for d in body["days"] if d["target_date"] == MONDAY.isoformat())
+    assert monday["holiday_adjacency"] == "해당 없음"
+    assert monday["applied_multiplier"] == 0.9  # 비만 적용
+    assert monday["total_predicted_headcount"] > 0
+
+
 def test_voe_by_category_comment_includes_menu_name(client):
     # 어떤 메뉴에 대한 의견인지 알 수 있게 코멘트마다 menu_name도 함께 내려온다(2026-08).
     _ingest_meal_log(client, "E1", "맛남", comment="정말 맛있어요", menu_name="제육볶음")

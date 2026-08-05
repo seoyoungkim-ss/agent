@@ -174,6 +174,24 @@ export interface DivisionRow {
   headcount: number;
 }
 
+export interface WeeklyForecastDay {
+  target_date: string;
+  classification: string;
+  holiday_adjacency: string; // 연휴 전 | 연휴 후 | 해당 없음
+  applied_multiplier: number;
+  total_predicted_headcount: number;
+  corners: CongestionForecastRow[];
+}
+
+export interface WeeklyForecastResponse {
+  period_start: string;
+  period_end: string;
+  meal_type: MealType;
+  weather: Weather;
+  days: WeeklyForecastDay[];
+  note: string;
+}
+
 export interface CornerListRow {
   corner_id: number;
   corner_name: string;
@@ -616,6 +634,15 @@ export const api = {
 
   congestionForecast: (params: { target_date: string; meal_type: MealType }) =>
     request<CongestionForecastResponse>(`/simulation/congestion-forecast${qs(params)}`),
+
+  // 현황 "금주 예상 식수" — 날짜별 반복 호출 대신 백엔드가 기간 루프를 돈다.
+  // 휴일은 응답에서 빠지고, 날씨·연휴 전후 배수가 반영된 값이 온다.
+  weeklyCongestionForecast: (params: {
+    period_start: string;
+    period_end: string;
+    meal_type: MealType;
+    weather?: Weather;
+  }) => request<WeeklyForecastResponse>(`/simulation/congestion-forecast/weekly${qs(params)}`),
 
   async *chatStream(messages: ChatMessage[]): AsyncGenerator<string> {
     const res = await fetch(`${BASE_URL}/chat/stream`, {

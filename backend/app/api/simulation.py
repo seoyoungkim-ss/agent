@@ -13,7 +13,7 @@ from app.models.enums import MealType, MenuQuadrant, MenuRole
 from app.models.logs import WeeklyMenuPlan
 from app.models.master import CornerMaster
 from app.models.stats import DailyCornerStats, MenuPerformanceStats
-from app.services.holidays import DayClassification, HolidayService, is_family_day
+from app.services.holidays import DayClassification, HolidayAdjacency, HolidayService, is_family_day
 from app.services.menu_throughput import build_corner_daily_peak_share, compute_peak_share_ratio, window_minutes
 from app.services.weekly_menu_prediction import compute_expected_wait_minutes
 
@@ -102,6 +102,16 @@ _WEATHER_MULTIPLIER = {
     Weather.RAIN: 0.90,
     Weather.HEATWAVE: 0.95,
     Weather.COLDWAVE: 0.95,
+}
+
+# ⚠️ 연휴 전후 배수도 _WEATHER_MULTIPLIER와 같은 **v0 가정치**다(실측 근거 없음,
+# 2026-08). 연휴 앞뒤로 휴가를 붙여 쓰는 인원이 있어 식수가 줄어든다는 전제이고,
+# 연휴 전(미리 빠짐)이 연휴 후보다 감소폭이 크다고 봤다. 연휴 표본이 몇 번 쌓이면
+# 실제 식수와 대조해 반드시 보정해야 한다 — 지금은 방향성만 맞춘 값이다.
+_HOLIDAY_ADJACENCY_MULTIPLIER = {
+    HolidayAdjacency.BEFORE_LONG_BREAK: 0.85,
+    HolidayAdjacency.AFTER_LONG_BREAK: 0.90,
+    HolidayAdjacency.NONE: 1.00,
 }
 
 
@@ -213,15 +223,19 @@ def what_if(payload: WhatIfRequest, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/congestion-forecast")
-def congestion_forecast(target_date: dt.date, meal_type: MealType, db: Session = Depends(get_db)):
-    """PRD 7.2: 코너별 혼잡도(대기시간) 추정 — 예상 식수 ÷ 최근 서브속도.
+def _forecast_corners(
+    db: Session,
+    target_date: dt.date,
+    meal_type: MealType,
+    holiday_svc: HolidayService,
+    *,
+    extra_multiplier: float = 1.0,
+) -> list[dict]:
+    """하루 × 한 끼니의 코너별 혼잡도 예측 — `congestion_forecast`와 주간 래퍼가 공유한다.
 
-    실제 What-if 대체 시뮬레이션(다른 코너 메뉴를 바꾸면 분산되는지)은 이 baseline
-    위에서 클라이언트가 시나리오별로 /what-if를 반복 호출해 비교하는 방식으로 v0를
-    구성했다. 전용 최적화 로직은 후속 고도화 대상이다.
+    `extra_multiplier`는 날씨·연휴 전후처럼 그날 전체에 공통으로 걸리는 배수다
+    (코너별 메뉴 인기도 배수와 곱해진다).
     """
-    holiday_svc = HolidayService(db)
     classification = holiday_svc.classify(target_date)
     corners = db.query(CornerMaster).all()
     settings = get_settings()
@@ -243,7 +257,9 @@ def congestion_forecast(target_date: dt.date, meal_type: MealType, db: Session =
             if planned_menu_id is not None
             else None
         )
-        predicted_headcount = baseline * menu_popularity_multiplier if menu_popularity_multiplier else baseline
+        predicted_headcount = (
+            baseline * menu_popularity_multiplier if menu_popularity_multiplier else baseline
+        ) * extra_multiplier
 
         throughputs = [h.peak_throughput_per_min for h in history if h.peak_throughput_per_min]
         avg_throughput = statistics.fmean(throughputs) if throughputs else None
@@ -277,5 +293,68 @@ def congestion_forecast(target_date: dt.date, meal_type: MealType, db: Session =
                 ),
             }
         )
+    return forecasts
 
+
+@router.get("/congestion-forecast")
+def congestion_forecast(target_date: dt.date, meal_type: MealType, db: Session = Depends(get_db)):
+    """PRD 7.2: 코너별 혼잡도(대기시간) 추정 — 예상 식수 ÷ 최근 서브속도.
+
+    실제 What-if 대체 시뮬레이션(다른 코너 메뉴를 바꾸면 분산되는지)은 이 baseline
+    위에서 클라이언트가 시나리오별로 /what-if를 반복 호출해 비교하는 방식으로 v0를
+    구성했다. 전용 최적화 로직은 후속 고도화 대상이다.
+    """
+    forecasts = _forecast_corners(db, target_date, meal_type, HolidayService(db))
     return {"target_date": target_date.isoformat(), "meal_type": meal_type.value, "corners": forecasts}
+
+
+@router.get("/congestion-forecast/weekly")
+def weekly_congestion_forecast(
+    period_start: dt.date,
+    period_end: dt.date,
+    meal_type: MealType,
+    weather: Weather = Weather.SUNNY,
+    db: Session = Depends(get_db),
+):
+    """현황 화면의 "금주 예상 식수" — 기간 내 날짜별 코너 예측을 한 번에 돌려준다.
+
+    프론트가 날짜마다 `/congestion-forecast`를 반복 호출하면 코너마다 60일치 이력
+    조회가 매번 도는 탓에 6~7회만 돌려도 무거워져, 백엔드에서 루프를 돈다
+    (`HolidayService`도 한 번만 만들어 휴일 집합 캐시를 재사용).
+
+    **휴일은 건너뛴다** — 식당이 안 여는 날이라 0으로 그리면 추이가 왜곡된다.
+    날씨는 기상청 연동이 없어 사용자가 고른 값을 그대로 적용한다(2026-08 결정).
+    """
+    holiday_svc = HolidayService(db)
+    weather_multiplier = _WEATHER_MULTIPLIER[weather]
+
+    days = []
+    cursor = period_start
+    while cursor <= period_end:
+        classification = holiday_svc.classify(cursor)
+        if classification == DayClassification.HOLIDAY:
+            cursor += dt.timedelta(days=1)
+            continue
+        adjacency = holiday_svc.adjacency(cursor)
+        multiplier = weather_multiplier * _HOLIDAY_ADJACENCY_MULTIPLIER[adjacency]
+        forecasts = _forecast_corners(db, cursor, meal_type, holiday_svc, extra_multiplier=multiplier)
+        days.append(
+            {
+                "target_date": cursor.isoformat(),
+                "classification": classification.value,
+                "holiday_adjacency": adjacency.value,
+                "applied_multiplier": round(multiplier, 3),
+                "total_predicted_headcount": round(sum(c["predicted_headcount"] for c in forecasts), 1),
+                "corners": forecasts,
+            }
+        )
+        cursor += dt.timedelta(days=1)
+
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "meal_type": meal_type.value,
+        "weather": weather.value,
+        "days": days,
+        "note": "v0 휴리스틱 — 날씨/연휴 전후 배수는 실측 보정 전 가정치입니다.",
+    }

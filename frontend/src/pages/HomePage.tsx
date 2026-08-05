@@ -9,6 +9,7 @@ import {
   type Granularity,
   type HeadcountGroupBy,
   type MealType,
+  type Weather,
 } from "../api/client";
 import {
   Button,
@@ -38,6 +39,11 @@ function isoDaysAgo(days: number): string {
 }
 
 const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
+
+// 예상 대기시간이 이 값을 넘으면 숫자를 믿을 수 없다고 본다 — 식사 시간대(약
+// 2시간)보다 긴 대기는 물리적으로 성립하지 않고, 실제로는 서브속도 표본이 너무
+// 적은 코너에서 (초과분 ÷ 아주 작은 처리량)으로 폭주한 값이다(2026-08).
+const WAIT_MINUTES_PLAUSIBLE_MAX = 120;
 
 // 니치 코너(Take Out/미캠회관/그린미트)를 범례에서 기본 숨기던 규칙은 제거됐다
 // (2026-08 현황 재편) — 통합 추이 차트에 명시적인 "코너 필터"가 생겨, 숨겨진
@@ -150,6 +156,28 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   const cornerListQuery = useQuery({
     queryKey: ["corner-list"],
     queryFn: () => api.cornerList(),
+  });
+
+  // ---- 금주 예상 식수 / 점유율·대기시간 (2026-08 현황 재편) ----
+  // 날씨는 기상청 연동이 없어 사용자가 고른다(협의 결정). 연휴 전후는 백엔드가
+  // 공휴일 캘린더에서 자동 판정해 배수를 적용한다.
+  const [forecastWeather, setForecastWeather] = useState<Weather>("맑음");
+  const [forecastMealType, setForecastMealType] = useState<MealType>("중식");
+  const weeklyForecast = useQuery({
+    queryKey: ["weekly-congestion-forecast", selectedMonday, saturdayOfSelected, forecastMealType, forecastWeather],
+    queryFn: () =>
+      api.weeklyCongestionForecast({
+        period_start: selectedMonday,
+        period_end: saturdayOfSelected,
+        meal_type: forecastMealType,
+        weather: forecastWeather,
+      }),
+  });
+  // 점유율/대기시간은 주간 식단표 예측 요약을 그대로 재사용한다(백엔드 변경 없음).
+  const predictedImpact = useQuery({
+    queryKey: ["weekly-predicted-impact", selectedMonday, saturdayOfSelected],
+    queryFn: () =>
+      api.weeklyMenuPredictedImpactSummary({ period_start: selectedMonday, period_end: saturdayOfSelected }),
   });
   // 일간 × 코너별로 볼 때 툴팁에 그날 그 코너의 메인메뉴를 덧붙인다(2026-07 요청,
   // 코너별 주간 추이 차트에 있던 기능을 통합 차트로 옮겨옴). 그 조합일 때만 조회한다.
@@ -307,6 +335,57 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
           value: d.headcount,
           itemStyle: { color: pointColorForClassification(d.classification) },
         })),
+      },
+    ],
+  };
+
+  // 금주 예상 식수 차트 — 날짜별 총 예상 식수(휴일은 응답에서 이미 빠져 있다).
+  const forecastDays = weeklyForecast.data?.days ?? [];
+  const forecastOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 48, right: 16, top: 16, bottom: 28 },
+    tooltip: {
+      trigger: "axis",
+      formatter: (params: { axisValue?: string; marker: string; value: unknown }[]) => {
+        const date = params[0]?.axisValue ?? "";
+        const day = forecastDays.find((d) => d.target_date === date);
+        const v = params[0]?.value;
+        const lines = [date, `${params[0]?.marker}예상 식수: ${typeof v === "number" ? Math.round(v) : v}명`];
+        if (day && day.holiday_adjacency !== "해당 없음") lines.push(`${day.holiday_adjacency} (배수 ${day.applied_multiplier})`);
+        else if (day && day.applied_multiplier !== 1) lines.push(`날씨 배수 ${day.applied_multiplier}`);
+        return lines.join("<br/>");
+      },
+    },
+    xAxis: {
+      type: "category",
+      data: forecastDays.map((d) => d.target_date),
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text, formatter: (v: string) => weekdayLabel(v) },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      name: "예상 식수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: [
+      {
+        name: "예상 식수",
+        type: "line" as const,
+        symbol: "circle",
+        symbolSize: 8,
+        lineStyle: { width: 2, color: resolveColor("var(--series-1)") },
+        itemStyle: {
+          // 연휴 전후인 날은 색을 달리해 "왜 낮은지"가 눈에 띄게 한다.
+          color: (p: { dataIndex: number }) =>
+            forecastDays[p.dataIndex]?.holiday_adjacency !== "해당 없음"
+              ? resolveColor("var(--warning)")
+              : resolveColor("var(--series-1)"),
+          borderColor: resolveColor("var(--surface)"),
+          borderWidth: 2,
+        },
+        data: forecastDays.map((d) => d.total_predicted_headcount),
       },
     ],
   };
@@ -628,6 +707,88 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
           </p>
         )}
         {trendPeriods.length > 0 && <ReactECharts option={headcountTrendOption} style={{ height: 320 }} />}
+      </Card>
+
+      <Card title="금주 예상 식수 · 점유율 · 대기시간">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          과거 같은 분류(평일/패밀리데이)의 최근 이력에 계획 메뉴 인기도와 날씨·연휴 전후 배수를 곱해
+          추정합니다. 식당이 쉬는 주말·공휴일은 빠집니다. <strong>날씨·연휴 전후 배수는 실측 보정 전
+          가정치</strong>라 방향성 참고용입니다 — 연휴 표본이 쌓이면 보정이 필요합니다.
+        </p>
+        <div className="mb-3 flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            끼니
+            <SegmentedControl
+              value={forecastMealType}
+              options={MEAL_TYPE_OPTIONS.map((m) => ({ label: m, value: m }))}
+              onChange={setForecastMealType}
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            날씨
+            <SegmentedControl
+              value={forecastWeather}
+              options={[
+                { label: "맑음", value: "맑음" as Weather },
+                { label: "비", value: "비" as Weather },
+                { label: "폭염", value: "폭염" as Weather },
+                { label: "한파", value: "한파" as Weather },
+              ]}
+              onChange={setForecastWeather}
+            />
+          </label>
+        </div>
+        {weeklyForecast.isLoading && <LoadingState />}
+        {weeklyForecast.isError && <ErrorState error={weeklyForecast.error} />}
+        {weeklyForecast.data && forecastDays.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이 주에는 예측할 영업일이 없습니다.
+          </p>
+        )}
+        {forecastDays.length > 0 && <ReactECharts option={forecastOption} style={{ height: 260 }} />}
+
+        <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+          <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+            금주 메인메뉴별 예상 점유율 · 대기시간 (주간 식단표에 등록된 슬롯 기준)
+          </p>
+          {predictedImpact.isLoading && <LoadingState />}
+          {predictedImpact.isError && <ErrorState error={predictedImpact.error} />}
+          {predictedImpact.data && predictedImpact.data.length === 0 && (
+            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+              이 주에 등록된 주간 식단표가 없습니다.
+            </p>
+          )}
+          {predictedImpact.data && predictedImpact.data.length > 0 && (
+            <Table
+              columns={[
+                { key: "date", label: "날짜" },
+                { key: "corner", label: "코너" },
+                { key: "menu", label: "메인메뉴" },
+                { key: "share", label: "예상 점유율", align: "right" },
+                { key: "headcount", label: "예상 식수", align: "right" },
+                { key: "wait", label: "예상 대기", align: "right" },
+              ]}
+              rows={predictedImpact.data.map((r) => ({
+                date: `${r.plan_date.slice(5)}(${WEEKDAY_KO[new Date(r.plan_date).getDay()]})`,
+                corner: r.corner_name ?? "-",
+                menu: r.menu_name ?? "-",
+                share: `${(r.prediction.predicted_share * 100).toFixed(1)}%`,
+                headcount: `${Math.round(r.prediction.predicted_headcount)}명`,
+                // 서브속도 표본이 희박한 코너는 (초과분 ÷ 아주 작은 처리량)이라
+                // 대기시간이 수백 분으로 폭주한다 — 중식 서비스 시간대보다 긴 값은
+                // 물리적으로 무의미하므로 숫자 대신 표본 부족으로 표시한다.
+                // 근본 해결(처리량 표본 하한)은 별도 과제(2026-08 발견).
+                wait:
+                  r.prediction.expected_wait_minutes == null
+                    ? "데이터 부족"
+                    : r.prediction.expected_wait_minutes > WAIT_MINUTES_PLAUSIBLE_MAX
+                      ? "추정 불안정(표본 부족)"
+                      : `${r.prediction.expected_wait_minutes}분`,
+              }))}
+              rowKey={(_, i) => `impact-${i}`}
+            />
+          )}
+        </div>
       </Card>
 
       <Card title="메뉴 하이라이트">

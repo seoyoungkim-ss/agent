@@ -11,6 +11,7 @@
 """
 
 import datetime as dt
+from collections.abc import Callable
 from enum import Enum
 
 from sqlalchemy import select
@@ -22,11 +23,55 @@ _WEEKEND_ISOWEEKDAYS = {6, 7}  # ISO: 월=1 ... 토=6, 일=7
 _FAMILY_DAY_ANCHOR_DAY = 21  # "21일이 있는 주"의 기준 날짜
 _FAMILY_DAY_ISOWEEKDAY = 5  # 금요일
 
+# "연휴"로 볼 최소 연속 휴일 일수. 3일로 두면 평범한 토·일(2일)은 연휴가 아니고,
+# 공휴일이 붙어 3일 이상 쉬는 구간만 연휴로 잡힌다 — 이 값이 2면 모든 금요일이
+# "연휴 전", 모든 월요일이 "연휴 후"가 돼 신호가 무의미해진다(2026-08).
+_LONG_BREAK_MIN_DAYS = 3
+_ADJACENCY_SCAN_LIMIT = 30  # 무한 루프 방지용 상한(연휴가 이보다 길 수는 없다)
+
 
 class DayClassification(str, Enum):
     WEEKDAY = "평일"
     HOLIDAY = "주말+공휴일"
     FAMILY_DAY = "패밀리데이"
+
+
+class HolidayAdjacency(str, Enum):
+    """연휴 직전/직후 근무일 — 식수가 평소와 다르게 움직이는 날(PRD 7.1 예측 변수)."""
+
+    BEFORE_LONG_BREAK = "연휴 전"
+    AFTER_LONG_BREAK = "연휴 후"
+    NONE = "해당 없음"
+
+
+def classify_holiday_adjacency(
+    target_date: dt.date,
+    is_non_working: Callable[[dt.date], bool],
+    *,
+    min_break_days: int = _LONG_BREAK_MIN_DAYS,
+) -> HolidayAdjacency:
+    """순수 함수 — 그 날이 "연휴 직전/직후 근무일"인지 판정한다.
+
+    휴일 여부를 콜러블로 주입받아 DB 없이 단위 테스트가 가능하다(이 모듈의 다른
+    순수 함수들과 같은 방침). 휴일 자체는 판정 대상이 아니며(NONE), 앞뒤 양쪽이
+    모두 연휴면 "연휴 전"을 우선한다 — 연휴를 앞둔 날의 이탈 효과가 보통 더 크다.
+    """
+    if is_non_working(target_date):
+        return HolidayAdjacency.NONE
+
+    def _run_length(step: int) -> int:
+        count = 0
+        cursor = target_date + dt.timedelta(days=step)
+        while count < _ADJACENCY_SCAN_LIMIT and is_non_working(cursor):
+            count += 1
+            cursor += dt.timedelta(days=step)
+        return count
+
+    if _run_length(1) >= min_break_days:
+        return HolidayAdjacency.BEFORE_LONG_BREAK
+    if _run_length(-1) >= min_break_days:
+        return HolidayAdjacency.AFTER_LONG_BREAK
+    return HolidayAdjacency.NONE
 
 
 def is_weekend(target_date: dt.date) -> bool:
@@ -84,6 +129,10 @@ class HolidayService:
         if is_family_day(target_date):
             return DayClassification.FAMILY_DAY
         return DayClassification.WEEKDAY
+
+    def adjacency(self, target_date: dt.date) -> HolidayAdjacency:
+        """연휴 직전/직후 근무일 판정 — 캐싱된 휴일 집합을 그대로 재사용한다."""
+        return classify_holiday_adjacency(target_date, self.is_holiday)
 
     def classify_range(self, start: dt.date, end: dt.date) -> dict[dt.date, DayClassification]:
         result: dict[dt.date, DayClassification] = {}
