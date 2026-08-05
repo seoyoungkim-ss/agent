@@ -35,17 +35,29 @@ class ComboSummary:
 
 
 def build_side_combos_for_main_menu(
-    db: Session, main_menu_id: int, period_start: dt.date, period_end: dt.date
+    db: Session,
+    main_menu_id: int,
+    period_start: dt.date,
+    period_end: dt.date,
+    *,
+    corner_id: int | None = None,
 ) -> list[ComboDay]:
     """기간 내 main_menu_id가 MAIN으로 나온 (날짜, 코너, 식사구분)마다, 같은
-    슬롯의 SIDE 메뉴 목록과 그날 그 코너의 main_menu_id 평균 만족도를 묶는다."""
+    슬롯의 SIDE 메뉴 목록과 그날 그 코너의 main_menu_id 평균 만족도를 묶는다.
+
+    corner_id를 주면 그 코너에서 나온 슬롯만 본다 — 같은 메인이 여러 코너에서
+    다른 부찬과 나오면 조합이 섞여 비교가 흐려지기 때문(2026-08 요청).
+    """
+    slot_filters = [
+        WeeklyMenuPlan.menu_id == main_menu_id,
+        WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+        WeeklyMenuPlan.plan_date.between(period_start, period_end),
+    ]
+    if corner_id is not None:
+        slot_filters.append(WeeklyMenuPlan.corner_id == corner_id)
     main_slots = (
         db.query(WeeklyMenuPlan.plan_date, WeeklyMenuPlan.corner_id, WeeklyMenuPlan.meal_type)
-        .filter(
-            WeeklyMenuPlan.menu_id == main_menu_id,
-            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
-            WeeklyMenuPlan.plan_date.between(period_start, period_end),
-        )
+        .filter(*slot_filters)
         .distinct()
         .all()
     )

@@ -31,6 +31,11 @@ TASTE_SCORE_POINTS: dict[TasteScore, int] = {
 class MenuRole(str, enum.Enum):
     MAIN = "메인"
     SIDE = "부찬"
+    # 건강가든은 식단표 엑셀에 아직 안 들어온다 — 담당자가 화면에서 텍스트로
+    # 직접 입력한다(협의 결정, 2026-08: "대략 5개 종류 반복이라 텍스트 입력으로
+    # 일단 하자"). 데이터가 정식 유입되면 ingestion-tool이 같은 role로 적재하면
+    # 되고, 화면·중복 판정 로직은 그대로 쓸 수 있다.
+    HEALTH_GARDEN = "건강가든"
 
 
 class MenuRoleSource(str, enum.Enum):

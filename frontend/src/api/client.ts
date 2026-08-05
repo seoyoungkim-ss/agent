@@ -321,8 +321,42 @@ export interface WeeklyMenuSlot {
   meal_type: MealType;
   main: WeeklyMenuPlanItem | null;
   sides: WeeklyMenuPlanItem[];
+  // 건강가든은 식단표 엑셀에 없어 담당자가 화면에서 텍스트로 입력한다(2026-08).
+  health_garden: WeeklyMenuPlanItem[];
   feedback_deadline: string;
   is_past_deadline: boolean;
+}
+
+// 메뉴 회전 이력 (2순위, 2026-08) — 같은 메뉴가 너무 자주 편성되는지 판정.
+export type RotationFlag =
+  | "같은 날 중복"
+  | "재편성 과다"
+  | "평소보다 이름"
+  | "적정"
+  | "오랜만"
+  | "이력 없음";
+
+export interface MenuRotationRow {
+  plan_date: string;
+  corner_id: number;
+  corner_name: string;
+  meal_type: MealType;
+  menu_id: number;
+  menu_name: string;
+  menu_role: string; // "메인" | "부찬" | "건강가든"
+  flag: RotationFlag;
+  gap_days: number | null;
+  avg_interval_days: number | null;
+  previous_date: string | null;
+}
+
+export interface MenuRotationResponse {
+  period_start: string;
+  period_end: string;
+  lookback_days: number;
+  min_rotation_gap_days: number;
+  items: MenuRotationRow[];
+  overused: { menu_name: string; menu_role: string; count: number; dates: string[] }[];
 }
 
 export interface WeeklyMenuFeedbackRow {
@@ -535,9 +569,26 @@ export const api = {
     params: { period_start: string; period_end: string; min_co_count?: number; top_n?: number },
   ) => request<MenuAffinityRow[]>(`/analysis/menu-affinity/${encodeURIComponent(menuName)}${qs(params)}`),
 
-  menuSideCombinations: (menuName: string, params: { period_start: string; period_end: string }) =>
+  menuSideCombinations: (
+    menuName: string,
+    params: { period_start: string; period_end: string; corner_id?: number },
+  ) =>
     request<MenuCombinationsResponse>(
       `/analysis/menu-combinations/${encodeURIComponent(menuName)}${qs(params)}`,
+    ),
+
+  weeklyMenuRotation: (params: { period_start: string; period_end: string; lookback_days?: number }) =>
+    request<MenuRotationResponse>(`/analysis/weekly-menu/rotation${qs(params)}`),
+
+  updateHealthGarden: (body: {
+    plan_date: string;
+    corner_id: number;
+    meal_type: MealType;
+    menu_names_raw: string;
+  }) =>
+    request<{ plan_date: string; corner_id: number; meal_type: MealType; items: { plan_id: number; menu_id: number; menu_name: string | null }[] }>(
+      "/analysis/weekly-menu/health-garden",
+      { method: "PUT", body: JSON.stringify(body) },
     ),
 
   cornerCoreLayerSummary: (params: {

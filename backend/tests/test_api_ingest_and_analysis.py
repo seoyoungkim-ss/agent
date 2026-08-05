@@ -2591,3 +2591,197 @@ def test_menu_performance_by_meal_type_computes_quadrant_within_meal_type(client
     assert row_b["total_headcount"] == 2
     assert row_a["quadrant"] is not None
     assert row_b["quadrant"] is not None
+
+
+# ---------------------------------------------------------------------------
+# 2순위: 메뉴 회전 이력 + 건강가든 텍스트 입력 (2026-08)
+# ---------------------------------------------------------------------------
+
+
+def _plan_row(plan_date, menu_name, menu_role, corner_name="한식", meal_type="중식"):
+    return {
+        "plan_date": plan_date.isoformat(),
+        "meal_type": meal_type,
+        "corner_name": corner_name,
+        "menu_name": menu_name,
+        "menu_role": menu_role,
+        "source_row_raw": menu_name,
+    }
+
+
+def _rotation(client, **params):
+    resp = client.get("/api/analysis/weekly-menu/rotation", params=params)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_rotation_flags_menu_replanned_too_soon(client):
+    """직전 편성 이후 14일을 못 채우면 "재편성 과다"."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY - dt.timedelta(days=5), "돈까스", "메인"),
+                _plan_row(MONDAY, "돈까스", "메인"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    items = [i for i in data["items"] if i["menu_name"] == "돈까스"]
+    assert len(items) == 1
+    assert items[0]["flag"] == "재편성 과다"
+    assert items[0]["gap_days"] == 5
+    assert items[0]["previous_date"] == (MONDAY - dt.timedelta(days=5)).isoformat()
+
+
+def test_rotation_history_outside_period_is_not_returned_as_item(client):
+    """과거 편성은 판정 기준으로만 쓰고 결과 목록엔 안 나와야 한다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY - dt.timedelta(days=60), "갈비탕", "메인"),
+                _plan_row(MONDAY, "갈비탕", "메인"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    dates = {i["plan_date"] for i in data["items"]}
+    assert dates == {MONDAY.isoformat()}
+    galbi = next(i for i in data["items"] if i["menu_name"] == "갈비탕")
+    assert galbi["flag"] == "적정"  # 60일 만이면 절대 기준 통과, 평균 주기는 미산출
+    assert galbi["gap_days"] == 60
+
+
+def test_rotation_flags_same_day_duplicate_across_corners(client):
+    """같은 날 다른 코너에 같은 메뉴가 들어가면 "같은 날 중복"."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "김치찌개", "메인", corner_name="한식"),
+                _plan_row(MONDAY, "김치찌개", "메인", corner_name="일품"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    kimchi = [i for i in data["items"] if i["menu_name"] == "김치찌개"]
+    assert len(kimchi) == 2
+    assert all(i["flag"] == "같은 날 중복" for i in kimchi)
+
+
+def test_rotation_reports_overused_menus_in_period(client):
+    """한 주에 4번 들어간 부찬은 overused로 잡힌다(기본 임계 3회 초과)."""
+    rows = [
+        _plan_row(MONDAY + dt.timedelta(days=i), "시금치나물", "부찬") for i in range(4)
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    data = _rotation(
+        client,
+        period_start=MONDAY.isoformat(),
+        period_end=(MONDAY + dt.timedelta(days=5)).isoformat(),
+    )
+    overused = {o["menu_name"]: o for o in data["overused"]}
+    assert "시금치나물" in overused
+    assert overused["시금치나물"]["count"] == 4
+
+
+def test_health_garden_text_input_replaces_slot_and_feeds_rotation(client, db_session):
+    """건강가든 텍스트 입력 → 식단표 조회에 반영되고 회전 판정에도 들어간다."""
+    _ingest_weekly_menu(client)
+    corner_id = _corner_id(db_session, "한식")
+
+    resp = client.put(
+        "/api/analysis/weekly-menu/health-garden",
+        json={
+            "plan_date": MONDAY.isoformat(),
+            "corner_id": corner_id,
+            "meal_type": "중식",
+            "menu_names_raw": "구운채소, 두부샐러드\n닭가슴살",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert [i["menu_name"] for i in resp.json()["items"]] == ["구운채소", "두부샐러드", "닭가슴살"]
+
+    listed = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    ).json()
+    slot = next(s for s in listed if s["corner_id"] == corner_id)
+    assert [i["menu_name"] for i in slot["health_garden"]] == ["구운채소", "두부샐러드", "닭가슴살"]
+    # 부찬과 섞이지 않아야 부찬 조합 비교가 오염되지 않는다
+    assert [i["menu_name"] for i in slot["sides"]] == ["계란후라이"]
+
+    # 건강가든도 회전 판정 대상이다("메인/부찬/건강가든 조합 중복 최소화")
+    rotation = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    garden = [i for i in rotation["items"] if i["menu_role"] == "건강가든"]
+    assert {i["menu_name"] for i in garden} == {"구운채소", "두부샐러드", "닭가슴살"}
+
+    # 전체 교체 — 다시 보내면 이전 목록은 사라진다
+    client.put(
+        "/api/analysis/weekly-menu/health-garden",
+        json={
+            "plan_date": MONDAY.isoformat(),
+            "corner_id": corner_id,
+            "meal_type": "중식",
+            "menu_names_raw": "구운채소",
+        },
+    )
+    listed = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    ).json()
+    slot = next(s for s in listed if s["corner_id"] == corner_id)
+    assert [i["menu_name"] for i in slot["health_garden"]] == ["구운채소"]
+
+
+def test_health_garden_empty_input_clears_the_slot(client, db_session):
+    _ingest_weekly_menu(client)
+    corner_id = _corner_id(db_session, "한식")
+    body = {
+        "plan_date": MONDAY.isoformat(),
+        "corner_id": corner_id,
+        "meal_type": "중식",
+        "menu_names_raw": "구운채소",
+    }
+    client.put("/api/analysis/weekly-menu/health-garden", json=body)
+    client.put("/api/analysis/weekly-menu/health-garden", json={**body, "menu_names_raw": "  "})
+
+    listed = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    ).json()
+    slot = next(s for s in listed if s["corner_id"] == corner_id)
+    assert slot["health_garden"] == []
+
+
+def test_menu_combinations_corner_filter_narrows_slots(client, db_session):
+    """같은 메인이 두 코너에서 다른 부찬과 나오면 코너 필터로 분리해 볼 수 있다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "제육볶음", "메인", corner_name="한식"),
+                _plan_row(MONDAY, "계란후라이", "부찬", corner_name="한식"),
+                _plan_row(MONDAY + dt.timedelta(days=1), "제육볶음", "메인", corner_name="일품"),
+                _plan_row(MONDAY + dt.timedelta(days=1), "미역국", "부찬", corner_name="일품"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    params = {
+        "period_start": MONDAY.isoformat(),
+        "period_end": (MONDAY + dt.timedelta(days=5)).isoformat(),
+    }
+    everything = client.get("/api/analysis/menu-combinations/제육볶음", params=params).json()
+    assert len(everything["combos"]) == 2
+
+    only_hansik = client.get(
+        "/api/analysis/menu-combinations/제육볶음",
+        params={**params, "corner_id": _corner_id(db_session, "한식")},
+    ).json()
+    assert only_hansik["corner_id"] is not None
+    assert [c["sides"] for c in only_hansik["combos"]] == [["계란후라이"]]

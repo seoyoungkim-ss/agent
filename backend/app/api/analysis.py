@@ -71,10 +71,18 @@ from app.services.menu_throughput import build_corner_daily_throughput, compute_
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
 from app.services.weekly_menu_prediction import compute_predicted_impact, compute_predicted_numbers_for_period
+from app.services.menu_rotation import (
+    MIN_ROTATION_GAP_DAYS,
+    RotationFlag,
+    classify_rotation,
+    find_overused_menus,
+)
 from app.services.weekly_menu_review import (
     add_feedback,
     build_weekly_menu_slots,
     list_feedback,
+    parse_menu_names,
+    set_health_garden_menus,
     set_menu_role,
 )
 from app.services.weekly_menu_role_llm import reclassify_weekly_menu_roles
@@ -1045,11 +1053,148 @@ def list_weekly_menu(period_start: dt.date, period_end: dt.date, db: Session = D
             "meal_type": s.meal_type,
             "main": _serialize_weekly_menu_item(s.main),
             "sides": [_serialize_weekly_menu_item(item) for item in s.sides],
+            "health_garden": [_serialize_weekly_menu_item(item) for item in s.health_garden],
             "feedback_deadline": s.feedback_deadline.isoformat(),
             "is_past_deadline": s.is_past_deadline,
         }
         for s in slots
     ]
+
+
+class HealthGardenUpdateRequest(BaseModel):
+    plan_date: dt.date
+    corner_id: int
+    meal_type: MealType
+    # 쉼표/줄바꿈/탭으로 구분된 메뉴명. 빈 문자열이면 그 슬롯의 건강가든을 비운다.
+    menu_names_raw: str
+
+
+@router.put("/weekly-menu/health-garden")
+def update_health_garden(payload: HealthGardenUpdateRequest, db: Session = Depends(get_db)):
+    """건강가든 메뉴를 담당자가 텍스트로 직접 입력한다(2026-08 협의 결정).
+
+    식단표 엑셀에 건강가든이 아직 없어 정식 파싱 경로가 없다. "대략 5개 종류가
+    반복"이라는 운영 현실에 맞춰 텍스트 입력으로 우선 받고, weekly_menu_plan에
+    HEALTH_GARDEN 역할로 적재해 회전 이력·중복 판정이 메인/부찬과 함께 돌게 한다.
+    PUT인 이유는 슬롯 단위 **전체 교체**라서다(POST 추가가 아님).
+    """
+    corner = db.get(CornerMaster, payload.corner_id)
+    if corner is None:
+        raise HTTPException(status_code=404, detail="코너를 찾을 수 없습니다")
+
+    names = parse_menu_names(payload.menu_names_raw)
+    rows = set_health_garden_menus(
+        db, payload.plan_date, payload.corner_id, payload.meal_type, names
+    )
+    menu_names = {
+        m.menu_id: m.menu_name
+        for m in db.query(MenuMaster).filter(MenuMaster.menu_id.in_([r.menu_id for r in rows])).all()
+    } if rows else {}
+    return {
+        "plan_date": payload.plan_date.isoformat(),
+        "corner_id": payload.corner_id,
+        "meal_type": payload.meal_type.value,
+        "items": [
+            {"plan_id": r.id, "menu_id": r.menu_id, "menu_name": menu_names.get(r.menu_id)}
+            for r in rows
+        ],
+    }
+
+
+@router.get("/weekly-menu/rotation")
+def weekly_menu_rotation(
+    period_start: dt.date,
+    period_end: dt.date,
+    lookback_days: int = 180,
+    db: Session = Depends(get_db),
+):
+    """메뉴 회전 이력 — 조회 기간에 편성된 메뉴들이 직전 편성 이후 얼마 만에
+    다시 나오는지 판정한다(2순위 "중복 편성 최소화", 2026-08).
+
+    과거 이력은 weekly_menu_plan(편성 이력)에서 본다 — meal_log(취식 이력)가
+    아니다. "언제 또 내보낼까"를 정하는 편성 담당자 관점에선 실제로 몇 명이
+    먹었는지가 아니라 **식단표에 몇 번 올렸는지**가 기준이기 때문이다.
+
+    판정 대상에는 메인/부찬/건강가든을 모두 넣는다(요청: "메인메뉴/부찬/건강가든
+    메뉴 조합 중복 최소화").
+    """
+    history_start = period_start - dt.timedelta(days=lookback_days)
+    rows = (
+        db.query(
+            WeeklyMenuPlan.plan_date,
+            WeeklyMenuPlan.menu_id,
+            MenuMaster.menu_name,
+            WeeklyMenuPlan.menu_role,
+            WeeklyMenuPlan.corner_id,
+            CornerMaster.corner_name,
+            WeeklyMenuPlan.meal_type,
+        )
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
+        .filter(WeeklyMenuPlan.plan_date >= history_start, WeeklyMenuPlan.plan_date <= period_end)
+        .all()
+    )
+
+    # 메뉴별 전체 편성일(과거 + 조회 기간) — classify_rotation이 같은 날 중복까지
+    # 보도록 중복 날짜를 제거하지 않고 그대로 넘긴다.
+    dates_by_menu: dict[int, list[dt.date]] = {}
+    for plan_date, menu_id, *_ in rows:
+        dates_by_menu.setdefault(menu_id, []).append(plan_date)
+
+    results = []
+    planned_in_period: list[tuple[dt.date, str, str]] = []
+    for plan_date, menu_id, menu_name, menu_role, corner_id, corner_name, meal_type in rows:
+        if plan_date < period_start:
+            continue  # 과거 이력은 판정 기준으로만 쓰고 결과에는 안 넣는다
+        role_value = menu_role.value if hasattr(menu_role, "value") else str(menu_role)
+        planned_in_period.append((plan_date, menu_name, role_value))
+        verdict = classify_rotation(plan_date, dates_by_menu.get(menu_id, []))
+        results.append(
+            {
+                "plan_date": plan_date.isoformat(),
+                "corner_id": corner_id,
+                "corner_name": corner_name,
+                "meal_type": meal_type.value if hasattr(meal_type, "value") else str(meal_type),
+                "menu_id": menu_id,
+                "menu_name": menu_name,
+                "menu_role": role_value,
+                "flag": verdict.flag.value,
+                "gap_days": verdict.gap_days,
+                "avg_interval_days": (
+                    round(verdict.avg_interval_days, 1) if verdict.avg_interval_days is not None else None
+                ),
+                "previous_date": verdict.previous_date.isoformat() if verdict.previous_date else None,
+            }
+        )
+
+    # 경고부터 위로 — 담당자가 고쳐야 할 것이 먼저 보여야 한다.
+    flag_order = {
+        RotationFlag.SAME_DAY.value: 0,
+        RotationFlag.TOO_SOON.value: 1,
+        RotationFlag.EARLY.value: 2,
+        RotationFlag.LONG_ABSENT.value: 3,
+        RotationFlag.FIRST_TIME.value: 4,
+        RotationFlag.NORMAL.value: 5,
+    }
+    results.sort(key=lambda r: (flag_order.get(r["flag"], 9), r["plan_date"], r["corner_name"]))
+
+    overused = find_overused_menus(planned_in_period)
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "lookback_days": lookback_days,
+        "min_rotation_gap_days": MIN_ROTATION_GAP_DAYS,
+        "items": results,
+        "overused": [
+            {
+                "menu_name": o.menu_name,
+                "menu_role": o.menu_role,
+                "count": o.count,
+                "dates": [d.isoformat() for d in o.dates],
+            }
+            for o in overused
+        ],
+    }
 
 
 class MenuRoleUpdateRequest(BaseModel):
@@ -1177,7 +1322,13 @@ def menu_affinity(
 
 
 @router.get("/menu-combinations/{menu_name}")
-def menu_side_combinations(menu_name: str, period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+def menu_side_combinations(
+    menu_name: str,
+    period_start: dt.date,
+    period_end: dt.date,
+    corner_id: int | None = None,
+    db: Session = Depends(get_db),
+):
     """이 메뉴가 메인(주찬)으로 나온 날짜들을 부찬 조합별로 묶어 만족도를
     비교한다. 같은 메인메뉴는 항상 같은 부찬을 받는다는 전제(2026-07 확인)로
     날짜 단위 비교를 쓴다 — meal_log는 개인이 어떤 부찬을 골랐는지 모른다.
@@ -1186,7 +1337,9 @@ def menu_side_combinations(menu_name: str, period_start: dt.date, period_end: dt
     if menu is None:
         raise HTTPException(status_code=404, detail=f"'{menu_name}' 메뉴를 찾을 수 없습니다")
 
-    days = build_side_combos_for_main_menu(db, menu.menu_id, period_start, period_end)
+    days = build_side_combos_for_main_menu(
+        db, menu.menu_id, period_start, period_end, corner_id=corner_id
+    )
     summaries = compute_combo_satisfaction_summary(days)
 
     all_menu_ids = {menu.menu_id}
@@ -1199,6 +1352,7 @@ def menu_side_combinations(menu_name: str, period_start: dt.date, period_end: dt
     return {
         "menu_id": menu.menu_id,
         "menu_name": menu.menu_name,
+        "corner_id": corner_id,
         "combos": [
             {
                 "sides": [menu_names.get(sid) for sid in sorted(s.side_menu_ids)],

@@ -3027,3 +3027,100 @@ Bearer 토큰뿐). 그래서 관리 탭은 **일상 동선에서 치우는 정�
 test_api_ingest_and_analysis.py`, `frontend/src/App.tsx`, `frontend/src/pages/
 HomePage.tsx`, `frontend/src/pages/AnalysisPage.tsx`, `frontend/src/pages/
 SimulationPage.tsx`(삭제), `frontend/src/api/client.ts`.
+
+---
+
+## 48. 2순위 — 메뉴 편성·운영: 회전 이력 · 건강가든 · 코너별 조합 비교 (2026-08)
+
+담당자 협의에서 정한 2순위 3개 항목을 구현했다.
+
+### 48.1 메뉴 회전 이력 — "이 메뉴 최근에 내보내지 않았나?"
+
+`GET /analysis/weekly-menu/rotation?period_start&period_end&lookback_days=180`
+
+판정 로직은 `backend/app/services/menu_rotation.py`의 순수 함수
+`classify_rotation(target_date, past_dates)`가 전부 갖고 있다(DB를 모른다).
+
+**두 기준을 같이 쓴다:**
+
+| 판정 | 조건 |
+|---|---|
+| 같은 날 중복 | 같은 날짜에 2번 이상 편성됨(다른 코너/끼니) |
+| 재편성 과다 | 직전 편성 이후 `MIN_ROTATION_GAP_DAYS`(14일) 미만 |
+| 평소보다 이름 | 14일은 넘었지만 그 메뉴의 평균 주기 × `EARLY_RATIO`(0.6) 미만 |
+| 오랜만 | 평균 주기 × `LONG_ABSENT_RATIO`(2.0) 초과 |
+| 적정 / 이력 없음 | 나머지 / 과거 편성 이력 없음 |
+
+절대 기준만 쓰면 매주 나오는 김치·밥 같은 상시 부찬이 전부 경고가 되고, 상대
+기준만 쓰면 이력이 1회뿐이라 평균 주기를 못 내는 메뉴를 놓친다. 그래서 둘 다 본다.
+
+**평균 주기는 "과거끼리의 간격"으로만 낸다** — 판정하려는 이번 등장을 평균에
+넣으면 그 값이 기준까지 끌어내려 자기 자신을 항상 정상으로 만드는 순환이 된다
+(`test_avg_interval_excludes_the_appearance_being_judged`가 이걸 고정한다).
+
+**과거 이력의 출처는 `weekly_menu_plan`(편성 이력)이지 `meal_log`(취식 이력)가
+아니다.** "언제 또 내보낼까"를 정하는 편성 담당자 관점에선 실제로 몇 명이
+먹었는지가 아니라 식단표에 몇 번 올렸는지가 기준이기 때문이다.
+
+`MIN_ROTATION_GAP_DAYS = 14`는 구내식당 2주 사이클이라는 **운영 관행 기반
+기본값이지 실측 근거가 아니다** — 담당자 피드백으로 조정할 값이다.
+
+추가로 `find_overused_menus`가 조회 기간 안에서 3회를 넘게 편성된 메뉴를
+따로 모은다. **역할(메인/부찬/건강가든)을 가로질러 센다** — 같은 나물이 어떤
+날은 부찬, 어떤 날은 건강가든으로 들어가도 먹는 사람에겐 중복이라서다.
+
+### 48.2 건강가든 — 텍스트 수기 입력
+
+식단표 엑셀에 건강가든이 아직 안 들어온다. 담당자가 "대략 5개 종류가 반복"
+이라고 해서, 정식 데이터 유입 전까지 **화면에서 텍스트로 입력**받기로 했다
+(협의 결정, 2026-08).
+
+`PUT /analysis/weekly-menu/health-garden` — `{plan_date, corner_id, meal_type,
+menu_names_raw}`. 쉼표/줄바꿈/탭으로 구분하며(`parse_menu_names`), 슬롯 단위
+**전체 교체**다(POST 추가가 아님 — 화면이 텍스트 상자 하나라 "지금 이 슬롯의
+건강가든은 이거다"를 통째로 보내는 게 UI와 일치하고, 빈칸 저장이 곧 비우기가 된다).
+
+**별도 테이블을 만들지 않고 `weekly_menu_plan`에 `MenuRole.HEALTH_GARDEN`으로
+넣는다.** 같은 테이블에 있어야 회전 이력·중복 판정이 메인/부찬과 한꺼번에
+돌아가기 때문이다(요청사항이 "메인/부찬/건강가든 **조합** 중복 최소화"였다).
+데이터가 정식 유입되면 ingestion-tool이 같은 role로 적재하면 되고 화면·판정
+로직은 그대로 쓸 수 있다.
+
+다만 화면 표시와 `WeeklyMenuSlot`에서는 **부찬과 섞지 않고 따로 담는다**
+(`health_garden` 필드) — 섞으면 §29의 부찬 조합별 만족도 비교가 오염된다.
+
+마이그레이션 `e7b4c2915f30`: `MenuRole`이 `native_enum=False`라 VARCHAR 길이가
+가장 긴 멤버값에서 나오는데, 기존 멤버가 "메인"/"부찬"(2자)뿐이라 컬럼이
+`VARCHAR(2)`였다. "건강가든"(4자)이 안 들어가므로 8자로 넓혔다.
+
+### 48.3 부찬 조합별 만족도 — 코너 필터
+
+`GET /analysis/menu-combinations/{menu_name}`에 `corner_id`(선택)를 추가했다.
+같은 메인이 여러 코너에서 다른 부찬과 나오면 조합이 섞여 비교가 흐려진다.
+
+### 48.4 화면
+
+**메뉴 편성·운영** 탭 = 주간 식단표 관리 → **메뉴 회전 이력(신규)** → 부찬 조합별
+만족도 → 메뉴 동반 선택 쌍.
+
+회전 이력 표는 **"경고만 보기"가 기본 ON**이다 — 적정/이력 없음까지 다 띄우면
+한 주에 수십 줄이라 정작 봐야 할 경고가 묻힌다.
+
+건강가든 입력은 주간 식단표의 **슬롯 상세 패널** 안에 있다(날짜·코너·끼니가
+이미 정해진 자리라 입력 대상이 모호하지 않다).
+
+### 48.5 남은 후속 과제
+
+- `MIN_ROTATION_GAP_DAYS`(14일)·`EARLY_RATIO`(0.6)·`OVERUSE_COUNT_IN_PERIOD`(3)는
+  **운영 관행 기반 기본값** — 실사용 피드백으로 보정 필요
+- 건강가든이 식단표 엑셀에 정식으로 들어오면 ingestion-tool 파싱 경로 추가
+  (그때 이 텍스트 입력은 보조 수단으로 남기거나 제거)
+- 3순위(알람), 4순위(만족도·VoE 정리), 5순위(채팅 그라운딩 갱신)
+
+**파일 요약**: `backend/app/services/menu_rotation.py`(신규),
+`backend/app/services/weekly_menu_review.py`, `backend/app/services/
+menu_combination.py`, `backend/app/models/enums.py`, `backend/app/api/
+analysis.py`, `backend/alembic/versions/e7b4c2915f30_*.py`,
+`backend/tests/test_menu_rotation.py`(신규), `backend/tests/
+test_api_ingest_and_analysis.py`, `frontend/src/api/client.ts`,
+`frontend/src/pages/AnalysisPage.tsx`.

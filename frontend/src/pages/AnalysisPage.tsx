@@ -1591,10 +1591,18 @@ function MenuFoodVectorAdminSection() {
 function MenuComboSection() {
   const [menuName, setMenuName] = useState("");
   const [searched, setSearched] = useState<string | null>(null);
+  // 같은 메인이 여러 코너에서 다른 부찬과 나오면 조합이 섞여 비교가 흐려진다
+  // → 코너로 좁혀 볼 수 있게 한다(2026-08 요청).
+  const [comboCornerId, setComboCornerId] = useState<number | null>(null);
+  const cornersQuery = useQuery({ queryKey: ["corner-list"], queryFn: () => api.cornerList() });
   const query = useQuery({
-    queryKey: ["menu-combinations", searched],
+    queryKey: ["menu-combinations", searched, comboCornerId],
     queryFn: () =>
-      api.menuSideCombinations(searched as string, { period_start: PERIOD_START, period_end: PERIOD_END }),
+      api.menuSideCombinations(searched as string, {
+        period_start: PERIOD_START,
+        period_end: PERIOD_END,
+        ...(comboCornerId != null ? { corner_id: comboCornerId } : {}),
+      }),
     enabled: !!searched,
     retry: false,
   });
@@ -1616,6 +1624,22 @@ function MenuComboSection() {
           onKeyDown={(e) => e.key === "Enter" && setSearched(menuName)}
         />
         <Button onClick={() => setSearched(menuName)}>조회</Button>
+      </div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          코너
+        </span>
+        <SegmentedControl
+          value={comboCornerId != null ? String(comboCornerId) : ""}
+          options={[
+            { label: "전체", value: "" },
+            ...(cornersQuery.data ?? []).map((c) => ({
+              label: c.corner_name,
+              value: String(c.corner_id),
+            })),
+          ]}
+          onChange={(v) => setComboCornerId(v === "" ? null : Number(v))}
+        />
       </div>
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
@@ -1816,6 +1840,14 @@ function WeeklyMenuReviewTab() {
     mutationFn: (params: { plan_date: string; corner_id: number; comment: string }) =>
       api.createWeeklyMenuFeedback(params),
     onSuccess: () => feedbackQuery.refetch(),
+  });
+  // 건강가든은 식단표 엑셀에 없어 담당자가 슬롯별로 직접 입력한다(2026-08).
+  // 슬롯 단위 전체 교체라 PUT이고, 빈 문자열을 보내면 그 슬롯을 비운다.
+  const [gardenDrafts, setGardenDrafts] = useState<Record<string, string>>({});
+  const saveHealthGarden = useMutation({
+    mutationFn: (params: { plan_date: string; corner_id: number; meal_type: MealType; menu_names_raw: string }) =>
+      api.updateHealthGarden(params),
+    onSuccess: () => slotsQuery.refetch(),
   });
   const compareAll = useMutation({
     mutationFn: () => api.weeklyMenuPredictedImpactSummary({ period_start: selectedMonday, period_end: sunday }),
@@ -2082,6 +2114,11 @@ function WeeklyMenuReviewTab() {
                       부찬: {selectedSlot.sides.map((s) => s.menu_name).join(", ")}
                     </span>
                   )}
+                  {selectedSlot.health_garden.length > 0 && (
+                    <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                      건강가든: {selectedSlot.health_garden.map((s) => s.menu_name).join(", ")}
+                    </span>
+                  )}
                   {selectedSlot.main && (
                     <button
                       className="text-xs underline"
@@ -2101,6 +2138,42 @@ function WeeklyMenuReviewTab() {
                 </div>
 
                 {selectedSlot.main && showPrediction && <PredictedImpactPanel planId={selectedSlot.main.plan_id} />}
+
+                <div className="mt-2 border-t pt-2" style={{ borderColor: "var(--border)" }}>
+                  <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                    건강가든 — 식단표 엑셀에 아직 안 들어와 직접 입력합니다. 쉼표나 줄바꿈으로 구분하세요.
+                    저장하면 이 슬롯의 건강가든이 통째로 바뀝니다(비우려면 빈칸으로 저장).
+                  </p>
+                  <div className="flex gap-2">
+                    <input
+                      value={
+                        gardenDrafts[key] ??
+                        selectedSlot.health_garden.map((h) => h.menu_name).join(", ")
+                      }
+                      onChange={(e) => setGardenDrafts((g) => ({ ...g, [key]: e.target.value }))}
+                      placeholder="예: 구운채소, 두부샐러드, 닭가슴살"
+                      className="flex-1 rounded-md border px-2 py-1 text-[13px]"
+                      style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                    />
+                    <Button
+                      variant="secondary"
+                      disabled={saveHealthGarden.isPending}
+                      onClick={() =>
+                        saveHealthGarden.mutate({
+                          plan_date: selectedSlot.plan_date,
+                          corner_id: selectedSlot.corner_id,
+                          meal_type: selectedSlot.meal_type,
+                          menu_names_raw:
+                            gardenDrafts[key] ??
+                            selectedSlot.health_garden.map((h) => h.menu_name).join(", "),
+                        })
+                      }
+                    >
+                      {saveHealthGarden.isPending ? "저장 중..." : "저장"}
+                    </Button>
+                  </div>
+                  {saveHealthGarden.isError && <ErrorState error={saveHealthGarden.error} />}
+                </div>
 
                 {isEditing && (
                   <div className="mt-2 space-y-1 border-t pt-2" style={{ borderColor: "var(--border)" }}>
@@ -2493,6 +2566,123 @@ function VoeAnalysisTab() {
 // 컴포넌트 본문은 그대로 두고 조합만 바꾼다.
 
 /** 메뉴 편성·운영 — "다음 주 식단을 어떻게 짤까"에 답하는 화면. */
+// 메뉴 회전 이력 (2순위, 2026-08) — "이 메뉴 최근에 내보내지 않았나?"에 답한다.
+// 판정 기준은 백엔드(app/services/menu_rotation.py)에 있고 여기선 표시만 한다.
+const ROTATION_FLAG_COLOR: Record<string, string> = {
+  "같은 날 중복": "var(--critical)",
+  "재편성 과다": "var(--critical)",
+  "평소보다 이름": "var(--warning)",
+  오랜만: "var(--accent)",
+};
+// 기본값은 "고칠 것만 보기" — 적정/이력 없음까지 다 띄우면 한 주에 수십 줄이라
+// 정작 봐야 할 경고가 묻힌다.
+const ROTATION_WARNING_FLAGS = new Set(["같은 날 중복", "재편성 과다", "평소보다 이름"]);
+
+function MenuRotationSection() {
+  const [selectedMonday, setSelectedMonday] = useState(() => weeklyMondayOf(new Date()));
+  const [warningsOnly, setWarningsOnly] = useState(true);
+  const periodEnd = weeklyAddDays(selectedMonday, 6);
+  const query = useQuery({
+    queryKey: ["weekly-menu-rotation", selectedMonday],
+    queryFn: () => api.weeklyMenuRotation({ period_start: selectedMonday, period_end: periodEnd }),
+  });
+
+  const items = (query.data?.items ?? []).filter(
+    (r) => !warningsOnly || ROTATION_WARNING_FLAGS.has(r.flag),
+  );
+  const warningCount = (query.data?.items ?? []).filter((r) => ROTATION_WARNING_FLAGS.has(r.flag)).length;
+
+  return (
+    <Card title="메뉴 회전 이력 — 중복 편성 점검">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        그 주에 편성된 메뉴가 <strong>직전에 언제 나왔는지</strong>를 과거 편성 이력(식단표 기준, 최근
+        {query.data ? ` ${query.data.lookback_days}` : ""}일)과 비교합니다. 절대 기준
+        {query.data ? ` ${query.data.min_rotation_gap_days}` : " 14"}일을 못 채우면 "재편성 과다",
+        기준은 넘었어도 그 메뉴의 평소 주기보다 눈에 띄게 이르면 "평소보다 이름"입니다. 메인·부찬·건강가든을
+        모두 함께 봅니다.
+      </p>
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <Button variant="secondary" onClick={() => setSelectedMonday(weeklyAddDays(selectedMonday, -7))}>
+          ◀ 이전 주
+        </Button>
+        <span className="text-[13px] font-medium">
+          {selectedMonday} ~ {periodEnd}
+        </span>
+        <Button variant="secondary" onClick={() => setSelectedMonday(weeklyAddDays(selectedMonday, 7))}>
+          다음 주 ▶
+        </Button>
+        <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          <input type="checkbox" checked={warningsOnly} onChange={(e) => setWarningsOnly(e.target.checked)} />
+          경고만 보기
+        </label>
+        {query.data && (
+          <span className="text-xs" style={{ color: warningCount > 0 ? "var(--critical)" : "var(--ink-muted)" }}>
+            경고 {warningCount}건 / 편성 {query.data.items.length}건
+          </span>
+        )}
+      </div>
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+      {query.data && items.length === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          {query.data.items.length === 0
+            ? "이 주에 등록된 식단표가 없습니다."
+            : "중복 편성 경고가 없습니다."}
+        </p>
+      )}
+      {items.length > 0 && (
+        <Table
+          columns={[
+            { key: "date", label: "날짜" },
+            { key: "corner", label: "코너" },
+            { key: "menu", label: "메뉴" },
+            { key: "role", label: "역할" },
+            { key: "flag", label: "판정" },
+            { key: "gap", label: "직전 이후", align: "right" },
+            { key: "avg", label: "평소 주기", align: "right" },
+          ]}
+          rows={items.map((r, i) => ({
+            key: `${r.plan_date}-${r.corner_id}-${r.menu_id}-${i}`,
+            date: weekdayLabel(r.plan_date), // 이미 "08-04(화)" 형태를 돌려준다
+            corner: r.corner_name,
+            menu: r.menu_name,
+            role: r.menu_role,
+            flag: (
+              <span style={{ color: ROTATION_FLAG_COLOR[r.flag] ?? "var(--ink-muted)" }}>{r.flag}</span>
+            ),
+            gap:
+              r.gap_days == null
+                ? "-"
+                : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`,
+            avg: r.avg_interval_days == null ? "-" : `${r.avg_interval_days}일`,
+          }))}
+          rowKey={(r) => r.key as string}
+        />
+      )}
+      {query.data && query.data.overused.length > 0 && (
+        <div className="mt-4 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+          <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+            이 주에 여러 번 들어간 메뉴 — 역할(메인/부찬/건강가든)을 가로질러 셉니다. 같은 나물이 어떤 날은
+            부찬, 어떤 날은 건강가든으로 들어가도 먹는 사람에겐 중복이기 때문입니다.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {query.data.overused.map((o) => (
+              <span
+                key={o.menu_name}
+                className="rounded-md border px-2 py-1 text-xs"
+                style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+              >
+                {o.menu_name} ({o.menu_role}) · {o.count}회 ·{" "}
+                {o.dates.map((d) => d.slice(5)).join(", ")}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function MenuPlanningPage() {
   // 메뉴 동반 선택 쌍은 코너 목록이 필요한데, 배치 집계(daily_corner_stats)에
   // 의존하지 않는 마스터 기반 목록을 쓴다(집계 전에도 코너가 보이도록).
@@ -2500,6 +2690,7 @@ export function MenuPlanningPage() {
   return (
     <div className="space-y-6">
       <WeeklyMenuReviewTab />
+      <MenuRotationSection />
       <MenuComboSection />
       <MenuPairAnalysisSection corners={cornersQuery.data ?? []} />
     </div>
