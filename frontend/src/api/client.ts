@@ -188,6 +188,7 @@ export interface WeeklyForecastResponse {
   period_end: string;
   meal_type: MealType;
   weather: Weather;
+  has_company_event: boolean;
   days: WeeklyForecastDay[];
   note: string;
 }
@@ -642,6 +643,7 @@ export const api = {
     period_end: string;
     meal_type: MealType;
     weather?: Weather;
+    has_company_event?: boolean;
   }) => request<WeeklyForecastResponse>(`/simulation/congestion-forecast/weekly${qs(params)}`),
 
   async *chatStream(messages: ChatMessage[]): AsyncGenerator<string> {

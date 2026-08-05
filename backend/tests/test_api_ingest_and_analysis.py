@@ -2165,6 +2165,38 @@ def test_weekly_congestion_forecast_skips_holidays_and_applies_multipliers(clien
     assert monday["total_predicted_headcount"] > 0
 
 
+def test_demoted_features_keep_working_apis(client, db_session):
+    """2026-08 화면 재편: 아래 기능들은 **UI에서만 내리고 API·계산 로직은 유지**한다.
+
+    "분석용으로 데이터는 가지고 있되 UI에 표현되는 것만 정리한다"는 결정이라,
+    화면에서 안 보인다고 엔드포인트까지 같이 죽는 일이 없도록 여기서 고정한다.
+    나중에 리포트나 다른 화면에서 되살릴 때 이 테스트가 계약서 역할을 한다.
+    """
+    _ingest_meal_log(client, "E1", "맛남", menu_name="제육볶음", corner_name="한식")
+    corner_id = _corner_id(db_session, "한식")
+    period = {"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=6)).isoformat()}
+
+    # ① 코너 코어층(충성도) ② 서브속도 메뉴별 ③ 메뉴 동반 선택 쌍
+    assert client.get("/api/analysis/corners/core-layer-summary", params=period).status_code == 200
+    assert client.get(f"/api/analysis/corners/{corner_id}/menu-throughput", params=period).status_code == 200
+    assert client.get(f"/api/analysis/corners/{corner_id}/core-layer-menu-pairs", params=period).status_code == 200
+    assert client.get("/api/analysis/menu-pairs/top", params=period).status_code == 200
+
+    # ④ 취향 군집 ⑤ 사번별 취향 벡터(개인정보 — UI만 내리고 API는 유지, 협의 결정)
+    assert client.get("/api/analysis/users/taste-clusters").status_code == 200
+    assert client.get("/api/analysis/users/E1/taste-profile").status_code in (200, 404)
+
+    # ⑥ 캠퍼스 평균 음식벡터(레이더)
+    assert client.get("/api/analysis/menus/food-vectors/average").status_code == 200
+
+    # 시뮬레이션 탭은 없어지지만 what-if API는 남는다(현황 예측이 같은 로직을 쓴다)
+    resp = client.post(
+        "/api/simulation/what-if",
+        json={"target_date": MONDAY.isoformat(), "meal_type": "중식", "weather": "맑음"},
+    )
+    assert resp.status_code == 200, resp.text
+
+
 def test_voe_by_category_comment_includes_menu_name(client):
     # 어떤 메뉴에 대한 의견인지 알 수 있게 코멘트마다 menu_name도 함께 내려온다(2026-08).
     _ingest_meal_log(client, "E1", "맛남", comment="정말 맛있어요", menu_name="제육볶음")

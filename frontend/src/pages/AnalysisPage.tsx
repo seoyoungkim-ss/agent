@@ -1,13 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import clsx from "clsx";
 import {
   api,
   type Classification,
-  type CornerMenuThroughputResponse,
   type CornerTrendRow,
-  type Granularity,
   type MealType,
   type MenuFoodVectorRow,
   type MenuPairRow,
@@ -30,8 +28,6 @@ import {
   quadrantColor,
   useChartTheme,
 } from "../components/ui";
-
-type SubTab = "menus" | "corners" | "users" | "voe" | "weekly-menu";
 
 function isoDaysAgo(days: number): string {
   const d = new Date();
@@ -73,135 +69,6 @@ function weekOfMonthLabel(dateIso: string): string {
   const day = Number(dateIso.slice(8, 10));
   const week = Math.ceil(day / 7);
   return `${week}주차 ${dateIso.slice(5)}`;
-}
-
-// 본사/계열사/기타를 항상 이 순서·색으로 그린다 (팔레트 categorical 순서 고정 원칙).
-// 데이터 키(division 필드값)는 그대로 "본사"를 쓰되, 본사=삼성전자뿐이라 화면
-// 표시만 "삼성전자"로 바꾼다(사용자 확인, 2026-07).
-const DIVISION_ORDER = ["본사", "계열사", "기타"];
-const DIVISION_LABELS: Record<string, string> = { 본사: "삼성전자", 계열사: "계열사", 기타: "기타" };
-const DIVISION_SERIES_VAR = ["var(--series-1)", "var(--series-2)", "var(--series-3)"];
-
-function DivisionAnalysisSection() {
-  const [granularity, setGranularity] = useState<Granularity>("weekly");
-  const [classification, setClassification] = useState<Classification | "전체">("전체");
-  const [showTable, setShowTable] = useState(false);
-  const chartTheme = useChartTheme();
-
-  const query = useQuery({
-    queryKey: ["division-analysis", granularity, classification],
-    queryFn: () =>
-      api.divisionAnalysis({
-        period_start: PERIOD_START,
-        period_end: PERIOD_END,
-        granularity,
-        classification: classification === "전체" ? undefined : classification,
-      }),
-  });
-  const recomputeDailyStats = useMutation({
-    mutationFn: () => api.recomputeDailyStats({ period_start: PERIOD_START, period_end: PERIOD_END }),
-    onSuccess: () => query.refetch(),
-  });
-
-  const rows = query.data ?? [];
-  const periods = [...new Set(rows.map((r) => r.period))].sort();
-  const byDivision: Record<string, Map<string, number>> = {};
-  for (const r of rows) {
-    (byDivision[r.division] ??= new Map()).set(r.period, r.headcount);
-  }
-  const divisions = DIVISION_ORDER.filter((d) => byDivision[d]);
-
-  const option = {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 48, right: 16, top: 32, bottom: 28 },
-    tooltip: { trigger: "axis", formatter: axisTooltipFormatter },
-    legend: { top: 0, textStyle: { color: chartTheme.text } },
-    xAxis: {
-      type: "category",
-      data: periods,
-      axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: { color: chartTheme.text },
-      axisTick: { show: false },
-    },
-    yAxis: {
-      type: "value",
-      name: "식수",
-      axisLabel: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-    },
-    series: divisions.map((division) => ({
-      name: DIVISION_LABELS[division] ?? division,
-      type: "line" as const,
-      symbol: "circle",
-      symbolSize: 6,
-      lineStyle: { width: 2, color: resolveColor(DIVISION_SERIES_VAR[DIVISION_ORDER.indexOf(division)]) },
-      itemStyle: { color: resolveColor(DIVISION_SERIES_VAR[DIVISION_ORDER.indexOf(division)]) },
-      data: periods.map((p) => byDivision[division].get(p) ?? 0),
-    })),
-  };
-
-  return (
-    <Card title="삼성전자/계열사/기타 식수 (PRD 6.1)">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <SegmentedControl
-          value={granularity}
-          options={[
-            { label: "일간", value: "daily" },
-            { label: "주간", value: "weekly" },
-            { label: "월간", value: "monthly" },
-          ]}
-          onChange={setGranularity}
-        />
-        <SegmentedControl
-          value={classification}
-          options={[
-            { label: "전체", value: "전체" },
-            { label: "평일", value: "평일" },
-            { label: "주말+공휴일", value: "주말+공휴일" },
-            { label: "패밀리데이", value: "패밀리데이" },
-          ]}
-          onChange={setClassification}
-        />
-      </div>
-      {query.isLoading && <LoadingState />}
-      {query.isError && <ErrorState error={query.error} />}
-      {rows.length === 0 && !query.isLoading && (
-        <div className="space-y-2">
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            데이터가 없습니다. 배치 집계(daily_division_stats)가 먼저 필요합니다 — 취식 데이터를 과거 기간 한꺼번에
-            적재한 경우, 스케줄러는 매일 새벽 전날치만 계산하므로 최근 180일치를 한 번에 다시 계산해야 합니다.
-          </p>
-          <Button variant="secondary" onClick={() => recomputeDailyStats.mutate()} disabled={recomputeDailyStats.isPending}>
-            {recomputeDailyStats.isPending ? "계산 중..." : "최근 180일 배치 집계 재계산"}
-          </Button>
-          {recomputeDailyStats.isError && <ErrorState error={recomputeDailyStats.error} />}
-        </div>
-      )}
-      {rows.length > 0 && <ReactECharts option={option} style={{ height: 280 }} />}
-      {rows.length > 0 && (
-        <div className="mt-4">
-          <Button variant="secondary" onClick={() => setShowTable((v) => !v)}>
-            {showTable ? "표 숨기기" : "표로 보기"}
-          </Button>
-          {showTable && (
-            <div className="mt-3">
-              <Table
-                columns={[
-                  { key: "period", label: "기간" },
-                  ...divisions.map((d) => ({ key: d, label: DIVISION_LABELS[d] ?? d, align: "right" as const })),
-                ]}
-                rows={periods.map((p) => ({
-                  period: p,
-                  ...Object.fromEntries(divisions.map((d) => [d, (byDivision[d].get(p) ?? 0).toLocaleString()])),
-                }))}
-                rowKey={(r) => r.period as string}
-              />
-            </div>
-          )}
-        </div>
-      )}
-    </Card>
-  );
 }
 
 // 히트맵 값(0~1)이 낮음→높음으로 진해지는 단일 색상(blue) 시퀀셜 램프 —
@@ -261,173 +128,6 @@ function useLightTextOn(bgRgb: [number, number, number] | undefined): boolean {
 }
 
 
-function TasteClusterSection() {
-  const chartTheme = useChartTheme();
-  const query = useQuery({
-    queryKey: ["taste-clusters"],
-    queryFn: () => api.tasteClusters(),
-  });
-  const recompute = useMutation({
-    mutationFn: () => api.recomputeTasteClusters(5),
-    onSuccess: () => query.refetch(),
-  });
-
-  const clusters = query.data ?? [];
-  const dimensions = clusters[0]?.dimensions ?? [];
-
-  const heatmapOption = {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 150, right: 90, top: 16, bottom: 70 },
-    tooltip: {
-      formatter: (p: { value: [number, number, number] }) =>
-        `${clusters[p.value[1]].label}<br/>${dimensions[p.value[0]]}: ${p.value[2]}`,
-    },
-    xAxis: {
-      type: "category",
-      data: dimensions,
-      axisLabel: { color: chartTheme.text, rotate: 40 },
-      splitArea: { show: true },
-    },
-    yAxis: {
-      type: "category",
-      data: clusters.map((c) => `${c.label} (${c.size}명)`),
-      axisLabel: { color: chartTheme.text },
-      splitArea: { show: true },
-    },
-    visualMap: {
-      min: 0,
-      max: 1,
-      calculable: true,
-      orient: "vertical" as const,
-      right: 0,
-      top: "middle" as const,
-      itemHeight: 120,
-      inRange: { color: SEQUENTIAL_BLUE_RAMP },
-      textStyle: { color: chartTheme.text },
-    },
-    series: [
-      {
-        type: "heatmap",
-        data: clusters.flatMap((c, ci) =>
-          c.centroid_vector.map((v, di) => [di, ci, Number(v.toFixed(2))]),
-        ),
-        label: { show: false },
-      },
-    ],
-  };
-
-  return (
-    <Card title="취향 군집 요약 — 사번 검색 없이 전체 경향 보기">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-          전체 취향 벡터를 K-means로 묶어 몇 개의 취향 그룹으로 요약합니다.
-        </p>
-        <Button variant="secondary" onClick={() => recompute.mutate()} disabled={recompute.isPending}>
-          재계산
-        </Button>
-      </div>
-      {query.isLoading && <LoadingState />}
-      {query.isError && <ErrorState error={query.error} />}
-      {recompute.isError && <ErrorState error={recompute.error} />}
-      {clusters.length === 0 && !query.isLoading && (
-        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          군집 결과가 없습니다. 먼저 취향 프로필이 충분히 쌓인 뒤(사용자 분석 아래 "조회" 전 recompute 필요) "재계산"을
-          눌러보세요 — 군집 5개를 만들려면 최소 10명의 취향 프로필이 필요합니다.
-        </p>
-      )}
-      {clusters.length > 0 && (
-        <ReactECharts option={heatmapOption} style={{ height: 100 + clusters.length * 40 }} />
-      )}
-      {clusters.length > 0 && (
-        <div className="mt-4">
-          <Table
-            columns={[
-              { key: "label", label: "그룹" },
-              { key: "size", label: "인원수", align: "right" },
-              { key: "satisfaction", label: "평균 만족도", align: "right" },
-              { key: "corner", label: "주 이용 코너" },
-              { key: "menus", label: "대표 메뉴" },
-            ]}
-            rows={clusters.map((c) => ({
-              label: c.label,
-              size: c.size,
-              satisfaction: c.avg_satisfaction?.toFixed(2) ?? "-",
-              corner: c.dominant_corner ?? "-",
-              menus: c.top_menus.join(", ") || "-",
-            }))}
-            rowKey={(r) => r.label as string}
-          />
-        </div>
-      )}
-    </Card>
-  );
-}
-
-function TasteProfileSection() {
-  const [employeeId, setEmployeeId] = useState("");
-  const [searched, setSearched] = useState<string | null>(null);
-  const profile = useQuery({
-    queryKey: ["taste-profile", searched],
-    queryFn: () => api.userTasteProfile(searched as string),
-    enabled: !!searched,
-    retry: false,
-  });
-
-  return (
-    <Card title="사용자 입맛 분석 — 사번별 취향 벡터">
-      <div className="mb-4 flex gap-2">
-        <input
-          className="w-48 rounded-md border px-3 py-2 text-[13px]"
-          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-          placeholder="사번 (예: E12345)"
-          value={employeeId}
-          onChange={(e) => setEmployeeId(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && setSearched(employeeId)}
-        />
-        <Button onClick={() => setSearched(employeeId)}>조회</Button>
-      </div>
-      {profile.isLoading && <LoadingState />}
-      {profile.isError && <ErrorState error={profile.error} />}
-      {profile.data && (
-        <div>
-          <p className="mb-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-            표본 {profile.data.sample_size}건 기반 취향 벡터 (메뉴 food_vector와 동일 차원)
-            {profile.data.cluster_label && (
-              <>
-                {" "}
-                ·{" "}
-                <span className="rounded px-1.5 py-0.5" style={{ background: "var(--surface-2)" }}>
-                  {profile.data.cluster_label}
-                </span>
-              </>
-            )}
-          </p>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-            {profile.data.dimensions.map((dim, i) => (
-              <div key={dim} className="rounded-md border p-2 text-center" style={{ borderColor: "var(--border)" }}>
-                <div className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                  {dim}
-                </div>
-                <div className="text-[13px] font-medium">{profile.data!.profile_vector[i]?.toFixed(2)}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </Card>
-  );
-}
-
-function UserAnalysisTab() {
-  return (
-    <div className="space-y-6">
-      <DivisionAnalysisSection />
-      <TasteClusterSection />
-      <TasteProfileSection />
-    </div>
-  );
-}
-
 // 코너별 분석 "코너별 비교" 통합 그래프의 지표 선택지 — 기존엔 (식수+만족도)/
 // (서브속도+점유율) 두 고정 조합 그래프가 따로 있었는데(2026-07, 42.3), 사용자가
 // 좌/우 축에 넣을 지표를 직접 고르는 그래프 하나로 재설계했다(2026-08).
@@ -451,7 +151,9 @@ const CORNER_METRIC_AXIS: Record<CornerMetricKey, { name: string; min?: number; 
   share: { name: "점유율(%)", min: 0, max: 100 },
 };
 
-function CornerAnalysisTab() {
+// 코너별 지표 비교 그래프 — 2026-08 화면 재편으로 "분석 > 코너별" 탭이 사라지면서
+// 현황(HomePage)으로 옮겼다. 그래서 탭이 아니라 export되는 섹션 컴포넌트다.
+export function CornerMetricComparisonSection() {
   const [classification, setClassification] = useState<Classification | "전체">("전체");
   const [showCornerTable, setShowCornerTable] = useState(false);
   const [leftMetric, setLeftMetric] = useState<CornerMetricKey>("headcount");
@@ -478,29 +180,6 @@ function CornerAnalysisTab() {
   const recomputeDailyStats = useMutation({
     mutationFn: () => api.recomputeDailyStats({ period_start: PERIOD_START, period_end: PERIOD_END }),
     onSuccess: () => query.refetch(),
-  });
-
-  // 코너 선택을 이 탭과 CornerLoyaltySection이 공유한다 — 피크타임 서브속도를
-  // "코너별 비교"(아래 throughputTrendOption, 전체 코너)와 "메뉴별 비교"(선택된
-  // 코너의 메뉴별, CornerLoyaltySection에도 있던 차트)로 오갈 때 코너 선택이
-  // 서로 어긋나지 않게 한다(2026-07).
-  const [selectedCornerId, setSelectedCornerId] = useState<number | null>(null);
-  useEffect(() => {
-    if (selectedCornerId == null && (query.data ?? []).length > 0) {
-      setSelectedCornerId(query.data![0].corner_id);
-    }
-  }, [query.data, selectedCornerId]);
-  const [throughputCompareMode, setThroughputCompareMode] = useState<"corner" | "menu">("corner");
-  // corner-menu-throughput 쿼리키는 CornerLoyaltySection과 동일 — React Query
-  // 캐시가 자동으로 중복 요청을 막아준다(이 레포에 이미 있는 패턴).
-  const menuThroughputQuery = useQuery({
-    queryKey: ["corner-menu-throughput", selectedCornerId],
-    queryFn: () =>
-      api.cornerMenuThroughput(selectedCornerId as number, {
-        period_start: PERIOD_START,
-        period_end: PERIOD_END,
-      }),
-    enabled: selectedCornerId != null && throughputCompareMode === "menu",
   });
 
   // 파이차트·꺾은선그래프 색상을 코너 인기 순위가 아니라 코너 자체(corner_id)에 고정한다
@@ -812,32 +491,13 @@ function CornerAnalysisTab() {
               )}
             </div>
             <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="mb-3">
                 <p className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                  {throughputCompareMode === "corner"
-                    ? "왼쪽/오른쪽 축에 넣을 지표를 각각 고르세요 — 점유율은 Take Out·그린미트·미캠회관(전골)을 제외한 착석 취식 코너 기준입니다. 범례를 클릭하면 코너별로 켜고 끌 수 있습니다."
-                    : "코너를 골라 그 코너의 메뉴별 피크타임 서브속도 순위를 봅니다."}
+                  왼쪽/오른쪽 축에 넣을 지표를 각각 고르세요 — 점유율은 Take Out·그린미트·미캠회관(전골)을 제외한
+                  착석 취식 코너 기준입니다. 범례를 클릭하면 코너별로 켜고 끌 수 있습니다.
                 </p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <SegmentedControl
-                    value={throughputCompareMode}
-                    options={[
-                      { label: "코너별 비교", value: "corner" },
-                      { label: "메뉴별 비교", value: "menu" },
-                    ]}
-                    onChange={setThroughputCompareMode}
-                  />
-                  {throughputCompareMode === "menu" && query.data && query.data.length > 0 && (
-                    <SegmentedControl
-                      value={selectedCornerId != null ? String(selectedCornerId) : ""}
-                      options={query.data.map((c) => ({ label: c.corner_name, value: String(c.corner_id) }))}
-                      onChange={(v) => setSelectedCornerId(Number(v))}
-                    />
-                  )}
-                </div>
               </div>
-              {throughputCompareMode === "corner" ? (
-                <>
+              <>
                   <div className="mb-3 flex flex-wrap items-center gap-3 text-[13px]">
                     <label className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
                       왼쪽 축
@@ -881,70 +541,10 @@ function CornerAnalysisTab() {
                     <ReactECharts option={cornerMetricOption} style={{ height: 380 }} />
                   )}
                 </>
-              ) : (
-                <>
-                  {menuThroughputQuery.isLoading && <LoadingState />}
-                  {menuThroughputQuery.isError && <ErrorState error={menuThroughputQuery.error} />}
-                  {menuThroughputQuery.data && menuThroughputQuery.data.menus.length === 0 && (
-                    <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                      표본 부족
-                    </p>
-                  )}
-                  {menuThroughputQuery.data &&
-                    menuThroughputQuery.data.menus.length > 0 &&
-                    (() => {
-                      const sorted = [...menuThroughputQuery.data!.menus].sort(
-                        (a, b) => a.avg_throughput - b.avg_throughput,
-                      );
-                      const slowTop5 = sorted.slice(0, 5);
-                      const fastTop5 = sorted.slice(-5).reverse();
-                      const overallAvg = menuThroughputQuery.data!.overall_avg_throughput;
-                      return (
-                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                          <div>
-                            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                              서브 가장 느린 Top5
-                            </p>
-                            <ReactECharts
-                              option={buildMenuThroughputRankingOption(
-                                slowTop5,
-                                overallAvg,
-                                chartTheme,
-                                resolveColor("var(--critical)"),
-                              )}
-                              style={{ height: Math.max(160, slowTop5.length * 32) }}
-                            />
-                          </div>
-                          <div>
-                            <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                              서브 가장 빠른 Top5
-                            </p>
-                            <ReactECharts
-                              option={buildMenuThroughputRankingOption(
-                                fastTop5,
-                                overallAvg,
-                                chartTheme,
-                                resolveColor("var(--good)"),
-                              )}
-                              style={{ height: Math.max(160, fastTop5.length * 32) }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })()}
-                </>
-              )}
             </div>
           </>
         )}
       </Card>
-      <CornerLoyaltySection
-        corners={query.data ?? []}
-        selectedCornerId={selectedCornerId}
-        onSelectCorner={setSelectedCornerId}
-      />
-      <MenuPairAnalysisSection corners={query.data ?? []} />
-      <MenuAffinitySection />
     </div>
   );
 }
@@ -1007,266 +607,6 @@ function buildMenuPairGraphOption(
       },
     ],
   };
-}
-
-// 코너의 "그날 대표 메뉴"별 피크타임 처리량을 느린 순으로 보여준다 — 점선은
-// 그 코너의 전체 평균(baseline), 기준선보다 느리면 warning, 아니면 good.
-function buildMenuThroughputOption(
-  data: CornerMenuThroughputResponse,
-  chartTheme: { text: string; axis: string; grid: string },
-) {
-  const goodColor = resolveColor("var(--good)");
-  const warnColor = resolveColor("var(--warning)");
-  const baseline = data.overall_avg_throughput ?? 0;
-  const menus = data.menus;
-
-  return {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 100, right: 24, top: 16, bottom: 28 },
-    tooltip: { trigger: "axis" as const, formatter: axisTooltipFormatter },
-    xAxis: {
-      type: "value" as const,
-      name: "평균 서브속도(분당)",
-      axisLabel: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-    },
-    yAxis: {
-      type: "category" as const,
-      inverse: true,
-      data: menus.map((m) => m.menu_name ?? "메뉴 미배정"),
-      axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: { color: chartTheme.text },
-      axisTick: { show: false },
-    },
-    series: [
-      {
-        name: "평균 서브속도",
-        type: "bar" as const,
-        barMaxWidth: 20,
-        itemStyle: {
-          borderRadius: [0, 4, 4, 0] as [number, number, number, number],
-          color: (params: { dataIndex: number }) =>
-            menus[params.dataIndex].avg_throughput < baseline ? warnColor : goodColor,
-        },
-        data: menus.map((m) => m.avg_throughput),
-        markLine:
-          data.overall_avg_throughput != null
-            ? {
-                symbol: "none" as const,
-                label: { formatter: "전체 평균", color: chartTheme.text },
-                lineStyle: { color: chartTheme.axis, type: "dashed" as const },
-                data: [{ xAxis: data.overall_avg_throughput }],
-              }
-            : undefined,
-      },
-    ],
-  };
-}
-
-// "메뉴별 비교" Top5/Bottom5 랭킹 막대 — 예전엔 코너의 전체 메뉴를 한 막대
-// 그래프에 다 욱여넣어 메뉴가 많으면 가독성이 떨어졌다(2026-08 피드백).
-// 코너 선택은 기존 SegmentedControl을 그대로 재사용하고, 이 함수는 이미
-// 정렬돼 잘린(top5) 목록 하나만 그린다 — buildMenuThroughputOption과 같은
-// 시각 언어(가로 막대, 점선 전체 평균선)를 쓰되 리스트 성격에 맞게 막대
-// 색을 리스트 전체에 고정(느림=빨강, 빠름=초록)한다.
-function buildMenuThroughputRankingOption(
-  menus: CornerMenuThroughputResponse["menus"],
-  overallAvgThroughput: number | null,
-  chartTheme: { text: string; axis: string; grid: string },
-  barColor: string,
-) {
-  return {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 100, right: 24, top: 16, bottom: 28 },
-    tooltip: { trigger: "axis" as const, formatter: axisTooltipFormatter },
-    xAxis: {
-      type: "value" as const,
-      name: "평균 서브속도(분당)",
-      axisLabel: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-    },
-    yAxis: {
-      type: "category" as const,
-      inverse: true,
-      data: menus.map((m) => m.menu_name ?? "메뉴 미배정"),
-      axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: { color: chartTheme.text },
-      axisTick: { show: false },
-    },
-    series: [
-      {
-        name: "평균 서브속도",
-        type: "bar" as const,
-        barMaxWidth: 20,
-        itemStyle: { borderRadius: [0, 4, 4, 0] as [number, number, number, number], color: barColor },
-        data: menus.map((m) => m.avg_throughput),
-        markLine:
-          overallAvgThroughput != null
-            ? {
-                symbol: "none" as const,
-                label: { formatter: "전체 평균", color: chartTheme.text },
-                lineStyle: { color: chartTheme.axis, type: "dashed" as const },
-                data: [{ xAxis: overallAvgThroughput }],
-              }
-            : undefined,
-      },
-    ],
-  };
-}
-
-// PRD 10-1: 코너 코어층 = "코너 충성도" 분석. 특정 코너를 반복적으로 찾는
-// 이용자층 규모/특징만 본다 — 메뉴 동반 선택 쌍(10-2, 메뉴 선호 연관 분석)과는
-// 목적이 다른 별개 화면으로 분리했다(2026-07, 기존엔 한 카드에 섞여 있었음).
-function CornerLoyaltySection({
-  corners,
-  selectedCornerId,
-  onSelectCorner,
-}: {
-  corners: { corner_id: number; corner_name: string }[];
-  // 코너 선택은 부모(CornerAnalysisTab)와 공유한다 — "피크타임 서브속도"
-  // 섹션의 "메뉴별 비교" 모드와 코너 선택이 어긋나지 않게 하기 위함(2026-07).
-  selectedCornerId: number | null;
-  onSelectCorner: (cornerId: number) => void;
-}) {
-  const chartTheme = useChartTheme();
-  const [minVisitCount, setMinVisitCount] = useState(3);
-  const [minShare, setMinShare] = useState(30);
-
-  const cornerQuery = useQuery({
-    queryKey: ["corner-core-layer-menu-pairs", selectedCornerId, minVisitCount, minShare],
-    queryFn: () =>
-      api.cornerCoreLayerMenuPairs(selectedCornerId as number, {
-        period_start: PERIOD_START,
-        period_end: PERIOD_END,
-        min_visit_count: minVisitCount,
-        min_share: minShare / 100,
-      }),
-    enabled: selectedCornerId != null,
-  });
-  const throughputQuery = useQuery({
-    queryKey: ["corner-menu-throughput", selectedCornerId],
-    queryFn: () =>
-      api.cornerMenuThroughput(selectedCornerId as number, {
-        period_start: PERIOD_START,
-        period_end: PERIOD_END,
-      }),
-    enabled: selectedCornerId != null,
-  });
-  // 코너간 비교 뷰 — "어디 코너 코어층은 몇 명이고 유동층은 몇 명인지" 전체를
-  // 한눈에 보기 위한 요약(2026-07). 아래 코너 선택 컨트롤과 같은 min_visit_
-  // count/min_share를 공유해 상세 뷰와 기준이 어긋나지 않게 한다.
-  const summaryQuery = useQuery({
-    queryKey: ["corner-core-layer-summary", minVisitCount, minShare],
-    queryFn: () =>
-      api.cornerCoreLayerSummary({
-        period_start: PERIOD_START,
-        period_end: PERIOD_END,
-        min_visit_count: minVisitCount,
-        min_share: minShare / 100,
-      }),
-  });
-
-  if (corners.length === 0) return null;
-
-  const pref = cornerQuery.data?.menu_controlled_preference;
-
-  return (
-    <Card title="코너 코어층 — 코너 충성도 분석">
-      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-        특정 코너를 습관적으로 찾는 이용자층을 두 기준으로 봅니다: ① 방문 횟수·비중이 유의미하게 높은
-        경우, ② 같은 메인메뉴가 여러 코너에서 동시 제공된 날에도 이 코너를 고른 비율(메뉴가 같으니 코너
-        선택은 순수한 코너 선호로 봅니다). 두 신호는 서로 다른 관점이라 따로 보여줍니다.
-      </p>
-      {summaryQuery.isLoading && <LoadingState />}
-      {summaryQuery.isError && <ErrorState error={summaryQuery.error} />}
-      {summaryQuery.data && (
-        <div className="mb-5">
-          <Table
-            columns={[
-              { key: "corner_name", label: "코너" },
-              { key: "core", label: "코어 이용자", align: "right" },
-              { key: "non_core", label: "유동층", align: "right" },
-            ]}
-            rows={summaryQuery.data.map((r) => ({
-              corner_name: r.corner_name,
-              core: `${r.core_employee_count}명`,
-              non_core: `${r.non_core_employee_count}명`,
-            }))}
-            rowKey={(row) => row.corner_name as string}
-          />
-        </div>
-      )}
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <SegmentedControl
-          value={selectedCornerId != null ? String(selectedCornerId) : ""}
-          options={corners.map((c) => ({ label: c.corner_name, value: String(c.corner_id) }))}
-          onChange={(v) => onSelectCorner(Number(v))}
-        />
-        <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-          최소 방문횟수
-          <input
-            type="number"
-            min={1}
-            className="w-14 rounded-md border px-2 py-1 text-[13px]"
-            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-            value={minVisitCount}
-            onChange={(e) => setMinVisitCount(Number(e.target.value))}
-          />
-        </label>
-        <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-          최소 비중(%)
-          <input
-            type="number"
-            min={0}
-            max={100}
-            className="w-14 rounded-md border px-2 py-1 text-[13px]"
-            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-            value={minShare}
-            onChange={(e) => setMinShare(Number(e.target.value))}
-          />
-        </label>
-      </div>
-      {cornerQuery.isLoading && <LoadingState />}
-      {cornerQuery.isError && <ErrorState error={cornerQuery.error} />}
-      {cornerQuery.data && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <StatTile
-            label="코어 이용자 (방문 빈도·비중 기준)"
-            value={`${cornerQuery.data.core_layer.employee_count}명`}
-            sub={`방문 ${minVisitCount}회↑ · 비중 ${minShare}%↑`}
-          />
-          <StatTile label="나머지 이용자" value={`${cornerQuery.data.non_core.employee_count}명`} />
-          <StatTile
-            label="메뉴 동일 상황에서도 이 코너 선택 비율"
-            value={pref ? `${(pref.preference_ratio * 100).toFixed(0)}%` : "데이터 없음"}
-            sub={
-              pref
-                ? `${pref.contested_occasions}건 중 ${pref.chosen_count}건`
-                : "같은 날 같은 메인메뉴가 다른 코너와 동시 제공된 적이 없습니다"
-            }
-          />
-        </div>
-      )}
-      <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
-        <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-          메뉴별 피크타임 서브속도 — 그날 이 코너의 대표 메뉴 기준(점선은 전체 평균, 그보다 느리면 주황)
-        </p>
-        {throughputQuery.isLoading && <LoadingState />}
-        {throughputQuery.isError && <ErrorState error={throughputQuery.error} />}
-        {throughputQuery.data && throughputQuery.data.menus.length === 0 && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            표본 부족
-          </p>
-        )}
-        {throughputQuery.data && throughputQuery.data.menus.length > 0 && (
-          <ReactECharts
-            option={buildMenuThroughputOption(throughputQuery.data, chartTheme)}
-            style={{ height: Math.max(160, throughputQuery.data.menus.length * 32) }}
-          />
-        )}
-      </div>
-    </Card>
-  );
 }
 
 type PairSortKey = "co_count" | "lift";
@@ -2119,59 +1459,6 @@ function MenuQuadrantTab() {
   );
 }
 
-function MenuAffinitySection() {
-  const [menuName, setMenuName] = useState("");
-  const [searched, setSearched] = useState<string | null>(null);
-  const query = useQuery({
-    queryKey: ["menu-affinity", searched],
-    queryFn: () =>
-      api.menuAffinity(searched as string, { period_start: PERIOD_START, period_end: PERIOD_END }),
-    enabled: !!searched,
-    retry: false,
-  });
-
-  return (
-    <Card title="메뉴 동반 선택 경향성 — 같이/대신 자주 고르는 메뉴">
-      <div className="mb-3 flex gap-2">
-        <input
-          className="w-48 rounded-md border px-3 py-2 text-[13px]"
-          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-          placeholder="메뉴명 (예: 떡볶이)"
-          value={menuName}
-          onChange={(e) => setMenuName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && setSearched(menuName)}
-        />
-        <Button onClick={() => setSearched(menuName)}>조회</Button>
-      </div>
-      {query.isLoading && <LoadingState />}
-      {query.isError && <ErrorState error={query.error} />}
-      {query.data && query.data.length === 0 && (
-        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          유의미한 동반 선택 메뉴가 없습니다 (표본이 너무 적거나 연관성이 낮음).
-        </p>
-      )}
-      {query.data && query.data.length > 0 && (
-        <Table
-          columns={[
-            { key: "menu", label: "메뉴" },
-            { key: "co_count", label: "동반 인원", align: "right" },
-            { key: "lift", label: "연관도(lift)", align: "right" },
-          ]}
-          rows={query.data.map((r) => ({
-            menu: r.menu_name,
-            co_count: r.co_count,
-            lift: r.lift.toFixed(2),
-          }))}
-          rowKey={(r) => r.menu as string}
-        />
-      )}
-      <p className="mt-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-        lift가 1보다 크면 우연히 같이 나오는 것보다 더 자주 동반 선택된다는 뜻입니다.
-      </p>
-    </Card>
-  );
-}
-
 function MenuFoodVectorEditor({ row, onSaved }: { row: MenuFoodVectorRow; onSaved: () => void }) {
   const dims = row.dimensions;
   const [expanded, setExpanded] = useState(false);
@@ -2231,83 +1518,6 @@ function MenuFoodVectorEditor({ row, onSaved }: { row: MenuFoodVectorRow; onSave
         </div>
       )}
     </div>
-  );
-}
-
-function CampusAverageFoodVectorSection() {
-  const chartTheme = useChartTheme();
-  const query = useQuery({
-    queryKey: ["menu-food-vectors-average"],
-    queryFn: () => api.averageMenuFoodVector(),
-  });
-
-  const data = query.data;
-  const labels = data ? data.dimensions.map((d) => data.labels_ko[d] ?? d) : [];
-  const accentColor = resolveColor("var(--accent)");
-
-  const option = data && {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    tooltip: {},
-    legend: {
-      bottom: 0,
-      textStyle: { color: chartTheme.text },
-      data: ["캠퍼스 평균", "중립 기준(0.5)"],
-    },
-    radar: {
-      indicator: labels.map((name) => ({ name, min: 0, max: 1 })),
-      axisName: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-      splitArea: { show: false },
-      axisLine: { lineStyle: { color: chartTheme.axis } },
-    },
-    series: [
-      {
-        type: "radar",
-        data: [
-          {
-            name: "캠퍼스 평균",
-            value: data.average,
-            areaStyle: { color: accentColor, opacity: 0.25 },
-            lineStyle: { color: accentColor, width: 2 },
-            itemStyle: { color: accentColor },
-          },
-          {
-            name: "중립 기준(0.5)",
-            value: data.dimensions.map(() => 0.5),
-            lineStyle: { type: "dashed" as const, color: chartTheme.axis },
-            itemStyle: { color: chartTheme.axis },
-            areaStyle: { opacity: 0 },
-          },
-        ],
-      },
-    ],
-  };
-
-  return (
-    <Card title="캠퍼스 메인메뉴 평균 음식벡터 — 어떤 맛으로 쏠려 있는가">
-      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-        현재 음식벡터가 태깅된 메인메뉴 전체를 축별로 평균 낸 값입니다(부찬은 제외). 점선(중립 기준
-        0.5)보다 바깥으로 나온 축이 캠퍼스 메뉴 구성이 쏠려 있는 방향입니다.
-      </p>
-      {query.isLoading && <LoadingState />}
-      {query.isError && <ErrorState error={query.error} />}
-      {data && data.sample_size === 0 && (
-        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          태깅된 메인메뉴 음식벡터가 아직 없습니다.
-        </p>
-      )}
-      {data && data.sample_size > 0 && option && (
-        <>
-          <p className="mb-2 text-[13px]" style={{ color: "var(--ink)" }}>
-            {data.bias_description}
-            <span className="ml-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-              (메인메뉴 {data.sample_size}개 기준)
-            </span>
-          </p>
-          <ReactECharts option={option} style={{ height: 360 }} />
-        </>
-      )}
-    </Card>
   );
 }
 
@@ -3277,44 +2487,84 @@ function VoeAnalysisTab() {
   );
 }
 
-export function AnalysisPage() {
-  const [tab, setTab] = useState<SubTab>("menus");
-  const tabs: { value: SubTab; label: string }[] = [
-    { value: "menus", label: "메뉴별 분석" },
-    { value: "corners", label: "코너별 분석" },
-    { value: "users", label: "사용자 분석" },
-    { value: "voe", label: "주관식 VOE" },
-    { value: "weekly-menu", label: "주간 식단표 관리" },
-  ];
+// ---- 2026-08 화면 재편으로 생긴 최상위 화면 3개 ----
+// 기존 "분석" 탭(서브탭 5개)을 해체하고, 담당자 협의에서 정한 5개 축
+// (현황 / 메뉴 편성·운영 / 만족도·VoE / Agent 채팅 / 관리)에 맞춰 재배치했다.
+// 컴포넌트 본문은 그대로 두고 조합만 바꾼다.
+
+/** 메뉴 편성·운영 — "다음 주 식단을 어떻게 짤까"에 답하는 화면. */
+export function MenuPlanningPage() {
+  // 메뉴 동반 선택 쌍은 코너 목록이 필요한데, 배치 집계(daily_corner_stats)에
+  // 의존하지 않는 마스터 기반 목록을 쓴다(집계 전에도 코너가 보이도록).
+  const cornersQuery = useQuery({ queryKey: ["corner-list"], queryFn: () => api.cornerList() });
   return (
     <div className="space-y-6">
-      <div className="flex gap-5 border-b" style={{ borderColor: "var(--border)" }}>
-        {tabs.map((t) => (
-          <button
-            key={t.value}
-            onClick={() => setTab(t.value)}
-            className="border-b-2 py-2 text-[13px] font-medium"
-            style={{
-              borderColor: tab === t.value ? "var(--accent)" : "transparent",
-              color: tab === t.value ? "var(--ink)" : "var(--ink-secondary)",
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-      {tab === "menus" && (
-        <div className="space-y-6">
-          <MenuQuadrantTab />
-          <MenuComboSection />
-          <CampusAverageFoodVectorSection />
-          <MenuFoodVectorAdminSection />
+      <WeeklyMenuReviewTab />
+      <MenuComboSection />
+      <MenuPairAnalysisSection corners={cornersQuery.data ?? []} />
+    </div>
+  );
+}
+
+/** 만족도·VoE — "무엇이 좋았고 무엇이 불만인가"에 답하는 화면. */
+export function SatisfactionVoePage() {
+  return (
+    <div className="space-y-6">
+      <MenuQuadrantTab />
+      <VoeAnalysisTab />
+    </div>
+  );
+}
+
+/**
+ * 관리 — 일상 운영 동선에서 치워 둔 관리자용 도구 모음.
+ * 주의: 이 앱에는 로그인/권한 체계가 없다. 이 탭은 **접근 제한이 아니라
+ * 메인 화면 정리 목적**이며, 화면에도 그렇게 명시한다(협의 결정, 2026-08).
+ */
+export function AdminPage() {
+  const [exportStart, setExportStart] = useState(isoDaysAgo(30));
+  const [exportEnd, setExportEnd] = useState(isoDaysAgo(0));
+  const mealLogExportUrl = `/api/dashboard/meal-log/export?period_start=${exportStart}&period_end=${exportEnd}`;
+  return (
+    <div className="space-y-6">
+      <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        자주 쓰지 않는 관리 기능을 모아 둔 화면입니다. <strong>접근 권한이 걸려 있지는 않으며</strong>
+        (이 앱에는 로그인 체계가 없습니다), 일상 화면을 단순하게 유지하기 위해 분리해 둔 것입니다.
+      </p>
+      <MenuFoodVectorAdminSection />
+      <Card title="전체 취식 데이터 다운로드 (기간 선택)">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          요약이 아닌 개별 취식 기록(취식일시·사번·구분·회사명·식사구분·코너·메뉴·맛평가·의견)을 선택한 기간 그대로 엑셀로 내려받습니다.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            시작일
+            <input
+              type="date"
+              className="rounded-md border px-3 py-2 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              value={exportStart}
+              max={exportEnd}
+              onChange={(e) => setExportStart(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            종료일
+            <input
+              type="date"
+              className="rounded-md border px-3 py-2 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              value={exportEnd}
+              min={exportStart}
+              max={isoDaysAgo(0)}
+              onChange={(e) => setExportEnd(e.target.value)}
+            />
+          </label>
+          <a href={mealLogExportUrl} download>
+            <Button variant="secondary">엑셀 다운로드</Button>
+          </a>
         </div>
-      )}
-      {tab === "corners" && <CornerAnalysisTab />}
-      {tab === "users" && <UserAnalysisTab />}
-      {tab === "voe" && <VoeAnalysisTab />}
-      {tab === "weekly-menu" && <WeeklyMenuReviewTab />}
+      </Card>
     </div>
   );
 }

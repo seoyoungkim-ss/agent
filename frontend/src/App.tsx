@@ -1,19 +1,22 @@
 import { useState } from "react";
 import { HomePage } from "./pages/HomePage";
-import { AnalysisPage } from "./pages/AnalysisPage";
-import { SimulationPage } from "./pages/SimulationPage";
+import { AdminPage, MenuPlanningPage, SatisfactionVoePage } from "./pages/AnalysisPage";
 import { ChatPage } from "./pages/ChatPage";
 import { WeeklyMenuVoeDetailPage } from "./pages/WeeklyMenuVoeDetailPage";
 
+// 담당자 협의에서 정한 5개 축으로 재편(2026-08). 기존 "분석" 탭(서브탭 5개)과
+// "시뮬레이션" 탭은 없어졌다 — 시뮬레이션의 실질 입력이던 "사내 행사" 토글은
+// 현황의 금주 예상 식수 카드가 흡수했다.
 // "weekly-voe"는 상단 내비게이션엔 안 보이는 화면 — 홈의 "금주 메뉴 과거 VOE"
 // 카드를 클릭했을 때만 진입한다(뒤로가기 버튼으로 홈에 복귀).
-type Tab = "home" | "analysis" | "simulation" | "chat" | "weekly-voe";
+type Tab = "home" | "menu-planning" | "satisfaction" | "chat" | "admin" | "weekly-voe";
 
 const TABS: { value: Tab; label: string }[] = [
-  { value: "home", label: "홈" },
-  { value: "analysis", label: "분석" },
-  { value: "simulation", label: "시뮬레이션" },
+  { value: "home", label: "현황" },
+  { value: "menu-planning", label: "메뉴 편성·운영" },
+  { value: "satisfaction", label: "만족도·VoE" },
   { value: "chat", label: "Agent 채팅" },
+  { value: "admin", label: "관리" },
 ];
 
 function App() {
@@ -43,9 +46,10 @@ function App() {
       </header>
       <main className="mx-auto max-w-6xl px-6 py-6">
         {tab === "home" && <HomePage onOpenWeeklyVoe={() => setTab("weekly-voe")} />}
-        {tab === "analysis" && <AnalysisPage />}
-        {tab === "simulation" && <SimulationPage />}
+        {tab === "menu-planning" && <MenuPlanningPage />}
+        {tab === "satisfaction" && <SatisfactionVoePage />}
         {tab === "chat" && <ChatPage />}
+        {tab === "admin" && <AdminPage />}
         {tab === "weekly-voe" && <WeeklyMenuVoeDetailPage onBack={() => setTab("home")} />}
       </main>
     </div>

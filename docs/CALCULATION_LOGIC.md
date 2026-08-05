@@ -2944,3 +2944,86 @@ Top5/Bottom5(빨강/초록), 코어층 표에서 Take Out 행 사라짐, 사용�
 analysis.py`, `backend/app/api/dashboard.py`, `backend/tests/
 test_api_ingest_and_analysis.py`, `frontend/src/api/client.ts`,
 `frontend/src/pages/HomePage.tsx`, `frontend/src/pages/AnalysisPage.tsx`.
+
+---
+
+## 47. 화면을 5개 축으로 재편 — 네비게이션 교체 + 기능 강등 (2026-08)
+
+담당자 협의에서 정한 5개 축으로 화면 구조를 바꿨다. **"기존 기능은 분석용으로
+데이터는 가지고 있되 UI에 표현되는 것들을 정리한다"**는 원칙이라, 이번 작업에서
+지운 것은 **화면 뿐이고 API·집계 로직은 하나도 건드리지 않았다.**
+
+### 47.1 새 탭 구성
+
+| 이전 | 이후 |
+|---|---|
+| 홈 / 분석(서브탭 5개) / 시뮬레이션 / Agent 채팅 | **현황 / 메뉴 편성·운영 / 만족도·VoE / Agent 채팅 / 관리** |
+
+- **현황** — 요약 카드 4개, 개선 필요 포인트, 주간 식수 추이, 통합 식수 추이(1-B),
+  금주 예상 식수·점유율·대기시간(1-C/1-D), **코너별 지표 비교**(분석>코너별에서 이동)
+- **메뉴 편성·운영** — 주간 식단표 관리, 부찬 조합별 만족도, 메뉴 동반 선택 쌍
+- **만족도·VoE** — 메뉴 4분면, 월간 VOE 분류, VOE 클러스터링
+- **Agent 채팅** — 변경 없음
+- **관리** — 음식벡터 관리, 전체 취식 데이터 다운로드
+
+`weekly-voe`(금주 메뉴 과거 VOE 상세)는 이전처럼 상단 내비에 없고 현황 카드
+클릭으로만 진입한다.
+
+### 47.2 시뮬레이션 탭을 없앨 수 있었던 이유
+
+`SimulationPage`의 what-if 카드는 제목에 "신메뉴 코너"가 있었지만 **실제 입력
+컨트롤이 없었고**(호출부도 `new_menu_corner_id`를 보내지 않았다), 날짜·끼니·
+날씨는 현황의 금주 예상 식수 카드가 이미 갖고 있었다. 즉 이 탭의 유일한 고유
+입력은 **"사내 행사" 토글 하나**였다. 그래서 주간 래퍼
+`GET /simulation/congestion-forecast/weekly`에 `has_company_event: bool = False`를
+추가하고(배수 0.90 — `what_if`가 쓰던 값 그대로), 현황 카드에 체크박스를 붙여
+흡수한 뒤 `SimulationPage.tsx`를 삭제했다. **`POST /simulation/what-if` API는
+백엔드에 그대로 남아 있다.**
+
+### 47.3 UI에서 내린 기능 6개 + 2개
+
+| 대상 | 살아있는 API |
+|---|---|
+| 캠퍼스 평균 음식벡터 레이더 | `GET /analysis/menus/food-vectors/average` |
+| 코너 코어층 | `GET /analysis/corners/core-layer-summary`, `.../core-layer-menu-pairs` |
+| 취향 군집 요약 | `GET /analysis/users/taste-clusters` |
+| 사용자 입맛 분석 | `GET /analysis/users/{employee_id}/taste-profile` |
+| 피크타임 서브속도 메뉴별 Top5/Bottom5 | `GET /analysis/corners/{id}/menu-throughput` |
+| 메뉴 동반 선택 경향성 | `GET /analysis/menu-pairs/top` |
+| 사용자 분석 탭 전체 | (위 3개 + 회사구분별 식수) |
+| 회사구분별 식수 **표** | `GET /analysis/divisions` |
+
+**컴포넌트 정의는 남기지 않고 지웠다.** 정의만 남기면 TS가
+"declared but never read"로 빌드를 깨기 때문이다. 되살릴 때는 git 이력에서
+꺼내면 되고, 그동안 API가 죽지 않았다는 건 아래 회귀 테스트가 보증한다.
+
+**의도적 손실 1건**: 회사구분별 식수의 **표 형태**는 사라진다. 그래프는 1-B의
+통합 추이 차트가 `group_by=division` + 일/주/월 + 분류 필터로 그대로 대체하지만
+숫자 표는 없다. 필요하면 통합 차트에 표 토글을 붙이는 게 다음 라운드 과제다.
+
+### 47.4 회귀 테스트가 이번 재편의 안전장치
+
+`test_demoted_features_keep_working_apis`(`backend/tests/
+test_api_ingest_and_analysis.py`)가 강등된 기능들의 엔드포인트 + `/simulation/
+what-if`까지 전부 200을 주는지 확인한다. **UI 정리 과정에서 백엔드를 같이
+지워버리는 사고를 막는 게 목적**이라, 이 테스트는 화면이 아니라 API 계약을 본다.
+
+### 47.5 관리 탭은 접근 제한이 아니다
+
+이 앱에는 로그인/권한 체계가 없다(프론트에 인증 없음, 백엔드 인증은 `/ingest/*`
+Bearer 토큰뿐). 그래서 관리 탭은 **일상 동선에서 치우는 정리 목적일 뿐 접근을
+막지 않으며**, 오해를 막기 위해 화면 상단에도 그 문장을 그대로 띄운다.
+개인 취향 프로필 API(`/analysis/users/{employee_id}/taste-profile`)도 협의 결정에
+따라 인증 없이 열려 있고, UI에서만 내렸다 — 인증 도입 시 일괄 처리한다.
+
+### 47.6 남은 후속 과제
+
+- 연휴 전후 배수(0.85/0.90)는 실측 근거 없는 **v0 가정치** — 연휴 표본이 쌓이면 보정 필요
+- `expected_wait_minutes` 폭주(표본 희박 코너에서 1012분) — 화면은
+  `WAIT_MINUTES_PLAUSIBLE_MAX=120`으로 가렸고 근본 해결(처리량 표본 하한)은 미해결
+- 2~5순위(메뉴 회전 이력·건강가든 텍스트 입력·알람·VoE 정리·채팅 그라운딩 갱신)
+
+**파일 요약**: `backend/app/api/simulation.py`, `backend/tests/
+test_api_ingest_and_analysis.py`, `frontend/src/App.tsx`, `frontend/src/pages/
+HomePage.tsx`, `frontend/src/pages/AnalysisPage.tsx`, `frontend/src/pages/
+SimulationPage.tsx`(삭제), `frontend/src/api/client.ts`.

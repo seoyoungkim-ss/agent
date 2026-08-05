@@ -24,6 +24,7 @@ import {
   Table,
   useChartTheme,
 } from "../components/ui";
+import { CornerMetricComparisonSection } from "./AnalysisPage";
 
 function mondayOf(date: Date): string {
   const d = new Date(date);
@@ -113,8 +114,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   }
   const [menuName, setMenuName] = useState("");
   const [searchedMenu, setSearchedMenu] = useState<string | null>(null);
-  const [exportStart, setExportStart] = useState(isoDaysAgo(30));
-  const [exportEnd, setExportEnd] = useState(isoDaysAgo(0));
   const [selectedMonday, setSelectedMonday] = useState(mondayOf(new Date()));
   // 식당은 일요일에 운영하지 않으므로 월~토 6일만 조회한다.
   const saturdayOfSelected = addDays(selectedMonday, 5);
@@ -163,14 +162,25 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   // 공휴일 캘린더에서 자동 판정해 배수를 적용한다.
   const [forecastWeather, setForecastWeather] = useState<Weather>("맑음");
   const [forecastMealType, setForecastMealType] = useState<MealType>("중식");
+  // 사내 행사(전사 워크숍·교육 등)는 시뮬레이션 탭의 what-if에 있던 유일한 실질
+  // 입력이었다. 탭을 없애면서 이 토글만 여기로 흡수했다(2026-08).
+  const [hasCompanyEvent, setHasCompanyEvent] = useState(false);
   const weeklyForecast = useQuery({
-    queryKey: ["weekly-congestion-forecast", selectedMonday, saturdayOfSelected, forecastMealType, forecastWeather],
+    queryKey: [
+      "weekly-congestion-forecast",
+      selectedMonday,
+      saturdayOfSelected,
+      forecastMealType,
+      forecastWeather,
+      hasCompanyEvent,
+    ],
     queryFn: () =>
       api.weeklyCongestionForecast({
         period_start: selectedMonday,
         period_end: saturdayOfSelected,
         meal_type: forecastMealType,
         weather: forecastWeather,
+        has_company_event: hasCompanyEvent,
       }),
   });
   // 점유율/대기시간은 주간 식단표 예측 요약을 그대로 재사용한다(백엔드 변경 없음).
@@ -460,8 +470,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
     classification !== "전체" ? `&classification=${encodeURIComponent(classification)}` : ""
   }${mealTypeFilter.map((m) => `&meal_types=${encodeURIComponent(m)}`).join("")}`;
 
-  const mealLogExportUrl = `/api/dashboard/meal-log/export?period_start=${exportStart}&period_end=${exportEnd}`;
-
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -737,6 +745,14 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
               onChange={setForecastWeather}
             />
           </label>
+          <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            <input
+              type="checkbox"
+              checked={hasCompanyEvent}
+              onChange={(e) => setHasCompanyEvent(e.target.checked)}
+            />
+            사내 행사 있음 (식수 −10% 가정)
+          </label>
         </div>
         {weeklyForecast.isLoading && <LoadingState />}
         {weeklyForecast.isError && <ErrorState error={weeklyForecast.error} />}
@@ -790,6 +806,9 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
           )}
         </div>
       </Card>
+
+      {/* 코너별 지표 비교 — 2026-08 재편으로 "분석 > 코너별" 탭에서 현황으로 옮겨왔다. */}
+      <CornerMetricComparisonSection />
 
       <Card title="메뉴 하이라이트">
         <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
@@ -963,39 +982,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
         )}
       </Card>
 
-      <Card title="전체 취식 데이터 다운로드 (기간 선택)">
-        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          요약이 아닌 개별 취식 기록(취식일시·사번·구분·회사명·식사구분·코너·메뉴·맛평가·의견)을 선택한 기간 그대로 엑셀로 내려받습니다.
-        </p>
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-            시작일
-            <input
-              type="date"
-              className="rounded-md border px-3 py-2 text-[13px]"
-              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-              value={exportStart}
-              max={exportEnd}
-              onChange={(e) => setExportStart(e.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-            종료일
-            <input
-              type="date"
-              className="rounded-md border px-3 py-2 text-[13px]"
-              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-              value={exportEnd}
-              min={exportStart}
-              max={isoDaysAgo(0)}
-              onChange={(e) => setExportEnd(e.target.value)}
-            />
-          </label>
-          <a href={mealLogExportUrl} download>
-            <Button variant="secondary">엑셀 다운로드</Button>
-          </a>
-        </div>
-      </Card>
     </div>
   );
 }

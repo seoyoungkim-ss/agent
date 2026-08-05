@@ -314,6 +314,7 @@ def weekly_congestion_forecast(
     period_end: dt.date,
     meal_type: MealType,
     weather: Weather = Weather.SUNNY,
+    has_company_event: bool = False,
     db: Session = Depends(get_db),
 ):
     """현황 화면의 "금주 예상 식수" — 기간 내 날짜별 코너 예측을 한 번에 돌려준다.
@@ -326,7 +327,9 @@ def weekly_congestion_forecast(
     날씨는 기상청 연동이 없어 사용자가 고른 값을 그대로 적용한다(2026-08 결정).
     """
     holiday_svc = HolidayService(db)
-    weather_multiplier = _WEATHER_MULTIPLIER[weather]
+    # 사내 행사 배수는 what_if와 같은 값을 쓴다 — 시뮬레이션 탭이 없어지면서
+    # 그 화면의 유일한 실질 입력이던 "사내 행사"를 여기로 흡수했다(2026-08).
+    weather_multiplier = _WEATHER_MULTIPLIER[weather] * (0.90 if has_company_event else 1.0)
 
     days = []
     cursor = period_start
@@ -355,6 +358,7 @@ def weekly_congestion_forecast(
         "period_end": period_end.isoformat(),
         "meal_type": meal_type.value,
         "weather": weather.value,
+        "has_company_event": has_company_event,
         "days": days,
         "note": "v0 휴리스틱 — 날씨/연휴 전후 배수는 실측 보정 전 가정치입니다.",
     }
