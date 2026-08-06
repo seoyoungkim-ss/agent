@@ -10,6 +10,7 @@ import {
   type MenuFoodVectorRow,
   type MenuPairRow,
   type MenuPerformanceRow,
+  type MenuRotationRow,
   type PredictedNumbersRow,
   type TrendDirection,
   type WeeklyMenuPlanItem,
@@ -570,7 +571,14 @@ function buildMenuPairGraphOption(
     name,
     symbolSize: 14 + (weight / maxWeight) * 22,
     itemStyle: { color: nodeColor },
-    label: { show: true, position: "right" as const, color: chartTheme.text, fontSize: 11 },
+    // formatter를 안 주면 ECharts가 값(숫자)을 찍는다 — 메뉴명이 나와야 한다.
+    label: {
+      show: true,
+      position: "right" as const,
+      color: chartTheme.text,
+      fontSize: 11,
+      formatter: (p: { name: string }) => p.name,
+    },
   }));
   const edges = pairs.map((p) => ({
     source: p.menu_a,
@@ -1588,6 +1596,66 @@ function MenuFoodVectorAdminSection() {
   );
 }
 
+/** 두 조합의 차이 — 어느 부찬이 빠지고 들어갔는지. 순수 함수라 테스트가 쉽다. */
+function diffSides(best: (string | null)[], worst: (string | null)[]) {
+  const b = new Set(best.filter(Boolean) as string[]);
+  const w = new Set(worst.filter(Boolean) as string[]);
+  return {
+    onlyBest: [...b].filter((x) => !w.has(x)),
+    onlyWorst: [...w].filter((x) => !b.has(x)),
+    common: [...b].filter((x) => w.has(x)),
+  };
+}
+
+/**
+ * 조합을 칩으로 렌더링하되 **한쪽에만 있는 부찬을 음영으로 강조**한다
+ * (2026-08 요청: "좋았던 조합과 나빴던 조합에서 변화된 부분을 눈에 띄게").
+ * 텍스트만 나열하면 부찬이 3~4개일 때 뭐가 달라졌는지 눈으로 못 찾는다.
+ */
+function ComboChips({
+  sides,
+  highlight,
+  tone,
+}: {
+  sides: (string | null)[];
+  highlight: string[];
+  tone: "good" | "critical";
+}) {
+  const names = sides.filter(Boolean) as string[];
+  if (names.length === 0) {
+    return (
+      <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+        부찬 없음
+      </span>
+    );
+  }
+  const highlightSet = new Set(highlight);
+  return (
+    <span className="flex flex-wrap gap-1">
+      {names.map((name) => {
+        const isDiff = highlightSet.has(name);
+        return (
+          <span
+            key={name}
+            className="rounded px-1.5 py-0.5 text-xs"
+            style={
+              isDiff
+                ? {
+                    background: `color-mix(in srgb, var(--${tone}) 18%, transparent)`,
+                    color: `var(--${tone})`,
+                    fontWeight: 600,
+                  }
+                : { color: "var(--ink-muted)" }
+            }
+          >
+            {name}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
 function MenuComboSection() {
   const [menuName, setMenuName] = useState("");
   const [searched, setSearched] = useState<string | null>(null);
@@ -1656,8 +1724,9 @@ function MenuComboSection() {
       <div className="mb-4 border-t pt-3" style={{ borderColor: "var(--border)" }}>
         <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
           <strong>부찬을 바꿀 때 효과가 큰 메인메뉴</strong> — 조합에 따라 만족도가 크게 갈리는 순서입니다.
-          편차가 작은 메뉴는 뭘 붙여도 결과가 같으니 손볼 필요가 없습니다. 행을 클릭하면 아래에 상세가
-          열립니다.
+          편차가 작은 메뉴는 뭘 붙여도 결과가 같으니 손볼 필요가 없습니다. <strong>한쪽에만 있는
+          부찬은 음영으로 표시</strong>했습니다 — 그게 실제로 달라진 부분입니다. 행을 클릭하면 아래에
+          상세가 열립니다.
         </p>
         {rankingQuery.isLoading && <LoadingState />}
         {rankingQuery.isError && <ErrorState error={rankingQuery.error} />}
@@ -1690,12 +1759,30 @@ function MenuComboSection() {
                 </button>
               ),
               spread: r.spread.toFixed(2),
-              best: `${r.best.sides.filter(Boolean).join(" + ") || "부찬 없음"} (${
-                r.best.avg_satisfaction?.toFixed(2) ?? "-"
-              })`,
-              worst: `${r.worst.sides.filter(Boolean).join(" + ") || "부찬 없음"} (${
-                r.worst.avg_satisfaction?.toFixed(2) ?? "-"
-              })`,
+              best: (
+                <span className="flex items-center gap-1.5">
+                  <ComboChips
+                    sides={r.best.sides}
+                    highlight={diffSides(r.best.sides, r.worst.sides).onlyBest}
+                    tone="good"
+                  />
+                  <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                    ({r.best.avg_satisfaction?.toFixed(2) ?? "-"})
+                  </span>
+                </span>
+              ),
+              worst: (
+                <span className="flex items-center gap-1.5">
+                  <ComboChips
+                    sides={r.worst.sides}
+                    highlight={diffSides(r.best.sides, r.worst.sides).onlyWorst}
+                    tone="critical"
+                  />
+                  <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                    ({r.worst.avg_satisfaction?.toFixed(2) ?? "-"})
+                  </span>
+                </span>
+              ),
             }))}
             rowKey={(r) => String(r.menuId)}
           />
@@ -2644,12 +2731,14 @@ const ROTATION_WARNING_FLAGS = new Set(["재편성 과다", "평소보다 이름
 // 필요해졌다(2026-08). 기본 6개월인 이유: 적재 이전 구간은 편성 이력이 비어 있어
 // 편성 횟수가 실제보다 적게 나온다.
 const PLAN_PERIOD_OPTIONS = [
-  { label: "3개월", value: "90" },
+  { label: "30일", value: "30" },
+  { label: "60일", value: "60" },
+  { label: "90일", value: "90" },
   { label: "6개월", value: "180" },
-  { label: "12개월", value: "365" },
 ];
 
-function usePlanPeriod(defaultDays = "180") {
+// 기본 90일 — 담당자 편성 기준이 "3개월에 2회"라 그 창과 맞춘다(2026-08 요청).
+function usePlanPeriod(defaultDays = "90") {
   const [days, setDays] = useState(defaultDays);
   return {
     days,
@@ -2681,11 +2770,19 @@ function DuplicationCheckSection() {
       api.weeklyMenuCombinationCheck({ period_start: selectedMonday, period_end: periodEnd }),
   });
 
+  // 경고는 두 축이다 — 간격(직전 이후 며칠)과 횟수(3개월에 몇 번).
+  // "14일은 넘겼지만 분기에 3번"은 간격만 봐선 안 잡힌다.
+  const isRotationWarning = (r: MenuRotationRow) =>
+    ROTATION_WARNING_FLAGS.has(r.flag) || r.over_frequency;
   const rotationItems = (rotation.data?.items ?? []).filter(
-    (r) => !warningsOnly || ROTATION_WARNING_FLAGS.has(r.flag),
+    (r) => !warningsOnly || isRotationWarning(r),
   );
-  const rotationWarnings = (rotation.data?.items ?? []).filter((r) =>
-    ROTATION_WARNING_FLAGS.has(r.flag),
+  // 담당자 우선순위: 메인 과다 편성이 1순위, 부찬은 그다음.
+  const mainRotation = rotationItems.filter((r) => r.menu_role === "메인");
+  const sideRotation = rotationItems.filter((r) => r.menu_role !== "메인");
+  const rotationWarnings = (rotation.data?.items ?? []).filter(isRotationWarning).length;
+  const mainWarnings = (rotation.data?.items ?? []).filter(
+    (r) => r.menu_role === "메인" && isRotationWarning(r),
   ).length;
   const clashSlots = (clash.data?.slots ?? []).filter(
     (s) => s.ingredient_clashes.length > 0 || s.vector_clashes.length > 0,
@@ -2714,17 +2811,18 @@ function DuplicationCheckSection() {
         <div>
           <p className="mb-1 text-[13px] font-medium">이 메뉴 최근에 또 내보내지 않았나</p>
           <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-            직전에 언제 나왔는지를 과거 편성 이력(식단표 기준
-            {rotation.data ? ` 최근 ${rotation.data.lookback_days}일` : ""})과 비교합니다. 절대 기준
-            {rotation.data ? ` ${rotation.data.min_rotation_gap_days}` : " 14"}일을 못 채우면 "재편성 과다",
-            기준은 넘었어도 그 메뉴의 평소 주기보다 눈에 띄게 이르면 "평소보다 이름"입니다.
+            두 축으로 봅니다 — <strong>간격</strong>(직전 편성 이후
+            {rotation.data ? ` ${rotation.data.min_rotation_gap_days}` : " 14"}일 미만이면 "재편성 과다")과
+            <strong>횟수</strong>(최근 {rotation.data ? rotation.data.rotation_window_days : 90}일에 메인은
+            2회, 부찬은 6회까지 무난). "14일은 넘겼지만 분기에 3번"은 간격만으론 안 잡힙니다.
+            <strong>메인 과다 편성이 1순위 문제</strong>라 위에 따로 놓았습니다.
           </p>
           {rotation.data && (
             <p
               className="mb-2 text-xs"
               style={{ color: rotationWarnings > 0 ? "var(--critical)" : "var(--ink-muted)" }}
             >
-              경고 {rotationWarnings}건 / 편성 {rotation.data.items.length}건
+              경고 {rotationWarnings}건(메인 {mainWarnings}건) / 편성 {rotation.data.items.length}건
             </p>
           )}
           {rotation.isLoading && <LoadingState />}
@@ -2736,29 +2834,58 @@ function DuplicationCheckSection() {
                 : "반복 편성 경고가 없습니다."}
             </p>
           )}
-          {rotationItems.length > 0 && (
-            <Table
-              columns={[
-                { key: "date", label: "날짜" },
-                { key: "menu", label: "메뉴" },
-                { key: "flag", label: "판정" },
-                { key: "gap", label: "직전 이후", align: "right" },
-              ]}
-              rows={rotationItems.map((r, i) => ({
-                key: `${r.plan_date}-${r.corner_id}-${r.menu_id}-${i}`,
-                date: weekdayLabel(r.plan_date),
-                menu: `${r.menu_name} (${r.corner_name})`,
-                flag: (
-                  <span style={{ color: ROTATION_FLAG_COLOR[r.flag] ?? "var(--ink-muted)" }}>{r.flag}</span>
-                ),
-                gap:
-                  r.gap_days == null
-                    ? "-"
-                    : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`,
-              }))}
-              rowKey={(r) => r.key as string}
-            />
-          )}
+          {(["메인", "부찬·건강가든"] as const).map((group) => {
+            const rows = group === "메인" ? mainRotation : sideRotation;
+            if (rows.length === 0) return null;
+            const isMain = group === "메인";
+            return (
+              <div key={group} className="mb-3">
+                <p
+                  className="mb-1 text-xs font-medium"
+                  style={{ color: isMain ? "var(--critical)" : "var(--ink-secondary)" }}
+                >
+                  {isMain ? "메인메뉴 (1순위)" : "부찬 · 건강가든"}
+                </p>
+                <Table
+                  columns={[
+                    { key: "date", label: "날짜" },
+                    { key: "menu", label: "메뉴" },
+                    { key: "flag", label: "판정" },
+                    { key: "gap", label: "직전 이후", align: "right" },
+                    { key: "freq", label: "3개월", align: "right" },
+                  ]}
+                  rows={rows.map((r, i) => ({
+                    key: `${r.plan_date}-${r.corner_id}-${r.menu_id}-${i}`,
+                    date: weekdayLabel(r.plan_date),
+                    menu: `${r.menu_name} (${r.corner_name})`,
+                    flag: (
+                      <span style={{ color: ROTATION_FLAG_COLOR[r.flag] ?? "var(--ink-muted)" }}>
+                        {r.flag}
+                      </span>
+                    ),
+                    gap:
+                      r.gap_days == null
+                        ? "-"
+                        : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`,
+                    freq: (
+                      <span
+                        style={{
+                          color: r.over_frequency
+                            ? isMain
+                              ? "var(--critical)"
+                              : "var(--warning)"
+                            : "var(--ink-muted)",
+                        }}
+                      >
+                        {r.window_count}/{r.window_max}회
+                      </span>
+                    ),
+                  }))}
+                  rowKey={(r) => r.key as string}
+                />
+              </div>
+            );
+          })}
           {rotation.data && rotation.data.overused.length > 0 && (
             <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--border)" }}>
               <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
@@ -2860,51 +2987,118 @@ function MenuPlanPerformanceSection() {
   });
 
   const items = query.data?.items ?? [];
-  const scatterPoints = items
-    .filter((r) => r.avg_satisfaction != null)
-    .map((r) => ({
-      name: r.menu_name,
-      value: [r.plan_count, r.avg_satisfaction as number, r.headcount_per_plan],
-      itemStyle: { color: resolveColor(PLANNING_ACTION_COLOR[r.action] ?? "var(--ink-muted)") },
-    }));
+  const medianPlan = query.data?.median_plan_count ?? 0;
+  const medianScore = query.data?.median_satisfaction ?? 0;
   const maxPerPlan = Math.max(1, ...items.map((r) => r.headcount_per_plan));
+
+  // 판정별로 시리즈를 나눈다 — 그래야 범례가 생기고, 범례를 눌러 한 분류만
+  // 골라 볼 수 있다. 예전엔 시리즈 하나에 색만 달라서 "이 색이 무슨 뜻인지"를
+  // 알 방법이 없었다(2026-08 "그래프가 직관적이지 않음" 피드백).
+  const PLOTTED_ACTIONS = ["감편 검토", "증편 후보", "주력 유지", "현행 유지"] as const;
+  const actionSeries = PLOTTED_ACTIONS.map((action) => ({
+    name: action,
+    type: "scatter" as const,
+    itemStyle: { color: resolveColor(PLANNING_ACTION_COLOR[action] ?? "var(--ink-muted)") },
+    symbolSize: (v: number[]) => 8 + Math.sqrt(v[2] / maxPerPlan) * 22,
+    // 점마다 메뉴명을 상시 표시하고 겹치면 자동으로 비킨다 — 4분면 차트(§42)와
+    // 같은 처리라 두 화면의 조작감이 같다.
+    // formatter를 안 주면 ECharts가 값(숫자)을 찍는다 — 메뉴명이 나와야 한다.
+    label: {
+      show: true,
+      position: "right" as const,
+      color: chartTheme.text,
+      fontSize: 11,
+      formatter: (p: { name: string }) => p.name,
+    },
+    labelLayout: { moveOverlap: "shiftY" as const, hideOverlap: true },
+    data: items
+      .filter((r) => r.action === action && r.avg_satisfaction != null)
+      .map((r) => ({
+        name: r.menu_name,
+        value: [r.plan_count, r.avg_satisfaction as number, r.headcount_per_plan],
+      })),
+  })).filter((serie) => serie.data.length > 0);
+
+  // 사분면 배경 음영 + 모서리 이름. 중앙값 십자선만 있으면 "어느 쪽이 감편인지"를
+  // 매번 머리로 계산해야 한다.
+  const maxPlan = Math.max(medianPlan * 2, ...items.map((r) => r.plan_count), 1);
+  const quadrantMarkArea = {
+    silent: true,
+    itemStyle: { opacity: 0.06 },
+    label: {
+      show: true,
+      position: "inside" as const,
+      color: chartTheme.text,
+      fontSize: 11,
+      opacity: 0.9,
+    },
+    data: [
+      // 자주 편성 + 반응 낮음 → 감편
+      [
+        { xAxis: medianPlan, yAxis: 0, itemStyle: { color: resolveColor("var(--critical)") },
+          label: { formatter: "감편 검토\n(자주 내는데 반응 낮음)", position: "insideBottomRight" as const } },
+        { xAxis: maxPlan, yAxis: medianScore },
+      ],
+      // 드물게 편성 + 반응 높음 → 증편
+      [
+        { xAxis: 0, yAxis: medianScore, itemStyle: { color: resolveColor("var(--good)") },
+          label: { formatter: "증편 후보\n(드문데 반응 좋음)", position: "insideTopLeft" as const } },
+        { xAxis: medianPlan, yAxis: 5 },
+      ],
+      // 자주 + 높음 → 주력 유지
+      [
+        { xAxis: medianPlan, yAxis: medianScore, itemStyle: { color: resolveColor("var(--accent)") },
+          label: { formatter: "주력 유지", position: "insideTopRight" as const } },
+        { xAxis: maxPlan, yAxis: 5 },
+      ],
+    ],
+  };
 
   const option = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 56, right: 28, top: 24, bottom: 44 },
+    grid: { left: 56, right: 40, top: 44, bottom: 48 },
+    legend: { top: 0, textStyle: { color: chartTheme.text } },
     tooltip: {
       trigger: "item",
-      formatter: (p: { name: string; value: number[] }) =>
-        `${p.name}<br/>편성 ${p.value[0]}회 · 만족도 ${p.value[1].toFixed(2)}<br/>1회 편성당 ${p.value[2]}명`,
+      formatter: (p: { name: string; value: number[]; seriesName: string }) =>
+        `${p.name} · ${p.seriesName}<br/>편성 ${p.value[0]}회 · 만족도 ${p.value[1].toFixed(2)}` +
+        `<br/>1회 편성당 ${p.value[2]}명 (점 크기)`,
     },
     xAxis: {
       type: "value",
-      name: "편성 횟수",
+      name: "편성 횟수 →",
       nameLocation: "middle",
-      nameGap: 26,
+      nameGap: 28,
+      min: 0,
       axisLabel: { color: chartTheme.text },
       splitLine: { lineStyle: { color: chartTheme.grid } },
     },
     yAxis: {
       type: "value",
       name: "만족도",
+      min: 0,
+      max: 5,
       axisLabel: { color: chartTheme.text },
       splitLine: { lineStyle: { color: chartTheme.grid } },
     },
     series: [
+      ...actionSeries,
       {
+        // 사분면 배경 + 중앙값 십자선 전용(데이터 없는 시리즈) — 각 산점도
+        // 시리즈에 붙이면 분류 수만큼 겹쳐 그려진다.
+        name: "기준선",
         type: "scatter" as const,
-        data: scatterPoints,
-        symbolSize: (v: number[]) => 8 + (v[2] / maxPerPlan) * 24,
+        data: [],
+        silent: true,
+        markArea: quadrantMarkArea,
         markLine: {
           silent: true,
           symbol: "none" as const,
           lineStyle: { color: chartTheme.axis, type: "dashed" as const },
-          // 기본 위치(선 끝)면 라벨이 그리드 밖으로 잘린다 — 안쪽에 붙인다.
           label: { color: chartTheme.text, fontSize: 10, position: "insideEndTop" as const },
           data: [
-            { xAxis: query.data?.median_plan_count ?? 0, label: { formatter: "편성 중앙값" } },
-            { yAxis: query.data?.median_satisfaction ?? 0, label: { formatter: "만족도 중앙값" } },
+            { xAxis: medianPlan, label: { formatter: "편성 중앙값" } },
+            { yAxis: medianScore, label: { formatter: "만족도 중앙값" } },
           ],
         },
       },
@@ -2948,7 +3142,7 @@ function MenuPlanPerformanceSection() {
             <strong>취식 0은 진짜 안 팔린 것일 수도, 메뉴명 표기가 달라 매칭이 안 된 것일 수도</strong>{" "}
             있으니 아래 목록에서 확인하세요.
           </div>
-          {scatterPoints.length > 0 && <ReactECharts option={option} style={{ height: 340 }} />}
+          {actionSeries.length > 0 && <ReactECharts option={option} style={{ height: 400 }} />}
 
           {actionRows.length > 0 && (
             <div className="mt-4">

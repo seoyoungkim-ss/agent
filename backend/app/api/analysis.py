@@ -81,9 +81,13 @@ from app.services.menu_plan_analytics import (
 )
 from app.services.menu_rotation import (
     MIN_ROTATION_GAP_DAYS,
+    ROTATION_WINDOW_DAYS,
     RotationFlag,
     classify_rotation,
+    count_in_window,
     find_overused_menus,
+    is_over_frequency,
+    max_in_window_for_role,
 )
 from app.services.weekly_menu_review import (
     add_feedback,
@@ -1285,7 +1289,8 @@ def weekly_menu_rotation(
             continue  # 과거 이력은 판정 기준으로만 쓰고 결과에는 안 넣는다
         role_value = menu_role.value if hasattr(menu_role, "value") else str(menu_role)
         planned_in_period.append((plan_date, menu_name, role_value))
-        verdict = classify_rotation(plan_date, dates_by_menu.get(menu_id, []))
+        menu_dates = dates_by_menu.get(menu_id, [])
+        verdict = classify_rotation(plan_date, menu_dates)
         results.append(
             {
                 "plan_date": plan_date.isoformat(),
@@ -1301,6 +1306,11 @@ def weekly_menu_rotation(
                     round(verdict.avg_interval_days, 1) if verdict.avg_interval_days is not None else None
                 ),
                 "previous_date": verdict.previous_date.isoformat() if verdict.previous_date else None,
+                # 횟수 기준(담당자: "3개월에 2회까지는 무난") — 간격 기준과 성격이
+                # 달라 따로 싣는다. "14일은 넘겼지만 분기에 5번"은 간격으론 안 잡힌다.
+                "window_count": count_in_window(plan_date, menu_dates),
+                "window_max": max_in_window_for_role(role_value),
+                "over_frequency": is_over_frequency(plan_date, menu_dates, role_value),
             }
         )
 
@@ -1321,6 +1331,7 @@ def weekly_menu_rotation(
         "period_end": period_end.isoformat(),
         "lookback_days": lookback_days,
         "min_rotation_gap_days": MIN_ROTATION_GAP_DAYS,
+        "rotation_window_days": ROTATION_WINDOW_DAYS,
         "items": results,
         "overused": [
             {

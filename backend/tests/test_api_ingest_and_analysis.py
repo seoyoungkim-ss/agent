@@ -3249,3 +3249,38 @@ def test_origin_annotation_rows_no_longer_become_side_dishes(client):
     slot = listed[0]
     assert slot["main"]["menu_name"] == "우삼겹구이"
     assert [s["menu_name"] for s in slot["sides"]] == ["오징어"]
+
+
+def test_rotation_reports_frequency_over_three_months_for_main_menu(client):
+    """담당자 기준 "3개월에 2회까지 무난" — 메인이 3회면 과다로 표시된다.
+
+    간격 기준(14일)만으로는 "14일은 넘겼지만 분기에 3번"이 안 잡힌다.
+    """
+    rows = [
+        _plan_row(MONDAY - dt.timedelta(days=60), "갈비탕", "메인"),
+        _plan_row(MONDAY - dt.timedelta(days=30), "갈비탕", "메인"),
+        _plan_row(MONDAY, "갈비탕", "메인"),
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    item = next(i for i in data["items"] if i["menu_name"] == "갈비탕")
+    assert item["window_count"] == 3
+    assert item["window_max"] == 2
+    assert item["over_frequency"] is True
+    # 간격은 30일이라 "재편성 과다"(14일 기준)에는 안 걸린다 — 두 축이 다르다
+    assert item["flag"] != "재편성 과다"
+
+
+def test_rotation_frequency_threshold_is_looser_for_side_dishes(client):
+    """김치·나물 같은 부찬은 자주 돌려쓰는 게 정상이다."""
+    rows = [
+        _plan_row(MONDAY - dt.timedelta(days=60), "김치", "부찬"),
+        _plan_row(MONDAY - dt.timedelta(days=30), "김치", "부찬"),
+        _plan_row(MONDAY, "김치", "부찬"),
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    item = next(i for i in data["items"] if i["menu_name"] == "김치")
+    assert item["window_count"] == 3
+    assert item["window_max"] == 6
+    assert item["over_frequency"] is False

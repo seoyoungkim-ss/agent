@@ -152,3 +152,50 @@ def find_overused_menus(
         )
     results.sort(key=lambda o: (-o.count, o.menu_name))
     return results
+
+
+# ---------------------------------------------------------------------------
+# 편성 빈도 — 횟수 기준 (2026-08 담당자 기준 반영)
+# ---------------------------------------------------------------------------
+# 담당자 기준: **"3개월에 2회까지는 무난한 편성"**. 위쪽 `MIN_ROTATION_GAP_DAYS`는
+# *간격*(직전 등장 이후 며칠) 기준이라 성격이 다르다 — "14일은 넘겼지만 분기에
+# 5번 나온다"는 간격 기준으로는 안 잡힌다. 그래서 *횟수* 기준을 따로 둔다.
+#
+# 메인과 부찬의 기준이 다른 이유: 김치·나물 같은 부찬은 자주 돌려쓰는 게 정상이고,
+# 담당자도 "메인메뉴 과다 편성이 1순위 문제, 부찬도 자주 돌려쓰면 문제"라고 했다.
+ROTATION_WINDOW_DAYS = 90  # 3개월
+MAIN_MAX_IN_WINDOW = 2  # 메인은 3개월에 2회까지 무난 → 3회부터 과다
+SIDE_MAX_IN_WINDOW = 6  # 부찬은 3개월에 6회까지 무난(약 2주에 1회)
+
+
+def count_in_window(
+    target_date: dt.date,
+    dates: Sequence[dt.date],
+    *,
+    window_days: int = ROTATION_WINDOW_DAYS,
+) -> int:
+    """target_date를 포함해 직전 window_days 안에 몇 번 편성됐는지.
+
+    같은 날 여러 코너에 편성된 건 1회로 센다 — "얼마나 자주 내보내나"가 질문이라
+    한 날에 두 코너에 깔린 건 하루치 노출이다(그 중복은 SAME_DAY가 따로 본다).
+    """
+    window_start = target_date - dt.timedelta(days=window_days - 1)
+    return len({d for d in dates if window_start <= d <= target_date})
+
+
+def max_in_window_for_role(menu_role: str) -> int:
+    """역할별 허용 횟수 — 메인이 가장 빡빡하다."""
+    return MAIN_MAX_IN_WINDOW if menu_role == "메인" else SIDE_MAX_IN_WINDOW
+
+
+def is_over_frequency(
+    target_date: dt.date,
+    dates: Sequence[dt.date],
+    menu_role: str,
+    *,
+    window_days: int = ROTATION_WINDOW_DAYS,
+) -> bool:
+    """3개월 창에서 역할별 허용 횟수를 넘겼는가."""
+    return count_in_window(target_date, dates, window_days=window_days) > max_in_window_for_role(
+        menu_role
+    )

@@ -348,6 +348,10 @@ export interface MenuRotationRow {
   gap_days: number | null;
   avg_interval_days: number | null;
   previous_date: string | null;
+  // 횟수 기준(담당자: "3개월에 2회까지는 무난") — 간격 기준과 별개 축이다.
+  window_count: number;
+  window_max: number;
+  over_frequency: boolean;
 }
 
 export interface MenuRotationResponse {
@@ -355,6 +359,7 @@ export interface MenuRotationResponse {
   period_end: string;
   lookback_days: number;
   min_rotation_gap_days: number;
+  rotation_window_days: number;
   items: MenuRotationRow[];
   overused: { menu_name: string; menu_role: string; count: number; dates: string[] }[];
 }

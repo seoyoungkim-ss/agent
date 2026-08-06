@@ -4,7 +4,10 @@ from app.services.menu_rotation import (
     RotationFlag,
     average_interval_days,
     classify_rotation,
+    count_in_window,
     find_overused_menus,
+    is_over_frequency,
+    max_in_window_for_role,
 )
 
 
@@ -97,3 +100,44 @@ def test_find_overused_menus_counts_across_roles():
     result = find_overused_menus(planned, threshold=3)
     assert result[0].count == 4
     assert result[0].menu_role == "건강가든"  # 최빈 역할로 대표 표기
+
+
+# ---------------------------------------------------------------------------
+# 편성 빈도 — 횟수 기준 (담당자: "3개월에 2회까지는 무난")
+# ---------------------------------------------------------------------------
+
+
+def test_count_in_window_counts_days_not_rows():
+    """같은 날 두 코너에 깔린 건 1회 — "얼마나 자주 내보내나"가 질문이다."""
+    dates = [d(1), d(1), d(10)]
+    assert count_in_window(d(10), dates) == 2
+
+
+def test_count_in_window_excludes_dates_outside_90_days():
+    old = dt.date(2026, 1, 1)
+    assert count_in_window(d(10), [old, d(1), d(10)]) == 2
+
+
+def test_main_menu_allows_two_in_three_months():
+    """담당자 기준 그대로 — 2회까지는 무난, 3회부터 과다."""
+    two = [d(1), d(40)]
+    assert is_over_frequency(d(40), two, "메인") is False
+    three = [d(1), d(40), d(80)]
+    assert is_over_frequency(d(80), three, "메인") is True
+
+
+def test_side_dish_threshold_is_looser_than_main():
+    """김치·나물 같은 부찬은 자주 돌려쓰는 게 정상이다."""
+    four = [d(1), d(20), d(40), d(60)]
+    assert is_over_frequency(d(60), four, "메인") is True
+    assert is_over_frequency(d(60), four, "부찬") is False
+
+
+def test_side_dish_still_flagged_when_used_too_often():
+    seven = [d(1 + i * 10) for i in range(7)]
+    assert is_over_frequency(seven[-1], seven, "부찬") is True
+
+
+def test_health_garden_uses_side_threshold():
+    """건강가든은 부찬과 같은 성격으로 본다."""
+    assert max_in_window_for_role("건강가든") == max_in_window_for_role("부찬")
