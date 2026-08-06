@@ -1,7 +1,18 @@
 import datetime as dt
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import ARRAY, Boolean, Date, DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    ARRAY,
+    Boolean,
+    Date,
+    DateTime,
+    Enum as SAEnum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -22,6 +33,21 @@ class WeeklyMenuPlan(Base):
     """
 
     __tablename__ = "weekly_menu_plan"
+    # 한 슬롯(날짜·코너·식사구분)에 같은 메뉴가 같은 역할로 두 번 있을 이유가 없다.
+    # 2026-08에 재적재가 관리자 수동 수정 행과 새 파싱 행을 함께 남겨 부찬이 두
+    # 벌씩 생겼는데 **에러 없이 조용히** 망가졌다 — 같은 사고가 다시 나면 이번엔
+    # 즉시 터지게 한다. 정상 입력이 여기 걸리지 않도록 api/ingest.py가 payload 내
+    # 중복을 먼저 제거한다.
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_date",
+            "corner_id",
+            "meal_type",
+            "menu_id",
+            "menu_role",
+            name="uq_weekly_menu_plan_slot_menu_role",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     plan_date: Mapped[dt.date] = mapped_column(Date, index=True)

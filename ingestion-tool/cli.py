@@ -44,12 +44,27 @@ from parsing.weekly_menu_parser import (
     infer_week_start,
     parse_weekly_menu_grid,
 )
-from upload import upload_meal_log, upload_weekly_menu
+from upload import UploadSummary, upload_meal_log, upload_weekly_menu
 
 
 def _confirm(prompt: str) -> bool:
     answer = input(f"{prompt} [y/N] ").strip().lower()
     return answer == "y"
+
+
+def _print_skip_notice(result: UploadSummary) -> None:
+    """재업로드했는데 화면이 그대로일 때 그 이유를 알려준다.
+
+    말 안 해주면 "적재가 안 됐나?"로 읽힌다 — 실제로는 관리자가 화면에서 고친
+    값을 지키느라 그 메뉴만 안 덮은 것이다.
+    """
+    if result.skipped_manual:
+        print(
+            f"   ↳ {result.skipped_manual}행은 화면에서 직접 고친 값이 있어 그대로 뒀습니다"
+            " (덮어쓰려면 화면에서 먼저 되돌리세요)"
+        )
+    if result.skipped_duplicate:
+        print(f"   ↳ {result.skipped_duplicate}행은 식단표에 같은 항목이 중복으로 적혀 있어 한 번만 넣었습니다")
 
 
 def _warn_if_ssl_disabled(verify_ssl: bool) -> None:
@@ -161,14 +176,15 @@ def _cmd_weekly_menu(args: argparse.Namespace) -> int:
 
     config = load_config()
     _warn_if_ssl_disabled(config.verify_ssl)
-    sent = upload_weekly_menu(
+    result = upload_weekly_menu(
         rows,
         backend_base_url=config.backend_base_url,
         api_token=config.api_token,
         verify_ssl=config.verify_ssl,
         replace_existing=args.replace_existing,
     )
-    print(f"✅ {sent}행 전송 완료")
+    print(f"✅ {result.sent}행 전송 완료")
+    _print_skip_notice(result)
     return 0
 
 
@@ -324,11 +340,13 @@ def _cmd_weekly_menu_batch(args: argparse.Namespace) -> int:
     _warn_if_ssl_disabled(config.verify_ssl)
 
     sent_total = 0
+    skipped_manual_total = 0
+    skipped_duplicate_total = 0
     failed: list[tuple[Path, str]] = []
     for path, week_start, rows in parsed:
         # 파일 단위로 보낸다 — 중간에 실패해도 어느 주가 안 올라갔는지 바로 안다.
         try:
-            sent = upload_weekly_menu(
+            result = upload_weekly_menu(
                 rows,
                 backend_base_url=config.backend_base_url,
                 api_token=config.api_token,
@@ -339,10 +357,13 @@ def _cmd_weekly_menu_batch(args: argparse.Namespace) -> int:
             failed.append((path, str(exc)))
             print(f"  ❌ {path.name} ({week_start.isoformat()} 주): {exc}")
             continue
-        sent_total += sent
-        print(f"  ✅ {path.name} ({week_start.isoformat()} 주) {sent}행")
+        sent_total += result.sent
+        skipped_manual_total += result.skipped_manual
+        skipped_duplicate_total += result.skipped_duplicate
+        print(f"  ✅ {path.name} ({week_start.isoformat()} 주) {result.sent}행")
 
     print(f"\n전송 완료 {len(parsed) - len(failed)}개 파일 / {sent_total}행")
+    _print_skip_notice(UploadSummary(sent_total, skipped_manual_total, skipped_duplicate_total))
     if skipped:
         print(f"건너뜀 {len(skipped)}개 (위 목록 참고)")
     if failed:
@@ -385,13 +406,13 @@ def _cmd_meal_log(args: argparse.Namespace) -> int:
         return 0
 
     _warn_if_ssl_disabled(config.verify_ssl)
-    sent = upload_meal_log(
+    result = upload_meal_log(
         rows,
         backend_base_url=config.backend_base_url,
         api_token=config.api_token,
         verify_ssl=config.verify_ssl,
     )
-    print(f"✅ {sent}행 전송 완료")
+    print(f"✅ {result.sent}행 전송 완료")
     return 0
 
 

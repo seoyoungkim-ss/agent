@@ -141,3 +141,54 @@ def test_side_dish_still_flagged_when_used_too_often():
 def test_health_garden_uses_side_threshold():
     """건강가든은 부찬과 같은 성격으로 본다."""
     assert max_in_window_for_role("건강가든") == max_in_window_for_role("부찬")
+
+
+# ---------------------------------------------------------------------------
+# 과다 편성 횟수는 행이 아니라 고유 날짜로 센다 (2026-08 신고)
+# ---------------------------------------------------------------------------
+# "중복점검에서도 같은날 메뉴가 두번씩 카운트됨". 원인은 find_overused_menus가
+# len(entries)로 행을 센 것 — 바로 아래 count_in_window는 처음부터 날짜 집합으로
+# 세고 있어서 **같은 모듈 안에서 규칙이 반대**였다.
+
+
+def test_same_menu_on_the_same_day_in_two_corners_counts_once():
+    """한 날에 두 코너에 깔린 건 하루치 노출이다 — 2회가 아니다.
+
+    같은 날 중복이 안 보이게 되는 건 아니다: SAME_DAY 플래그가 그 축을 담당한다.
+    """
+    planned = [
+        (dt.date(2026, 7, 6), "김치", "부찬"),
+        (dt.date(2026, 7, 6), "김치", "부찬"),  # 다른 코너, 같은 날
+        (dt.date(2026, 7, 7), "김치", "부찬"),
+    ]
+    result = find_overused_menus(planned, threshold=1)
+    assert len(result) == 1
+    assert result[0].count == 2, "고유 날짜 2일이어야 하는데 행 수(3)로 셌다"
+    assert result[0].dates == [dt.date(2026, 7, 6), dt.date(2026, 7, 7)]
+
+
+def test_duplicate_rows_do_not_inflate_the_count():
+    """DB에 중복 행이 남아 있어도 편성 횟수가 부풀지 않아야 한다."""
+    planned = [(dt.date(2026, 7, 6), "김치", "부찬")] * 5
+    assert find_overused_menus(planned, threshold=1) == []
+
+
+def test_threshold_is_applied_to_unique_days():
+    """임계 비교도 고유 날짜 기준이라야 일관된다."""
+    same_day = [(dt.date(2026, 7, 6), "김치", "부찬")] * 3
+    assert find_overused_menus(same_day, threshold=2) == []
+
+    three_days = [
+        (dt.date(2026, 7, 6), "김치", "부찬"),
+        (dt.date(2026, 7, 7), "김치", "부찬"),
+        (dt.date(2026, 7, 8), "김치", "부찬"),
+    ]
+    assert len(find_overused_menus(three_days, threshold=2)) == 1
+
+
+def test_overuse_count_agrees_with_count_in_window():
+    """같은 화면의 두 숫자가 서로 다른 규칙이면 담당자가 못 믿는다."""
+    dates = [dt.date(2026, 7, 6), dt.date(2026, 7, 6), dt.date(2026, 7, 20)]
+    planned = [(d, "김치", "부찬") for d in dates]
+    overused = find_overused_menus(planned, threshold=1)
+    assert overused[0].count == count_in_window(dt.date(2026, 7, 20), dates)

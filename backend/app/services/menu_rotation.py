@@ -130,6 +130,14 @@ def find_overused_menus(
     구분하지 않고 한 번에 받는 이유는, 담당자 요청이 "메인메뉴/부찬/건강가든
     **조합**의 중복 최소화"라 역할을 가로질러 봐야 하기 때문이다 — 같은 나물이
     어떤 날은 부찬, 어떤 날은 건강가든으로 들어가도 먹는 사람에겐 중복이다.
+
+    ⚠️ **횟수는 행이 아니라 고유 날짜로 센다.** 예전엔 `len(entries)`로 행을 세서,
+    같은 날 두 코너에 깔린 메뉴가 2회로 잡혔다("같은날 메뉴가 두번씩 카운트됨"
+    실사용 신고, 2026-08). 바로 아래 `count_in_window`는 처음부터 날짜 집합으로
+    세고 있었으니 **같은 모듈 안에서 규칙이 반대**였던 셈이다.
+
+    같은 날 여러 코너에 깔린 중복이 안 보이게 되는 건 아니다 —
+    `classify_rotation`의 SAME_DAY 플래그가 그 축을 따로 담당한다.
     """
     buckets: dict[str, list[tuple[dt.date, str]]] = {}
     for plan_date, menu_name, menu_role in planned:
@@ -137,7 +145,8 @@ def find_overused_menus(
 
     results = []
     for menu_name, entries in buckets.items():
-        if len(entries) <= threshold:
+        unique_dates = sorted({d for d, _ in entries})
+        if len(unique_dates) <= threshold:
             continue
         # 역할이 섞여 있으면 가장 많이 쓰인 역할로 대표 표기한다.
         roles = [role for _, role in entries]
@@ -146,8 +155,8 @@ def find_overused_menus(
             OverusedMenu(
                 menu_name=menu_name,
                 menu_role=dominant_role,
-                count=len(entries),
-                dates=sorted(d for d, _ in entries),
+                count=len(unique_dates),
+                dates=unique_dates,
             )
         )
     results.sort(key=lambda o: (-o.count, o.menu_name))

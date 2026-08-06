@@ -3157,22 +3157,52 @@ def test_request_scoped_caches_do_not_leak_across_requests(client):
     assert total_after == total_before + 1, "직전 요청의 캐시가 남아 새 취식이 안 보인다"
 
 
-def test_reingest_without_replace_duplicates_rows(client):
-    """기본 동작 확인 — dedup이 없으므로 그냥 다시 올리면 행이 쌓인다.
+def test_reingest_without_replace_no_longer_duplicates_rows(client):
+    """replace_existing을 안 켜도 같은 파일을 다시 올리면 행이 안 쌓인다.
 
-    이 성질 때문에 원산지 파싱 수정 후 재업로드가 필요해지면서
-    replace_existing이 생겼다. 기본값을 바꾸면 여기서 깨진다.
+    ⚠️ 이 테스트는 예전에 정반대를 주장했다 — "dedup이 없으므로 행이 쌓인다"를
+    **의도된 성질로** 고정하고 있었다. 그런데 그 성질이 곧 2026-08 신고
+    ("부찬이 두번씩 들어갔고")의 다른 얼굴이었다. 이제 이미 있는 행은 건너뛴다.
+
+    replace_existing은 여전히 의미가 있다 — 그건 **없어진 메뉴를 지우는** 쪽이고,
+    이 경로는 **있는 걸 또 넣지 않는** 쪽이다.
     """
     body = {"rows": [_plan_row(MONDAY, "제육볶음", "메인"), _plan_row(MONDAY, "계란후라이", "부찬")]}
     client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
-    client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+    second = client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+    assert second.status_code == 200, second.text
+    assert second.json()["skipped_duplicate"] == 2
 
     listed = client.get(
         "/api/analysis/weekly-menu",
         params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
     ).json()
     slot = listed[0]
-    assert len(slot["sides"]) == 3, "메인 중복분이 sides로 밀려 총 3개가 되어야 한다"
+    assert slot["main"]["menu_name"] == "제육볶음"
+    assert [s["menu_name"] for s in slot["sides"]] == ["계란후라이"]
+
+
+def test_replace_existing_still_removes_menus_dropped_from_the_sheet(client):
+    """중복 방지와 별개로, 식단표에서 빠진 메뉴는 교체 시 사라져야 한다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [_plan_row(MONDAY, "제육볶음", "메인"), _plan_row(MONDAY, "계란후라이", "부찬")],
+            "replace_existing": True,
+        },
+        headers=AUTH_HEADERS,
+    )
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY, "제육볶음", "메인")], "replace_existing": True},
+        headers=AUTH_HEADERS,
+    )
+
+    listed = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    ).json()
+    assert listed[0]["sides"] == [], "식단표에서 빠진 부찬이 남아 있다"
 
 
 def test_reingest_with_replace_existing_is_idempotent(client):
@@ -3284,3 +3314,120 @@ def test_rotation_frequency_threshold_is_looser_for_side_dishes(client):
     assert item["window_count"] == 3
     assert item["window_max"] == 6
     assert item["over_frequency"] is False
+
+
+# ---------------------------------------------------------------------------
+# 재적재 중복 사고 (2026-08 실사용 신고: "부찬이 두번씩 들어갔고")
+# ---------------------------------------------------------------------------
+# 원인: 교체 시 role_source=MANUAL 행을 안 지우는 건 맞는데, payload는 통째로
+# 다시 넣어서 관리자가 손댄 메뉴가 슬롯에 두 벌씩 생겼다. 아래 테스트들은
+# 수정 전에는 전부 깨진다.
+
+
+def _slot(client, corner_id=None):
+    listed = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    ).json()
+    if corner_id is None:
+        return listed[0]
+    return next(s for s in listed if s["corner_id"] == corner_id)
+
+
+def test_reupload_does_not_duplicate_manually_reclassified_rows(client):
+    """신고 재현 — 관리자가 주찬/부찬을 고친 뒤 재업로드하면 부찬이 두 배가 됐다.
+
+    set_menu_role은 메인을 지정할 때 같은 슬롯의 **다른 MAIN들을 SIDE로 내리면서
+    전부 MANUAL로 찍는다**(weekly_menu_review.py:151-153). 그래서 메인 하나만
+    고쳐도 부찬 여러 개가 이 경로를 탄다.
+    """
+    body = {
+        "rows": [
+            _plan_row(MONDAY, "제육볶음", "메인"),
+            _plan_row(MONDAY, "닭갈비", "메인"),  # 셀 병합 오판으로 메인이 둘
+            _plan_row(MONDAY, "김치", "부찬"),
+        ],
+        "replace_existing": True,
+    }
+    client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+
+    # 관리자가 "닭갈비가 진짜 메인"이라고 고친다 → 제육볶음이 부찬(MANUAL)로 내려감
+    slot = _slot(client)
+    dakgalbi = next(
+        i for i in [slot["main"], *slot["sides"]] if i and i["menu_name"] == "닭갈비"
+    )
+    resp = client.put(
+        f"/api/analysis/weekly-menu/{dakgalbi['plan_id']}/role", json={"menu_role": "메인"}
+    )
+    assert resp.status_code == 200, resp.text
+
+    before = _slot(client)
+    before_names = sorted(i["menu_name"] for i in [before["main"], *before["sides"]] if i)
+
+    # 같은 식단표를 다시 올린다
+    client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+
+    after = _slot(client)
+    after_names = sorted(i["menu_name"] for i in [after["main"], *after["sides"]] if i)
+    assert after_names == before_names, f"재업로드로 행이 늘었다: {before_names} → {after_names}"
+    assert len(after_names) == len(set(after_names)), f"같은 메뉴가 두 번 있다: {after_names}"
+
+
+def test_reupload_keeps_the_manual_role_decision(client):
+    """중복만 없애고 관리자 판단까지 되돌리면 안 된다 — 보존은 계속돼야 한다."""
+    body = {
+        "rows": [_plan_row(MONDAY, "제육볶음", "메인"), _plan_row(MONDAY, "닭갈비", "메인")],
+        "replace_existing": True,
+    }
+    client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+    slot = _slot(client)
+    dakgalbi = next(i for i in [slot["main"], *slot["sides"]] if i and i["menu_name"] == "닭갈비")
+    client.put(f"/api/analysis/weekly-menu/{dakgalbi['plan_id']}/role", json={"menu_role": "메인"})
+
+    client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+
+    assert _slot(client)["main"]["menu_name"] == "닭갈비", "관리자가 고른 메인이 되돌아갔다"
+
+
+def test_reupload_reports_how_many_rows_it_skipped(client):
+    """"재업로드했는데 왜 그대로지?"의 답이 응답에 있어야 한다."""
+    body = {
+        "rows": [_plan_row(MONDAY, "제육볶음", "메인"), _plan_row(MONDAY, "닭갈비", "메인")],
+        "replace_existing": True,
+    }
+    client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+    slot = _slot(client)
+    dakgalbi = next(i for i in [slot["main"], *slot["sides"]] if i and i["menu_name"] == "닭갈비")
+    client.put(f"/api/analysis/weekly-menu/{dakgalbi['plan_id']}/role", json={"menu_role": "메인"})
+
+    result = client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS).json()
+    assert result["skipped_manual"] >= 1
+
+
+def test_duplicate_rows_inside_one_payload_are_collapsed(client):
+    """같은 부찬이 원본 셀에 두 번 적혀 있어도 한 행만 들어가야 한다.
+
+    유니크 인덱스가 걸려 있으므로 여기서 안 거르면 정상 입력이 500으로 죽는다.
+    """
+    body = {
+        "rows": [
+            _plan_row(MONDAY, "제육볶음", "메인"),
+            _plan_row(MONDAY, "김치", "부찬"),
+            _plan_row(MONDAY, "김치", "부찬"),
+        ],
+        "replace_existing": True,
+    }
+    resp = client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["skipped_duplicate"] == 1
+    assert [s["menu_name"] for s in _slot(client)["sides"]] == ["김치"]
+
+
+def test_duplicate_payload_rows_are_collapsed_even_without_replace(client):
+    """replace_existing를 안 켜도 payload 내 중복은 제약에 걸리면 안 된다."""
+    body = {
+        "rows": [_plan_row(MONDAY, "제육볶음", "메인"), _plan_row(MONDAY, "김치", "부찬")] * 2
+    }
+    resp = client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["skipped_duplicate"] == 2

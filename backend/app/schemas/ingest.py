@@ -48,3 +48,9 @@ class IngestResult(BaseModel):
     inserted: int
     new_menus: int = 0
     new_corners: int = 0
+    # 관리자가 화면에서 고친 행이 이미 있어서 파서 결과를 안 넣은 건수.
+    # 0이 아니면 "재업로드했는데 왜 그대로지?"의 답이 이것이다.
+    skipped_manual: int = 0
+    # payload 안에서 같은 (슬롯, 메뉴, 역할)이 두 번 온 건수 — 식단표 원본에
+    # 같은 항목이 중복으로 적힌 경우.
+    skipped_duplicate: int = 0

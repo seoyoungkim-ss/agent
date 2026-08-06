@@ -102,10 +102,10 @@ def test_all_rows_are_still_sent_exactly_once(captured, monkeypatch):
     """슬롯 단위로 묶느라 행이 새거나 중복되면 안 된다."""
     monkeypatch.setattr(upload, "_BATCH_SIZE", 2)
     rows = [_row(day, name=f"메뉴{day}-{i}") for day in (6, 7, 8) for i in range(2)]
-    sent = _upload(rows, replace_existing=True)
+    result = _upload(rows, replace_existing=True)
 
     names = [r["menu_name"] for p in captured for r in p["rows"]]
-    assert sent == len(rows)
+    assert result.sent == len(rows)
     assert sorted(names) == sorted(r.menu_name for r in rows)
 
 

@@ -13,6 +13,7 @@ HTTPS_PROXY 환경변수가 걸려있는 경우가 있는데, httpx는 기본(tr
 
 import time
 from collections.abc import Iterable
+from typing import NamedTuple
 
 import httpx
 
@@ -21,6 +22,18 @@ from models import ParsedMealLogRow, ParsedMenuRow
 _BATCH_SIZE = 500
 _MAX_RETRIES = 4
 _BACKOFF_SECONDS = (2, 4, 8, 16)
+
+
+class UploadSummary(NamedTuple):
+    """전송 결과. `sent`만 쓰던 호출부가 있어 첫 필드를 유지한다.
+
+    skipped_*는 백엔드가 알려주는 값이다 — 재업로드했는데 화면이 그대로일 때
+    "왜 그대로인지"(관리자 수정을 보존했다)를 운영자에게 설명하기 위한 것.
+    """
+
+    sent: int
+    skipped_manual: int = 0
+    skipped_duplicate: int = 0
 
 
 def _chunks(items: list, size: int) -> Iterable[list]:
@@ -109,7 +122,7 @@ def upload_weekly_menu(
     timeout: float = 30.0,
     verify_ssl: bool = True,
     replace_existing: bool = False,
-) -> int:
+) -> UploadSummary:
     """replace_existing=True면 같은 슬롯의 기존 행을 지우고 넣는다(멱등 재적재).
 
     기본값이 False라 기존 호출부 동작은 안 바뀐다. True일 때는 슬롯이 요청
@@ -134,7 +147,7 @@ def upload_meal_log(
     api_token: str,
     timeout: float = 30.0,
     verify_ssl: bool = True,
-) -> int:
+) -> UploadSummary:
     return _upload(
         rows, _meal_log_row_to_dict, f"{backend_base_url}/ingest/meal-log", api_token, timeout, verify_ssl
     )
@@ -150,13 +163,29 @@ def _upload(
     *,
     extra_payload: dict | None = None,
     chunker=None,
-) -> int:
+) -> UploadSummary:
     sent = 0
+    skipped_manual = 0
+    skipped_duplicate = 0
     headers = {"Authorization": f"Bearer {api_token}"}
     split = chunker or _chunks
     with httpx.Client(headers=headers, timeout=timeout, verify=verify_ssl, trust_env=False) as client:
         for batch in split(rows, _BATCH_SIZE):
             payload = {"rows": [to_dict(r) for r in batch], **(extra_payload or {})}
-            _post_with_retry(client, url, payload)
+            resp = _post_with_retry(client, url, payload)
             sent += len(batch)
-    return sent
+            # 백엔드가 안 알려주는 구버전이거나 테스트가 갈아끼운 경우엔 조용히 0.
+            body = _response_counts(resp)
+            skipped_manual += body.get("skipped_manual", 0)
+            skipped_duplicate += body.get("skipped_duplicate", 0)
+    return UploadSummary(sent, skipped_manual, skipped_duplicate)
+
+
+def _response_counts(resp) -> dict:
+    if resp is None:
+        return {}
+    try:
+        body = resp.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
