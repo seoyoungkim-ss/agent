@@ -9,6 +9,7 @@ import {
   type Granularity,
   type HeadcountGroupBy,
   type MealType,
+  type MenuTrendEntry,
   type Weather,
 } from "../api/client";
 import {
@@ -94,6 +95,79 @@ const CLASSIFICATION_OPTIONS: { label: string; value: Classification | "전체" 
 ];
 
 const MEAL_TYPE_OPTIONS: MealType[] = ["조식", "중식", "석식"];
+
+/**
+ * 만족도 급상승/급하락 목록.
+ *
+ * 양쪽 날짜를 다 보여준다(2026-08 요청) — "4.03이 언제, 4.27이 언제인지" 둘 다
+ * 필요하다. ⚠️ 이 값은 **날짜가 아니라 그 메뉴가 나온 주**다(§28: 메뉴가 매주
+ * 나오지 않아 달력 주가 아니라 등장 주끼리 비교한다). 그래서 "7/13 주"처럼
+ * 주 단위임이 드러나게 쓴다 — 그냥 "7/13"이면 그날 평가된 걸로 오해한다.
+ *
+ * 원인은 새벽 배치가 미리 계산해 둔 것을 읽기만 한다(화면에서 LLM을 부르면
+ * 홈 로드가 다시 느려진다, §50).
+ */
+// 백엔드 표본 보정(low_sample_threshold)과는 별개의 **화면 경고** 기준이다.
+// 보정을 거쳐도 한 자릿수 표본의 주간 비교는 흔들린다.
+const LOW_SAMPLE_WARN_COUNT = 5;
+
+function MenuTrendList({ rows, tone }: { rows: MenuTrendEntry[]; tone: "good" | "critical" }) {
+  if (rows.length === 0) {
+    return (
+      <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        해당 메뉴가 없습니다.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {rows.map((r, i) => (
+        <div
+          key={`${r.menu_id}-${i}`}
+          className="rounded-md border p-2.5"
+          style={{ borderColor: "var(--border)" }}
+        >
+          <div className="text-[13px] font-medium">
+            {r.menu_name}
+            {r.corner_name ? (
+              <span className="font-normal" style={{ color: "var(--ink-muted)" }}>
+                {" "}
+                ({r.corner_name})
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-0.5 text-xs" style={{ color: "var(--ink-secondary)" }}>
+            {r.prior_score.toFixed(2)}
+            <span style={{ color: "var(--ink-muted)" }}>
+              {" "}
+              ({shortDate(r.prior_week)} 주 · {r.prior_evaluation_count}건)
+            </span>
+            {" → "}
+            <span style={{ color: `var(--${tone})`, fontWeight: 600 }}>
+              {r.recent_score.toFixed(2)}
+            </span>
+            <span style={{ color: "var(--ink-muted)" }}>
+              {" "}
+              ({shortDate(r.recent_week)} 주 · {r.evaluation_count}건)
+            </span>
+          </div>
+          {/* 평가 건수가 한 자릿수면 변화폭이 커도 표본 노이즈일 수 있다 —
+              담당자가 숫자만 보고 과잉 반응하지 않게 명시한다. */}
+          {Math.min(r.prior_evaluation_count, r.evaluation_count) < LOW_SAMPLE_WARN_COUNT ? (
+            <div className="mt-0.5 text-[11px]" style={{ color: "var(--warning)" }}>
+              평가 표본이 적어 변화폭이 과장됐을 수 있습니다
+            </div>
+          ) : null}
+          {r.cause ? (
+            <p className="mt-1.5 text-xs" style={{ color: "var(--ink-muted)" }}>
+              {r.cause}
+            </p>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) {
   const [classification, setClassification] = useState<Classification | "전체">("전체");
@@ -552,7 +626,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
         />
       </div>
 
-      <Card title="개선 필요 포인트 — 혼잡도 / 만족도 / VOE">
+      <Card title="개선 필요 포인트 — 혼잡도 / 만족도 / VOE / 편성·운영">
         {improvementPoints.isLoading && <LoadingState />}
         {improvementPoints.isError && <ErrorState error={improvementPoints.error} />}
         {improvementPoints.data && improvementPoints.data.length === 0 && (
@@ -844,49 +918,13 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
                 <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
                   만족도 급상승
                 </p>
-                {menuHighlights.data.rising.length === 0 ? (
-                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                    해당 없음
-                  </p>
-                ) : (
-                  <Table
-                    columns={[
-                      { key: "menu", label: "메뉴" },
-                      { key: "date", label: "날짜", align: "right" },
-                      { key: "score", label: "만족도", align: "right" },
-                    ]}
-                    rows={menuHighlights.data.rising.map((r) => ({
-                      menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
-                      date: shortDate(r.date),
-                      score: `${r.prior_score.toFixed(2)} → ${r.recent_score.toFixed(2)}`,
-                    }))}
-                    rowKey={(r, i) => `${r.menu as string}-${i}`}
-                  />
-                )}
+                <MenuTrendList rows={menuHighlights.data.rising} tone="good" />
               </div>
               <div>
                 <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
                   만족도 급하락
                 </p>
-                {menuHighlights.data.falling.length === 0 ? (
-                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                    해당 없음
-                  </p>
-                ) : (
-                  <Table
-                    columns={[
-                      { key: "menu", label: "메뉴" },
-                      { key: "date", label: "날짜", align: "right" },
-                      { key: "score", label: "만족도", align: "right" },
-                    ]}
-                    rows={menuHighlights.data.falling.map((r) => ({
-                      menu: `${r.menu_name}${r.corner_name ? ` (${r.corner_name})` : ""}`,
-                      date: shortDate(r.date),
-                      score: `${r.prior_score.toFixed(2)} → ${r.recent_score.toFixed(2)}`,
-                    }))}
-                    rowKey={(r, i) => `${r.menu as string}-${i}`}
-                  />
-                )}
+                <MenuTrendList rows={menuHighlights.data.falling} tone="critical" />
               </div>
             </div>
             <div className="border-t pt-4" style={{ borderColor: "var(--border)" }}>

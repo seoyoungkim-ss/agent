@@ -14,7 +14,7 @@ from app.services.llm_client import InternalLLMClient
 
 @dataclass(frozen=True)
 class ImprovementPoint:
-    axis: Literal["congestion", "satisfaction", "voe"]
+    axis: Literal["congestion", "satisfaction", "voe", "planning"]
     title: str  # "한식 코너 피크타임 혼잡" 같은 한 줄 제목
     detail: str  # 근거 수치를 담은 설명 문장
     severity: Literal["warning", "critical"]
@@ -162,3 +162,55 @@ async def summarize_voe_comments(
             # 혼잡도/만족도 포인트는 정상 응답하게 한다.
             return _fallback_voe_summary(category, sample)
     return _fallback_voe_summary(category, sample)
+
+
+
+# ---------------------------------------------------------------------------
+# 편성·운영 축 (2026-08)
+# ---------------------------------------------------------------------------
+# 담당자 요청: "개선필요포인트에 메뉴 편성/운영에서 나타나는 문제도 notice".
+# §36.1 관례를 지킨다 — **사실 수집은 순수 함수**로 두고, DB 조회와 LLM 호출은
+# API 계층(dashboard.py)이 오케스트레이션한다. 여기 오는 인자는 이미 계산된
+# 다른 엔드포인트/서비스의 결과다.
+
+_OVERUSED_TOP_N = 3
+_NO_INTAKE_TOP_N = 3
+
+
+def collect_planning_issues(
+    *,
+    overused: list[dict],
+    no_intake_menus: list[dict],
+    clash_slot_count: int,
+) -> list[str]:
+    """순수 함수 — 편성 관련 사실을 사람이 읽는 문장 목록으로.
+
+    LLM에 넘길 재료이자, LLM이 없을 때 그대로 쓸 폴백이기도 하다.
+    """
+    issues: list[str] = []
+    if overused:
+        top = overused[:_OVERUSED_TOP_N]
+        names = ", ".join(f"{o['menu_name']}({o['count']}회)" for o in top)
+        issues.append(f"이번 주에 반복 편성된 메뉴: {names}")
+    if no_intake_menus:
+        top = no_intake_menus[:_NO_INTAKE_TOP_N]
+        names = ", ".join(o["menu_name"] for o in top)
+        issues.append(
+            f"편성됐지만 취식 기록이 없는 메뉴 {len(no_intake_menus)}개 (예: {names}) — "
+            "메뉴명 표기 불일치일 수도 있음"
+        )
+    if clash_slot_count > 0:
+        issues.append(f"한 끼 구성에서 재료·특성이 겹치는 슬롯 {clash_slot_count}건")
+    return issues
+
+
+def build_planning_point(issues: list[str], summary: str | None) -> ImprovementPoint | None:
+    """수집된 사실이 있으면 개선 포인트 1건으로 만든다. 없으면 None."""
+    if not issues:
+        return None
+    return ImprovementPoint(
+        axis="planning",
+        title="메뉴 편성·운영 점검 필요",
+        detail=summary or " / ".join(issues),
+        severity="warning",
+    )

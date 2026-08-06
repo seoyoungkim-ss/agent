@@ -2,7 +2,8 @@
 
 - 매일 새벽: 전날 daily_corner_stats/daily_division_stats 재계산,
   최근 6개월 menu_performance_stats 재계산(PRD 6.3 "6개월 누적 데이터" 기준),
-  employee_taste_profile 재계산
+  employee_taste_profile 재계산,
+  LLM 분석 캐시 갱신(메뉴 만족도 변화 원인 · 편성 notice · 신규 메뉴 식재료 추출)
 - 매월 1일 새벽: 지난달 monthly_voe_cluster 재계산 (사내 LLM 임베딩 필요),
   지난달 VOE 고정 분류(맛/간/위생/서비스) LLM 재계산(meal_log.voe_categories),
   taste_cluster(취향 군집) 재계산 — 표본이 부족하면 조용히 건너뜀(0건 생성)
@@ -17,6 +18,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from app.config import get_settings
 from app.db import SessionLocal
 from app.services.aggregation import aggregate_daily_stats, aggregate_menu_performance
+from app.services.food_vector_tagging import run_llm_ingredient_extraction
+from app.services.llm_analysis import refresh_llm_analyses
 from app.services.llm_client import InternalLLMClient
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
@@ -27,6 +30,25 @@ logger = logging.getLogger(__name__)
 
 MENU_PERFORMANCE_WINDOW_DAYS = 180  # PRD: 취식 데이터는 6개월 누적
 DEFAULT_TASTE_CLUSTER_K = 5  # PRD 6.1: 취향 군집 개수 (데이터 보고 튜닝 가능)
+
+
+async def _run_llm_daily_steps(db, period_start: dt.date, period_end: dt.date) -> None:
+    """매일 도는 LLM 단계들. 한 단계가 실패해도 나머지는 돌아야 한다(§44).
+
+    식재료 추출을 여기 둔 이유: 매주 식단표가 올라오며 새 메뉴가 생기는데,
+    `ingredients`가 비어 있으면 한 끼 구성 중복 판정이 키워드 사전으로 되돌아간다
+    (담당자가 "외국산을 '국'으로 인식한다"고 지적한 그 경로). 대상이
+    `ingredients IS NULL`인 행뿐이라 첫 실행 이후엔 하루 몇 건 수준이다.
+    """
+    client = InternalLLMClient(get_settings())
+    try:
+        extracted = await run_llm_ingredient_extraction(db, client)
+        logger.info("LLM 식재료 추출 %d건", extracted)
+    except Exception:
+        logger.exception("LLM 식재료 추출 실패 — 나머지 LLM 단계는 계속 진행")
+
+    counts = await refresh_llm_analyses(db, period_start=period_start, period_end=period_end)
+    logger.info("LLM 분석 캐시 갱신 %s", counts)
 
 
 def run_daily_batch() -> None:
@@ -40,6 +62,14 @@ def run_daily_batch() -> None:
         aggregate_menu_performance(db, period_start, period_end)
 
         compute_employee_taste_profiles(db)
+
+        # LLM 분석은 화면 로드가 아니라 여기서 미리 계산해 캐시에 넣는다(2026-08).
+        # 실패해도 위 집계는 이미 끝났으므로 배치 전체를 죽이지 않는다.
+        try:
+            asyncio.run(_run_llm_daily_steps(db, period_start, period_end))
+        except Exception:
+            logger.exception("LLM 분석 갱신 실패 — 집계는 정상 완료됨")
+
         logger.info("daily batch completed for %s", yesterday)
     except Exception:
         logger.exception("daily batch failed")

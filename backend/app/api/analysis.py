@@ -44,7 +44,7 @@ from app.services.food_vector import (
     compute_average_food_vector,
     describe_average_bias,
 )
-from app.services.food_vector_tagging import run_llm_food_vector_tagging
+from app.services.food_vector_tagging import run_llm_food_vector_tagging, run_llm_ingredient_extraction
 from app.services.holidays import DayClassification, HolidayService, family_day_dates_in_range
 from app.services.llm_client import InternalLLMClient
 from app.services.master_data import PLACEHOLDER_MENU_NAMES, TAKE_OUT_CORNER_NAME
@@ -1072,6 +1072,18 @@ def update_new_menu_status(payload: NewMenuStatusUpdateRequest, db: Session = De
     }
 
 
+@router.post("/menus/extract-ingredients-with-llm")
+async def extract_ingredients_with_llm(db: Session = Depends(get_db)):
+    """식재료가 아직 비어 있는 메뉴만 LLM으로 채운다 (2026-08).
+
+    한 끼 구성의 재료 중복 판정이 키워드 사전만 쓰면 사전에 없는 재료를 못 잡고,
+    원산지 문자열이 남아 있으면 재료로 오인한다. food_vector 태깅과 완전히 같은
+    3단계(규칙 → LLM → 관리자수동) 구조라 배선이 같다.
+    """
+    updated = await run_llm_ingredient_extraction(db, InternalLLMClient(get_settings()))
+    return {"updated": updated}
+
+
 @router.post("/menus/tag-with-llm")
 async def tag_menus_with_llm(db: Session = Depends(get_db)):
     """PRD 6.1: 규칙 기반으로 태깅 못 한(food_vector NULL) 메뉴를 사내 LLM으로 보강한다."""
@@ -1177,9 +1189,14 @@ def weekly_menu_combination_check(
         for item in [*( [s.main] if s.main else []), *s.sides, *s.health_garden]
     }
     vectors: dict[int, list[float] | None] = {}
+    # 재료는 menu_master.ingredients(규칙→LLM→수동 3단계로 채운 값)를 우선 쓴다.
+    # 비어 있으면 menu_clash가 이름 기반 규칙으로 폴백한다(2026-08).
+    ingredients_by_name: dict[str, list[str]] = {}
     if menu_ids:
         for m in db.query(MenuMaster).filter(MenuMaster.menu_id.in_(menu_ids)).all():
             vectors[m.menu_id] = [float(x) for x in m.food_vector] if m.food_vector is not None else None
+            if m.ingredients:
+                ingredients_by_name[m.menu_name] = list(m.ingredients)
 
     results = []
     untagged_all: set[str] = set()
@@ -1190,7 +1207,9 @@ def weekly_menu_combination_check(
         main_name = s.main.menu_name if s.main else None
 
         ingredient_clashes = find_ingredient_clashes(
-            main_name, [item.menu_name for item in accompaniments]
+            main_name,
+            [item.menu_name for item in accompaniments],
+            ingredients_by_name=ingredients_by_name,
         )
         vector_clashes, untagged = find_vector_clashes(
             (s.main.menu_name, vectors.get(s.main.menu_id)) if s.main else None,

@@ -1,7 +1,7 @@
 import datetime as dt
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, Date, Enum as SAEnum, Integer, String, Text
+from sqlalchemy import ARRAY, Boolean, Date, Enum as SAEnum, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -58,6 +58,14 @@ class MenuMaster(Base):
     # 시점 — "도입일"로 취급해 경과일 계산에 쓴다(2026-07).
     new_menu_override: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     new_menu_marked_on: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    # 식재료 목록 — 한 끼 구성의 재료 중복 판정(menu_clash)에 쓴다. food_vector와
+    # 똑같은 3단계(규칙 → LLM → 관리자수동)로 채우고, MANUAL은 재추출에서 제외한다.
+    # 키워드 사전만으로는 사전에 없는 재료를 못 잡는다는 한계가 있어 LLM을 얹었다(2026-08).
+    ingredients: Mapped[list[str] | None] = mapped_column(ARRAY(String(32)), nullable=True)
+    ingredients_source: Mapped[FoodVectorSource | None] = mapped_column(
+        SAEnum(FoodVectorSource, values_callable=lambda e: [x.value for x in e], native_enum=False),
+        nullable=True,
+    )
 
 
 class HolidayCalendar(Base):

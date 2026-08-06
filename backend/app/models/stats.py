@@ -157,3 +157,33 @@ class MenuPerformanceStats(Base):
     # PRD 6.3.5(2026-07): 수요가 낮아도 그 메뉴가 나올 때마다 챙겨 먹는 고정
     # 고객이 있으면 True — 4분면 분류에서 퇴출후보 대신 숨은강자로 보정한다.
     has_loyal_following: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class LlmAnalysisCache(Base):
+    """LLM이 만든 설명을 저장해 두는 캐시 (2026-08).
+
+    화면 로드마다 LLM을 부르면 지금도 느린 화면이 더 느려진다(§25의 판단과 동일,
+    실사용에서 "로딩되다가 결과가 안 나온다"는 신고까지 나온 뒤라 더 명확하다).
+    그래서 새벽 배치가 미리 계산해 여기에 넣고, 화면은 읽기만 한다. 관리자가
+    "지금 다시 분석" 버튼으로 갱신할 수도 있다 — voe_clustering과 같은 구조.
+
+    ⚠️ **기간 정확 일치로 조회하지 않는다.** §45에서 menu_performance_stats를
+    `filter_by(period_start=..., period_end=...)`로 읽다가, 배치는 `period_end=어제`로
+    쓰고 화면은 `period_end=오늘`로 찾아 빈 결과가 나오는 문제를 겪었다. 여기서는
+    (kind, subject_key)로 **가장 최근 행 1개**를 읽고, 그 분석이 언제·어느 기간을
+    근거로 만들어졌는지를 화면에 함께 보여준다.
+    """
+
+    __tablename__ = "llm_analysis_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # "menu_trend"(만족도 변화 원인) | "planning_notice"(편성/운영 문제)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    # menu_trend면 menu_id 문자열, planning_notice면 규칙 식별자
+    subject_key: Mapped[str] = mapped_column(String(64), index=True)
+    period_start: Mapped[dt.date] = mapped_column(Date)
+    period_end: Mapped[dt.date] = mapped_column(Date)
+    summary: Mapped[str] = mapped_column(Text)
+    # LLM에 넘긴 사실 — 나중에 "왜 이런 설명이 나왔나"를 검증할 수 있게 남긴다.
+    facts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow, index=True)

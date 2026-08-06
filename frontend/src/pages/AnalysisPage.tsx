@@ -1540,6 +1540,7 @@ function MenuFoodVectorAdminSection() {
     mutationFn: () => api.tagMenusWithLlm(),
     onSuccess: () => query.refetch(),
   });
+  const extractIngredients = useMutation({ mutationFn: () => api.extractIngredientsWithLlm() });
 
   const rows = query.data ?? [];
   const cornerGroups = groupByCorner(rows);
@@ -1559,16 +1560,35 @@ function MenuFoodVectorAdminSection() {
           />
           미태깅 메뉴만 보기
         </label>
-        <Button variant="secondary" onClick={() => tagWithLlm.mutate()} disabled={tagWithLlm.isPending}>
-          LLM으로 미태깅 메뉴 보강
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" onClick={() => tagWithLlm.mutate()} disabled={tagWithLlm.isPending}>
+            LLM으로 미태깅 메뉴 보강
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => extractIngredients.mutate()}
+            disabled={extractIngredients.isPending}
+          >
+            LLM으로 식재료 추출
+          </Button>
+        </div>
       </div>
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        식재료는 "한 끼 구성 중복 점검"이 쓰는 별도 값입니다(음식벡터와 다름). 새벽 배치가 매일 비어 있는
+        메뉴만 채우므로 평소엔 누르지 않아도 되고, 식단표를 방금 올린 직후 바로 반영하고 싶을 때 씁니다.
+      </p>
       {tagWithLlm.data && (
         <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
           {tagWithLlm.data.tagged_menus}건 태깅됨
         </p>
       )}
+      {extractIngredients.data && (
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          식재료 {extractIngredients.data.updated}건 추출됨
+        </p>
+      )}
       {tagWithLlm.isError && <ErrorState error={tagWithLlm.error} />}
+      {extractIngredients.isError && <ErrorState error={extractIngredients.error} />}
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
       {rows.length === 0 && !query.isLoading && (

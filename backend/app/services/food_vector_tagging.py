@@ -11,6 +11,8 @@
    (두 배치 모두 food_vector IS NULL인 메뉴만 대상으로 하므로 자동으로 보호됨).
 """
 
+import logging
+
 from sqlalchemy.orm import Session
 
 from app.models.enums import FoodVectorSource
@@ -18,6 +20,8 @@ from app.models.master import MenuMaster
 from app.services.food_vector import FOOD_VECTOR_DIMENSIONS
 from app.services.menu_name import strip_origin_annotation
 from app.services.llm_client import InternalLLMClient
+
+logger = logging.getLogger(__name__)
 
 # 규칙에 걸리면 이 값, 안 걸리면 이 값 — 둘 다 0~1 스케일(food_vector.py 컨벤션).
 _MATCH_SCORE = 0.85
@@ -117,3 +121,83 @@ async def run_llm_food_vector_tagging(db: Session, llm_client: InternalLLMClient
         tagged += 1
     db.commit()
     return tagged
+
+
+# ---------------------------------------------------------------------------
+# 식재료 추출 — food_vector와 같은 3단계(규칙 → LLM → 수동), 2026-08
+# ---------------------------------------------------------------------------
+# menu_clash의 재료 중복 판정이 키워드 사전만 쓰면 사전에 없는 재료를 못 잡는다.
+# food_vector 태깅과 완전히 같은 구조로 붙여 배선을 단순하게 유지한다.
+
+_INGREDIENT_BATCH_SIZE = 20
+
+
+def _build_ingredient_prompt(menu_names: list[str]) -> str:
+    listed = "\n".join(f"{i + 1}. {name}" for i, name in enumerate(menu_names))
+    return (
+        "아래 구내식당 메뉴명 각각에서 **주요 식재료만** 뽑아 주세요.\n"
+        f"{listed}\n\n"
+        "규칙:\n"
+        "- 조리법(볶음/구이/찜)이나 맛 표현(매운/얼큰한)은 재료가 아닙니다.\n"
+        "- **원산지 표기(국내산/중국산/호주산 등)는 재료가 아닙니다. 무시하세요.**\n"
+        "- 메뉴명에서 알 수 없으면 빈 값으로 두세요. 추측하지 마세요.\n"
+        "- 재료는 2글자 이상 한국어 명사로 씁니다.\n\n"
+        "출력 형식(한 줄에 하나, 다른 말 없이):\n"
+        "번호. 재료1, 재료2"
+    )
+
+
+def parse_ingredient_response(response: str, menu_names: list[str]) -> dict[str, list[str]]:
+    """'1. 콩나물, 두부' 형식을 {메뉴명: [재료]}로. 형식이 깨진 줄은 건너뛴다.
+
+    관대(skip) 정책 — voe_category_llm과 같다. 한 줄이 깨졌다고 배치 전체를
+    버리면 나머지 멀쩡한 추출까지 잃는다.
+    """
+    result: dict[str, list[str]] = {}
+    for line in response.splitlines():
+        head, _, tail = line.partition(".")
+        try:
+            index = int(head.strip()) - 1
+        except ValueError:
+            continue
+        if not 0 <= index < len(menu_names):
+            continue
+        items = [t.strip() for t in tail.split(",")]
+        result[menu_names[index]] = [t for t in items if len(t) >= 2]
+    return result
+
+
+async def run_llm_ingredient_extraction(db: Session, llm_client: InternalLLMClient) -> int:
+    """`ingredients`가 아직 비어 있는 메뉴만 LLM으로 채운다. 채운 개수를 반환.
+
+    `ingredients_source == MANUAL`인 행은 `ingredients`가 이미 차 있으므로
+    자동으로 보호된다(food_vector 태깅과 같은 방식).
+    """
+    if not llm_client.is_configured:
+        return 0
+
+    pending = db.query(MenuMaster).filter(MenuMaster.ingredients.is_(None)).all()
+    if not pending:
+        return 0
+
+    updated = 0
+    for start in range(0, len(pending), _INGREDIENT_BATCH_SIZE):
+        chunk = pending[start : start + _INGREDIENT_BATCH_SIZE]
+        names = [m.menu_name for m in chunk]
+        try:
+            response = await llm_client.chat_complete(
+                [{"role": "user", "content": _build_ingredient_prompt(names)}]
+            )
+        except Exception:
+            logger.exception("식재료 추출 LLM 호출 실패 — 이 배치는 건너뛴다")
+            continue
+        parsed = parse_ingredient_response(response, names)
+        for menu in chunk:
+            extracted = parsed.get(menu.menu_name)
+            if not extracted:
+                continue
+            menu.ingredients = extracted
+            menu.ingredients_source = FoodVectorSource.LLM
+            updated += 1
+    db.commit()
+    return updated

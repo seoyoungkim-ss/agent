@@ -1,5 +1,6 @@
 import calendar
 import datetime as dt
+import logging
 import io
 import statistics
 
@@ -17,11 +18,14 @@ from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import DailyDivisionStats, MenuPerformanceStats, MonthlyVoeCluster
 from app.services.holidays import DayClassification, HolidayService
 from app.services.improvement_points import (
+    build_planning_point,
+    collect_planning_issues,
     select_congestion_points,
     select_satisfaction_points,
     select_voe_points,
     summarize_voe_comments,
 )
+from app.services.llm_analysis import KIND_MENU_TREND, KIND_PLANNING_NOTICE, get_cached
 from app.services.llm_client import InternalLLMClient
 from app.services.menu_highlights import (
     compute_menu_satisfaction_trends,
@@ -31,6 +35,48 @@ from app.services.menu_highlights import (
 from app.services.voe_category import OTHER_CATEGORY, VOE_CATEGORIES, classify_voe_categories
 from app.services.voe_category_llm import classify_monthly_voe_via_llm
 from app.services.voe_clustering import cluster_monthly_voe
+
+logger = logging.getLogger(__name__)
+
+
+def _trend_cause(db: Session, menu_id: int) -> dict:
+    """캐시된 만족도 변화 원인. 없으면 빈 dict — 화면은 그냥 원인 줄을 안 그린다."""
+    cached = get_cached(db, KIND_MENU_TREND, str(menu_id))
+    if cached is None:
+        return {}
+    return {
+        "cause": cached.summary,
+        "cause_computed_at": cached.created_at.isoformat(),
+    }
+
+
+def _collect_planning_facts(db: Session, period_start: dt.date, period_end: dt.date) -> list[str]:
+    """편성 축 사실 수집 — 이미 만들어 둔 순수 함수들을 조합만 한다(§36.1 관례).
+
+    지연 임포트: analysis.py가 dashboard.py를 참조하지 않도록 호출 시점에 가져온다.
+    """
+    from app.api.analysis import (
+        menu_plan_performance,
+        weekly_menu_combination_check,
+        weekly_menu_rotation,
+    )
+
+    rotation = weekly_menu_rotation(period_start=period_start, period_end=period_end, db=db)
+    clash = weekly_menu_combination_check(period_start=period_start, period_end=period_end, db=db)
+    performance = menu_plan_performance(period_start=period_start, period_end=period_end, db=db)
+
+    clash_slots = [
+        s
+        for s in clash["slots"]
+        if s["ingredient_clashes"] or s["vector_clashes"]
+    ]
+    no_intake = [i for i in performance["items"] if i["action"] == "취식 기록 없음"]
+    return collect_planning_issues(
+        overused=rotation["overused"],
+        no_intake_menus=no_intake,
+        clash_slot_count=len(clash_slots),
+    )
+
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -460,6 +506,16 @@ def menu_highlights(db: Session = Depends(get_db)):
             "delta": e.delta,
             "evaluation_count": e.evaluation_count,
             "date": e.recent_week.isoformat(),
+            # ⚠️ 아래 둘은 **날짜가 아니라 ISO 주의 월요일**이다(§28: 메뉴가 매주
+            # 나오지 않으므로 달력 주가 아니라 "그 메뉴가 나온 주"끼리 비교한다).
+            # 화면 문구도 "7/13 주"처럼 주 단위임이 드러나게 써야 오해가 없다.
+            "recent_week": e.recent_week.isoformat(),
+            "prior_week": e.prior_week.isoformat(),
+            "prior_evaluation_count": e.prior_evaluation_count,
+            # 만족도가 왜 변했는지 — 새벽 배치가 미리 계산해 둔 것을 읽기만 한다.
+            # 여기서 LLM을 부르면 홈 로드가 다시 느려진다(§50). 최대 6건이고
+            # (kind, subject_key) 인덱스 조회라 비용이 사실상 없다.
+            **_trend_cause(db, e.menu_id),
         }
 
     def _new_menu(e):
@@ -483,7 +539,13 @@ def menu_highlights(db: Session = Depends(get_db)):
 
 @router.get("/improvement-points")
 async def improvement_points(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
-    """홈 현황 "개선 포인트" — 혼잡도/만족도/VOE 세 축에서 지금 손볼 만한 지점.
+    """홈 현황 "개선 포인트" — 혼잡도/만족도/VOE/편성·운영 네 축에서 지금 손볼 만한 지점.
+
+    편성 축(2026-08)은 앞의 셋과 성격이 다르다. 앞의 셋은 "이미 벌어진 결과"이고
+    편성 축은 "다음 주 식단을 짜기 전에 고칠 것"이다 — 과다 편성, 편성만 되고
+    취식이 0인 메뉴, 한 끼 구성 중복. 사실 수집은 순수 함수
+    (`improvement_points.collect_planning_issues`)가 하고, LLM은 새벽 배치가 만들어
+    둔 캐시에서 문장만 가져온다(§53). 캐시가 비어도 사실 나열로 폴백한다.
 
     전부 이미 계산된 값을 재사용한다: 코너 통계(`analysis.py::corner_analysis`),
     메뉴 4분면(`analysis.py::menu_performance` — 사전에 recompute가 돼 있어야
@@ -507,6 +569,21 @@ async def improvement_points(period_start: dt.date, period_end: dt.date, db: Ses
         *select_satisfaction_points(menu_rows),
         *select_voe_points(current_voe, prior_voe),
     ]
+
+    # 편성·운영 축(2026-08 요청) — 이미 만들어 둔 순수 함수들의 결과를 재해석만
+    # 한다(§36.1 관례). LLM 요약은 새벽 배치가 캐시에 넣어 두고 여기선 읽기만
+    # 하므로, 이 축이 추가돼도 화면 로드가 느려지지 않는다.
+    planning_issues: list[str] = []
+    try:
+        planning_issues = _collect_planning_facts(db, period_start, period_end)
+    except Exception:
+        # 편성 축 하나가 실패해도 혼잡도/만족도/VOE는 살아 있어야 한다(§44 결론).
+        logger.exception("편성 축 사실 수집 실패 — 이 축만 건너뛴다")
+    if planning_issues:
+        cached = get_cached(db, KIND_PLANNING_NOTICE, "weekly")
+        planning_point = build_planning_point(planning_issues, cached.summary if cached else None)
+        if planning_point is not None:
+            points.append(planning_point)
 
     comments_by_category = {
         c["category"]: [entry["comment"] for entry in c["comments"]] for c in current_voe.get("categories", [])

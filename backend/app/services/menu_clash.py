@@ -56,12 +56,22 @@ _INGREDIENT_TOKENS = tuple(
 )
 
 
-def extract_ingredients(menu_name: str) -> set[str]:
-    """메뉴명에 포함된 식재료 토큰을 뽑는다(부분 문자열 매칭).
+def extract_ingredients(menu_name: str, stored: Sequence[str] | None = None) -> set[str]:
+    """메뉴의 식재료 집합.
+
+    `stored`(menu_master.ingredients)가 있으면 그걸 쓴다 — 규칙 사전이 못 잡는
+    재료를 LLM이 채워 넣은 결과다(2026-08). 없으면 이름 기반 규칙으로 폴백한다.
+    이게 이 레포의 3단계 패턴(규칙 → LLM → 수동)에서 조회 쪽 진입점이다.
 
     "콩나물국밥" → {"콩나물"}, "돼지고기김치찌개" → {"돼지고기", "김치"}.
-    사전에 없는 재료는 안 잡힌다(모듈 docstring의 한계 참고).
     """
+    if stored:
+        return {t.strip() for t in stored if t and t.strip()}
+    return extract_ingredients_from_name(menu_name)
+
+
+def extract_ingredients_from_name(menu_name: str) -> set[str]:
+    """규칙 사전 기반 추출(3단계의 1단계). 사전에 없는 재료는 안 잡힌다."""
     return {token for token in _INGREDIENT_TOKENS if token in menu_name}
 
 
@@ -73,17 +83,21 @@ class IngredientClash:
 
 
 def find_ingredient_clashes(
-    main_name: str | None, side_names: Sequence[str]
+    main_name: str | None,
+    side_names: Sequence[str],
+    *,
+    ingredients_by_name: dict[str, Sequence[str]] | None = None,
 ) -> list[IngredientClash]:
     """메인↔부찬, 부찬↔부찬 모든 쌍에서 공유 재료를 찾는다.
 
     부찬끼리도 보는 이유: 요청이 "부찬과 주찬" 뿐 아니라 "부찬끼리 재료 또는
     카테고리 중복"도 포함했다.
     """
-    named = [(name, extract_ingredients(name)) for name in side_names]
+    stored = ingredients_by_name or {}
+    named = [(name, extract_ingredients(name, stored.get(name))) for name in side_names]
     if main_name is not None:
         # 메인을 맨 앞에 둬서 메인↔부찬 쌍이 결과 앞쪽에 오게 한다.
-        named.insert(0, (main_name, extract_ingredients(main_name)))
+        named.insert(0, (main_name, extract_ingredients(main_name, stored.get(main_name))))
 
     clashes = []
     for (name_a, ing_a), (name_b, ing_b) in combinations(named, 2):

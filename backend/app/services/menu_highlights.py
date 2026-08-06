@@ -27,6 +27,11 @@ class MenuTrendEntry:
     delta: float
     evaluation_count: int
     recent_week: dt.date  # 이 메뉴가 마지막으로 나온 주의 월요일 — 홈 하이라이트 카드 날짜 표시용(2026-08)
+    # 비교 대상이 된 직전 주의 월요일. 화면에 "4.03(7/12 주) → 4.27(8/2 주)"처럼
+    # **양쪽 날짜를 다 보여달라**는 요청(2026-08) — 이미 계산하던 값을 필드로
+    # 담기만 하면 되고 새 계산이 없다(§46.2에서 recent_week를 노출한 것과 동일).
+    prior_week: dt.date
+    prior_evaluation_count: int  # 직전 주 평가 건수 — 표본이 얼마나 되는지 같이 봐야 한다
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,8 @@ def compute_menu_satisfaction_trends(
                 delta=recent.adjusted_score - prior.adjusted_score,
                 evaluation_count=recent.evaluation_count,
                 recent_week=recent_week,
+                prior_week=prior_week,
+                prior_evaluation_count=prior.evaluation_count,
             )
         )
 

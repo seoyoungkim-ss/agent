@@ -102,6 +102,14 @@ export interface MenuTrendEntry {
   delta: number;
   evaluation_count: number;
   date: string; // 이 메뉴가 마지막으로 나온 주의 월요일(ISO)
+  // ⚠️ 아래 둘은 **날짜가 아니라 ISO 주의 월요일**이다 — 메뉴가 매주 나오지
+  // 않으므로 달력 주가 아니라 "그 메뉴가 나온 주"끼리 비교한다(§28).
+  recent_week: string;
+  prior_week: string;
+  prior_evaluation_count: number;
+  // 새벽 배치가 미리 계산해 둔 만족도 변화 원인. 배치 전이거나 대상이 아니면 없다.
+  cause?: string;
+  cause_computed_at?: string;
 }
 
 export interface NewMenuEntry {
@@ -122,7 +130,7 @@ export interface MenuHighlightsResponse {
 }
 
 export interface ImprovementPoint {
-  axis: "congestion" | "satisfaction" | "voe";
+  axis: "congestion" | "satisfaction" | "voe" | "planning";
   title: string;
   detail: string;
   severity: "warning" | "critical";
@@ -765,6 +773,11 @@ export const api = {
 
   tagMenusWithLlm: () =>
     request<{ tagged_menus: number }>(`/analysis/menus/tag-with-llm`, { method: "POST" }),
+
+  // 식재료가 비어 있는 메뉴만 LLM으로 채운다. 한 끼 구성 중복 판정이 쓰는 값이라
+  // food_vector와 별개다(같은 규칙→LLM→수동 3단계).
+  extractIngredientsWithLlm: () =>
+    request<{ updated: number }>(`/analysis/menus/extract-ingredients-with-llm`, { method: "POST" }),
 
   updateNewMenuStatus: (menuName: string, isNew: boolean | null) =>
     request<{ menu_id: number; menu_name: string; new_menu_override: boolean | null; new_menu_marked_on: string | null }>(
