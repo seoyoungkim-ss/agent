@@ -152,6 +152,117 @@ def find_header_row(
     )
 
 
+# ---------------------------------------------------------------------------
+# 주차(week_start) 추론 — 헤더 셀의 날짜에서 뽑는다 (2026-08)
+# ---------------------------------------------------------------------------
+# 헤더 셀은 두 형태 중 하나다(_weekday_label 주석의 실사용 확인 참고):
+#   1) datetime/date 객체 — 연도까지 정확
+#   2) "7/6(월)" 문자열   — 월/일만 있고 연도가 없다
+#
+# ⚠️ 2번에서 연도를 "오늘과 가장 가까운 해"로 고르면 **안 된다.** 오늘이
+# 2026-08-06일 때 "12/28"은 2026-12-28(144일 후)이 2025-12-28(222일 전)보다
+# 가까워서 미래로 잘못 찍힌다. 과거 소급 적재는 연말을 반드시 넘으므로 이건
+# 이론적 걱정이 아니다.
+#
+# 대신 **요일 라벨을 연도의 체크섬으로** 쓴다. 같은 월/일의 요일은 해마다
+# 1~2일씩 밀리므로(윤년이면 2일), 후보 3년 안에서 요일은 절대 겹치지 않는다
+# (오프셋 0, s₁, s₁+s₂ 이고 1≤s≤2 → 최대 4 < 7). 즉 요일이 맞는 해는 정확히
+# 하나다. 예: "7/6(월)" → 2025=일, 2026=월, 2027=화 → 2026 확정.
+_HEADER_DATE_PATTERN = re.compile(r"(\d{1,2})\s*[/\-.]\s*(\d{1,2})")
+_YEAR_CANDIDATE_OFFSETS = (-1, 0, 1)
+
+
+def _header_day_values(
+    grid: Sequence[Sequence[Any]], header_row: int, first_day_col: int, day_col_span: int, num_days: int
+) -> list[Any]:
+    """헤더 행의 요일 열 **원본 값**. _weekday_label과 달리 날짜를 버리지 않는다."""
+    row = grid[header_row]
+    values = []
+    for day_offset in range(num_days):
+        col = first_day_col + day_offset * day_col_span
+        values.append(row[col] if col < len(row) else None)
+    return values
+
+
+def _parse_header_date(value: Any, expected_weekday_label: str, today: dt.date) -> dt.date | None:
+    """헤더 셀 하나에서 실제 날짜를 뽑는다. 못 뽑으면 None."""
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+
+    match = _HEADER_DATE_PATTERN.search(_clean(value))
+    if match is None:
+        return None
+    month, day = int(match.group(1)), int(match.group(2))
+
+    matches = []
+    for offset in _YEAR_CANDIDATE_OFFSETS:
+        try:
+            candidate = dt.date(today.year + offset, month, day)
+        except ValueError:
+            continue  # 2/29 같은 날짜가 그 해엔 없는 경우
+        if _WEEKDAY_BY_PYTHON_INDEX[candidate.weekday()] == expected_weekday_label:
+            matches.append(candidate)
+    # 후보가 0개(요일이 안 맞음)거나 2개 이상이면 추측하지 않는다.
+    return matches[0] if len(matches) == 1 else None
+
+
+def infer_week_start(
+    grid: Sequence[Sequence[Any]],
+    *,
+    first_day_col: int = 3,
+    day_col_span: int = 2,
+    num_days: int = 6,
+    header_row: int | None = None,
+    today: dt.date | None = None,
+) -> dt.date:
+    """이 표가 나타내는 주의 **월요일**을 헤더 날짜에서 알아낸다.
+
+    운영자가 `--week-start`를 손으로 계산해 넣던 걸 대신한다. 판정에 조금이라도
+    확신이 없으면 값을 만들어내지 않고 `WeeklyMenuParseError`를 올린다 —
+    틀린 주로 적재하면 그 주의 편성이 통째로 어긋나고, 슬롯 교체(replace_existing)
+    까지 켜져 있으면 **멀쩡한 다른 주를 지운다.**
+    """
+    today = today or dt.date.today()
+    if header_row is None:
+        header_row = find_header_row(
+            grid, first_day_col=first_day_col, day_col_span=day_col_span, num_days=num_days
+        )
+
+    values = _header_day_values(grid, header_row, first_day_col, day_col_span, num_days)
+    dates: list[dt.date | None] = [
+        _parse_header_date(value, expected, today)
+        for value, expected in zip(values, _WEEKDAY_LABELS)
+    ]
+
+    known = [(i, d) for i, d in enumerate(dates) if d is not None]
+    if not known:
+        raise WeeklyMenuParseError(
+            "헤더에서 날짜를 읽지 못해 어느 주인지 알 수 없습니다. "
+            "--week-start로 직접 지정하세요. "
+            f"(헤더 {header_row}행 값: {[_clean(v) for v in values]})"
+        )
+
+    # 각 헤더 칸이 가리키는 월요일이 전부 같아야 한다. 하나라도 다르면 6일이
+    # 연속이 아니라는 뜻 — 레이아웃이 다른 파일을 잘못된 날짜로 적재하느니
+    # 실패시킨다.
+    mondays = {d - dt.timedelta(days=i) for i, d in known}
+    if len(mondays) > 1:
+        raise WeeklyMenuParseError(
+            "헤더의 요일별 날짜가 월~토 연속이 아닙니다 — 시트 레이아웃을 확인하세요. "
+            f"(읽어낸 날짜: {[d.isoformat() for _, d in known]})"
+        )
+
+    monday = mondays.pop()
+    if monday.weekday() != 0:
+        raise WeeklyMenuParseError(
+            f"추론된 주 시작일 {monday.isoformat()}이 월요일이 아닙니다 — "
+            "요일 헤더와 날짜가 어긋나 있습니다."
+        )
+    return monday
+
+
 def _strip_origin_annotation(name: str) -> str:
     """메뉴명 끝에 붙은 "(재료:원산지)" 주석을 제거해 메인메뉴명만 남긴다.
 
@@ -261,8 +372,14 @@ def parse_weekly_menu_grid(
     부찬). 지금은 included_meal_types에 해당하는 식사구분(기본: 중식)만
     파싱한다 — 조식/석식은 필요해지면 이 인자를 넓혀서 켠다.
 
-    week_start_date: 이 표가 나타내는 주의 월요일 날짜. 원본 표에는 요일만
-    있고 절대 날짜가 없으므로(PRD 2.2), 호출부(CLI)가 운영자에게 물어 전달한다.
+    week_start_date: 이 표가 나타내는 주의 월요일 날짜. 표의 요일 칸에는 상대
+    위치만 있으므로 절대 날짜는 이 인자로 받는다.
+
+    ⚠️ 예전 주석은 "원본 표에는 요일만 있고 절대 날짜가 없다(PRD 2.2)"고 적혀
+    있었지만 **사실이 아니다** — 헤더 셀에는 "7/6(월)"처럼 날짜가 함께 들어있고,
+    날짜서식이면 xlwings가 datetime을 그대로 돌려준다(같은 파일의 find_header_row
+    주석 참고). 그래서 호출부는 `infer_week_start(grid)`로 이 값을 자동으로 뽑을
+    수 있고, CLI는 `--week-start`가 없을 때 그렇게 한다(2026-08).
     """
     if header_row is None:
         header_row = find_header_row(grid, first_day_col=first_day_col, day_col_span=day_col_span, num_days=num_days)

@@ -4,7 +4,9 @@ import pytest
 
 from models import MealType, MenuRole
 from parsing.weekly_menu_parser import (
+    WeeklyMenuParseError,
     find_header_row,
+    infer_week_start,
     is_origin_annotation_text,
     parse_weekly_menu_grid,
     split_cell_into_items,
@@ -249,3 +251,85 @@ def test_normal_menu_items_still_split_on_separators():
     assert split_cell_into_items("돈까스,단무지") == ["돈까스", "단무지"]
     assert split_cell_into_items("제육볶음\n계란후라이") == ["제육볶음", "계란후라이"]
     assert split_cell_into_items("제육볶음\n&미니우동") == ["제육볶음&미니우동"]
+
+
+# ---------------------------------------------------------------------------
+# 주차(week_start) 자동 인식 (2026-08)
+# ---------------------------------------------------------------------------
+# ⚠️ 위쪽 _sample_grid()를 여기 쓰면 안 된다 — 헤더는 7/6~7/11인데 모듈 상수
+# MONDAY는 2026-07-20이라 일부러 어긋나 있다(운영자가 지정하던 시절의 픽스처).
+# 추론 테스트는 헤더와 기대값이 반드시 일치해야 하므로 전용 픽스처를 쓴다.
+
+TODAY = dt.date(2026, 8, 6)  # 추론 기준일을 고정해야 테스트가 시간에 안 흔들린다
+
+
+def _header_grid(day_cells):
+    """요일 헤더 행만 있는 최소 그리드 (D열부터 2열씩)."""
+    row = ["구분", "코너", None]
+    for cell in day_cells:
+        row += [cell, None]
+    return [[None] * 15, row]
+
+
+def test_infer_week_start_from_datetime_header_cells():
+    """날짜서식 셀은 xlwings가 datetime을 주므로 연도까지 그대로 확정된다."""
+    grid = _header_grid([dt.datetime(2026, 7, 6) + dt.timedelta(days=i) for i in range(6)])
+    assert infer_week_start(grid, today=TODAY) == dt.date(2026, 7, 6)
+
+
+def test_infer_week_start_from_text_header_picks_year_by_weekday():
+    """"7/6(월)"엔 연도가 없다 — 7/6이 월요일인 해는 2025~2027 중 2026뿐이다."""
+    grid = _header_grid(["7/6(월)", "7/7(화)", "7/8(수)", "7/9(목)", "7/10(금)", "7/11(토)"])
+    assert infer_week_start(grid, today=TODAY) == dt.date(2026, 7, 6)
+
+
+def test_infer_week_start_does_not_jump_into_the_future_at_year_end():
+    """소급 적재의 연말 함정 — "가장 가까운 해"로 고르면 미래로 찍힌다.
+
+    오늘이 2026-08-06일 때 12/22는 2026-12-22(138일 후)가 2025-12-22(227일 전)보다
+    가깝다. 그래서 근접도가 아니라 **요일**로 연도를 정한다(2025-12-22=월,
+    2026-12-22=화). 8개월치 소급 적재는 연말을 반드시 넘으므로 실제로 터지는 케이스다.
+    """
+    grid = _header_grid(
+        ["12/22(월)", "12/23(화)", "12/24(수)", "12/25(목)", "12/26(금)", "12/27(토)"]
+    )
+    assert infer_week_start(grid, today=TODAY) == dt.date(2025, 12, 22)
+
+
+def test_infer_week_start_skips_years_without_the_date():
+    """2/29는 없는 해가 있다 — 그 해를 후보에서 조용히 빼야 한다."""
+    grid = _header_grid(
+        ["2/28(월)", "2/29(화)", "3/1(수)", "3/2(목)", "3/3(금)", "3/4(토)"]
+    )
+    assert infer_week_start(grid, today=dt.date(2028, 3, 10)) == dt.date(2028, 2, 28)
+
+
+def test_infer_week_start_fails_when_header_has_no_dates():
+    """요일 글자만 있으면 어느 주인지 알 수 없다 — 지어내지 말고 실패해야 한다."""
+    grid = _header_grid(["월", "화", "수", "목", "금", "토"])
+    with pytest.raises(WeeklyMenuParseError, match="날짜를 읽지 못해"):
+        infer_week_start(grid, today=TODAY)
+
+
+def test_infer_week_start_fails_when_days_are_not_consecutive():
+    """한 칸이 다른 주를 가리키면 레이아웃이 다른 것 — 조용히 넘기면 안 된다.
+
+    7/13도 월요일이라 그 칸만 보면 멀쩡하다. 칸들끼리 교차 검증해야 잡힌다.
+    """
+    grid = _header_grid(
+        ["7/13(월)", "7/7(화)", "7/8(수)", "7/9(목)", "7/10(금)", "7/11(토)"]
+    )
+    with pytest.raises(WeeklyMenuParseError, match="연속이 아닙니다"):
+        infer_week_start(grid, today=TODAY)
+
+
+def test_infer_week_start_result_drives_parse_dates_end_to_end():
+    """추론 → 파싱까지 이어붙였을 때 실제 plan_date가 맞는지."""
+    grid = _sample_grid()
+    grid[1] = _header_grid(
+        ["7/6(월)", "7/7(화)", "7/8(수)", "7/9(목)", "7/10(금)", "7/11(토)"]
+    )[1]
+    week_start = infer_week_start(grid, today=TODAY)
+    rows = parse_weekly_menu_grid(grid, week_start)
+    assert min(r.plan_date for r in rows) == dt.date(2026, 7, 6)
+    assert max(r.plan_date for r in rows) == dt.date(2026, 7, 11)
