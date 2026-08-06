@@ -8,6 +8,7 @@ from app.models.enums import FoodVectorSource
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.services.company_classification import classify_division
 from app.services.food_vector_tagging import tag_food_vector_from_name
+from app.services.menu_name import strip_origin_annotation
 
 _GREEN_MEAT_NAMES = {"그린미트"}
 
@@ -25,12 +26,16 @@ TAKE_OUT_ALIASES = {"Take Out R", "Take Out M", "Take Out L", "선택형 Take ou
 PLACEHOLDER_MENU_NAMES = {"선택형 Take out", "(포장)메디쏠라"}
 
 _TRAILING_DOT_ZERO = re.compile(r"^(\d+)\.0$")
+
 # 메뉴명 끝에 "(재료:원산지)" 같은 주석이 붙어 들어오는 경로를 방어한다(파싱
 # 단계에서 이미 제거하지만, 취식기록/맛평가 쪽은 원산지 정보가 없으므로 여기서도
 # 한 번 더 정규화해 두 경로의 메뉴명이 항상 같은 MenuMaster row로 모이게 한다).
-_TRAILING_ORIGIN_ANNOTATION = re.compile(r"\s*\([^()]*:[^()]*\)\s*$")
-
-
+#
+# ⚠️ 아래 판정은 `ingestion-tool/parsing/weekly_menu_parser.py`와 **같은 규칙**이다.
+# 두 패키지가 분리돼 코드를 공유할 수 없어 복제하고 있으므로, 한쪽만 고치면
+# 조용히 어긋난다 — 실제로 2026-08까지 콜론만 인정하는 낡은 정규식이 양쪽에
+# 복제돼 있었고(`(계육-국산)`을 둘 다 못 걸렀다), 그래서 양쪽에 같은 케이스
+# 테스트를 두어 어긋나면 깨지게 했다.
 def normalize_employee_id(employee_id: str) -> str:
     """엑셀이 숫자만 있는 사번을 "12345678.0"으로 자동변환하는 경우를 되돌린다.
 
@@ -46,11 +51,8 @@ def _normalize_corner_name(corner_name: str) -> str:
 
 
 def _normalize_menu_name(menu_name: str) -> str:
-    while True:
-        stripped = _TRAILING_ORIGIN_ANNOTATION.sub("", menu_name).strip()
-        if stripped == menu_name:
-            return stripped
-        menu_name = stripped
+    """메뉴명 끝의 원산지 주석을 뗀다 — 판정은 menu_name.py가 단일 출처다."""
+    return strip_origin_annotation(menu_name)
 
 
 def get_or_create_corner(db: Session, corner_name: str) -> tuple[CornerMaster, bool]:

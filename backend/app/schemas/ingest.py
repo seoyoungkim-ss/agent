@@ -16,6 +16,11 @@ class WeeklyMenuRowIn(BaseModel):
 
 class WeeklyMenuIngestRequest(BaseModel):
     rows: list[WeeklyMenuRowIn]
+    # 같은 식단표를 다시 올릴 때 중복이 쌓이지 않게 한다. true면 payload에 등장하는
+    # (plan_date, corner_id, meal_type) 슬롯의 기존 행을 먼저 지우고 넣는다.
+    # 기본 false — 기존 호출부 동작을 바꾸지 않는다(2026-08, 원산지 파싱 수정 후
+    # 재업로드가 필요해지면서 추가).
+    replace_existing: bool = False
 
 
 class MealLogRowIn(BaseModel):

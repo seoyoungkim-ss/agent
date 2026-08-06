@@ -1,7 +1,14 @@
 import datetime as dt
 
+import pytest
+
 from models import MealType, MenuRole
-from parsing.weekly_menu_parser import find_header_row, parse_weekly_menu_grid, split_cell_into_items
+from parsing.weekly_menu_parser import (
+    find_header_row,
+    is_origin_annotation_text,
+    parse_weekly_menu_grid,
+    split_cell_into_items,
+)
 
 MONDAY = dt.date(2026, 7, 20)  # 이 표가 나타내는 주의 월요일 (실제로는 운영자가 지정)
 
@@ -181,3 +188,64 @@ def test_source_row_raw_preserved_for_verification():
     row = next(r for r in rows if r.menu_name == "제육볶음")
     assert "제육볶음" in row.source_row_raw
     assert "김치" in row.source_row_raw
+
+
+# ---------------------------------------------------------------------------
+# 원산지 주석 (2026-08 재작성)
+# ---------------------------------------------------------------------------
+# ⚠️ 이 케이스 표는 `backend/tests/test_menu_name.py`의 ORIGIN_CASES와 **같은
+# 내용이어야 한다.** 두 패키지가 코드를 공유할 수 없어 판정 로직이 복제돼 있고,
+# 2026-08까지 실제로 어긋나 있었다(양쪽 다 콜론만 인정해 `(계육-국산)`을 놓쳤다).
+
+# (입력, 통째로 원산지인가, 주석 제거 후 이름)
+ORIGIN_CASES = [
+    ("(계육-국산)", True, ""),
+    ("(오징어-중국산)", True, ""),
+    ("(돈육:국내산)", True, ""),
+    ("(쌀:국내산, 돈육:국내산)", True, ""),
+    ("*돈육:국내산", True, ""),
+    ("우삼겹구이(우육:호주산)", False, "우삼겹구이"),
+    ("우삼겹구이(우육:호주산, 돈육:국내산)", False, "우삼겹구이"),
+    ("오징어(중국산)", False, "오징어"),
+    ("계육(국산)", False, "계육"),
+    ("(오징어볶음-매운맛)", False, "(오징어볶음-매운맛)"),
+    ("김치찌개(얼큰한맛)", False, "김치찌개(얼큰한맛)"),
+    ("제육볶음", False, "제육볶음"),
+    ("함박스테이크&소스", False, "함박스테이크&소스"),
+]
+
+
+@pytest.mark.parametrize("raw,is_annotation,_normalized", ORIGIN_CASES)
+def test_is_origin_annotation_text(raw, is_annotation, _normalized):
+    assert is_origin_annotation_text(raw) is is_annotation
+
+
+@pytest.mark.parametrize("raw,_is_annotation,normalized", ORIGIN_CASES)
+def test_strip_origin_annotation_via_split(raw, _is_annotation, normalized):
+    """셀 하나짜리 입력이면 split 결과가 정규화된 이름 하나(또는 없음)여야 한다."""
+    items = split_cell_into_items(raw)
+    assert items == ([normalized] if normalized else [])
+
+
+def test_split_does_not_cut_inside_parentheses():
+    """괄호 안 쉼표에서 자르면 메인 이름이 `우삼겹구이(우육:호주산`으로 망가진다.
+
+    2026-08 실사용 신고의 가장 파괴적인 경로 — 부찬 오염을 넘어 **메인메뉴명
+    자체가 깨져** 취식기록과 영영 매칭되지 않는다.
+    """
+    assert split_cell_into_items("우삼겹구이(우육:호주산, 돈육:국내산)") == ["우삼겹구이"]
+
+
+def test_multiline_cell_drops_only_the_annotation_line():
+    assert split_cell_into_items("제육볶음\n(돈육:국내산, 고춧가루:중국산)") == ["제육볶음"]
+
+
+def test_multiple_annotations_in_one_cell_are_all_dropped():
+    assert split_cell_into_items("(계육-국산),(오징어-중국산)") == []
+
+
+def test_normal_menu_items_still_split_on_separators():
+    """원산지 판정을 넓히면서 평범한 항목 분리가 망가지면 안 된다."""
+    assert split_cell_into_items("돈까스,단무지") == ["돈까스", "단무지"]
+    assert split_cell_into_items("제육볶음\n계란후라이") == ["제육볶음", "계란후라이"]
+    assert split_cell_into_items("제육볶음\n&미니우동") == ["제육볶음&미니우동"]

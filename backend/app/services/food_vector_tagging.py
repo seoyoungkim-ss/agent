@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.models.enums import FoodVectorSource
 from app.models.master import MenuMaster
 from app.services.food_vector import FOOD_VECTOR_DIMENSIONS
+from app.services.menu_name import strip_origin_annotation
 from app.services.llm_client import InternalLLMClient
 
 # 규칙에 걸리면 이 값, 안 걸리면 이 값 — 둘 다 0~1 스케일(food_vector.py 컨벤션).
@@ -34,9 +35,20 @@ _KEYWORD_RULES: dict[str, tuple[str, ...]] = {
     "protein": ("고기", "돈까스", "치킨", "제육", "불고기", "삼겹살", "생선", "계란", "두부", "스테이크", "함박"),
     "carb": ("면", "국수", "라면", "밥", "떡", "빵", "우동", "짜장", "파스타"),
     "fried": ("튀김", "돈까스", "까스", "프라이", "탕수육"),
-    "soup_based": ("국", "탕", "찌개", "국밥", "스프", "우동"),
+    # "국"을 그대로 두면 "외국산"·"중국산"·"국내산"에 전부 걸린다(2026-08 실사용
+    # 신고). 그 여파가 단순 오태깅에서 끝나지 않는 게 문제였다 — 규칙이 하나라도
+    # 걸리면 food_vector가 NULL이 아니게 채워지고, LLM 보정 배치는
+    # `food_vector IS NULL`만 대상으로 하므로 그 행이 **영구히 보정 대상에서
+    # 빠진다**(3단계 안전망의 2단계 무력화). 국물 메뉴는 "국"이 이름 끝에 오므로
+    # 접미어로 좁히고, 나머지는 더 구체적인 키워드로 잡는다.
+    "soup_based": ("국물", "탕", "찌개", "국밥", "스프", "우동", "전골", "샤브"),
     "vegetable_ratio": ("나물", "샐러드", "채소", "야채", "무침", "쌈", "비빔"),
 }
+
+
+# "미역국"·"된장국"처럼 이름이 "국"으로 끝나는 국물 메뉴. 접미어로만 인정해
+# "중국산"·"외국산"이 걸리지 않게 한다.
+_SOUP_SUFFIX = "국"
 
 
 def tag_food_vector_from_name(menu_name: str) -> tuple[list[float], bool]:
@@ -45,10 +57,15 @@ def tag_food_vector_from_name(menu_name: str) -> tuple[list[float], bool]:
     matched_any=False면 어떤 규칙도 안 걸렸다는 뜻 — 호출부는 이 경우 food_vector를
     채우지 말고(NULL 유지) LLM/수동 태깅을 기다려야 한다.
     """
+    # 원산지 주석이 이름에 남아 있어도 태깅을 오염시키지 않도록 먼저 떼어낸다.
+    menu_name = strip_origin_annotation(menu_name)
     vector: list[float] = []
     matched_any = False
     for dim in FOOD_VECTOR_DIMENSIONS:
-        if any(kw in menu_name for kw in _KEYWORD_RULES.get(dim, ())):
+        matched = any(kw in menu_name for kw in _KEYWORD_RULES.get(dim, ()))
+        if dim == "soup_based" and not matched:
+            matched = menu_name.endswith(_SOUP_SUFFIX)
+        if matched:
             vector.append(_MATCH_SCORE)
             matched_any = True
         else:

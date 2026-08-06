@@ -29,12 +29,70 @@ from models import MealType, MenuRole, ParsedMenuRow
 _MEAL_TYPE_VALUES = {m.value for m in MealType}
 _WEEKDAY_LABELS = ["월", "화", "수", "목", "금", "토"]  # 일요일은 식당 미운영이라 없음
 _WEEKDAY_BY_PYTHON_INDEX = ["월", "화", "수", "목", "금", "토", "일"]  # dt.date.weekday(): 월=0
-_ITEM_SPLIT_PATTERN = re.compile(r"[\n\r]+|[,/·]")
 _SPECIAL_TAG_PATTERN = re.compile(r"^\[.+\]$")  # 예: "[한상차림]" — 메뉴명이 아니라 태그
-_INGREDIENT_ANNOTATION_PATTERN = re.compile(r"^\(.+:.+\)$")  # 예: "(우육:호주산)" — 버림
-# 메뉴명 끝에 재료/원산지 주석이 붙어있는 경우(예: "우삼겹구이(우육:호주산)") —
-# 취식기록/맛평가에는 원산지 정보가 없어 그대로 두면 매칭이 깨지므로 제거한다.
-_TRAILING_ORIGIN_ANNOTATION_PATTERN = re.compile(r"\s*\([^()]*:[^()]*\)\s*$")
+
+# ---------------------------------------------------------------------------
+# 원산지 주석 판정 (2026-08 재작성)
+# ---------------------------------------------------------------------------
+# 이전 구현은 구분자로 **콜론만** 인정해서 `(계육-국산)` 같은 하이픈 표기를 전부
+# 부찬으로 흘려보냈다(실사용 신고). 게다가 항목 분리가 괄호 안 쉼표까지 잘라
+# `우삼겹구이(우육:호주산, 돈육:국내산)`이 메인 이름을 `우삼겹구이(우육:호주산`으로
+# 망가뜨렸다. 구분자를 넓히고, 분리를 괄호 밖에서만 하도록 함께 고친다.
+#
+# 구분자만 넓히면 `(오징어볶음-매운맛)` 같은 정상 표기까지 지워질 수 있어,
+# **괄호 안 마지막 토큰이 원산지처럼 보여야 한다**는 조건을 함께 건다.
+_ORIGIN_SEPARATOR_PATTERN = re.compile(r"[:\-–—/]|\s+")
+_ORIGIN_EXPLICIT_TOKENS = {"국내산", "국산", "외국산", "수입산", "원양산"}
+_ORIGIN_MARKER_PREFIXES = "*※ \t"
+
+
+def _looks_like_origin_token(token: str) -> bool:
+    """"국내산", "호주산", "브라질산"처럼 원산지 이름으로 보이는 마지막 토큰인가."""
+    t = token.strip()
+    if not t:
+        return False
+    if t in _ORIGIN_EXPLICIT_TOKENS:
+        return True
+    # "산"으로 끝나는 2~6자 — 국가/지역명 + 산. "매운맛"·"태양초" 등은 안 걸린다.
+    return 2 <= len(t) <= 6 and t.endswith("산")
+
+
+def _is_origin_entry(entry: str, *, allow_bare: bool = False) -> bool:
+    """"우육:호주산" / "계육-국산" / "오징어 중국산" 한 건인지.
+
+    allow_bare=True면 괄호 안에 원산지만 있는 `(중국산)` 형태도 인정한다 —
+    괄호 밖에 메뉴명이 따로 있는 상황이라 오인 위험이 낮다.
+    """
+    parts = [p for p in _ORIGIN_SEPARATOR_PATTERN.split(entry.strip()) if p]
+    if not parts:
+        return False
+    if len(parts) >= 2:
+        return _looks_like_origin_token(parts[-1])
+    return allow_bare and _looks_like_origin_token(parts[0])
+
+
+def is_origin_annotation_text(text: str) -> bool:
+    """이 셀/줄이 **통째로** 원산지 표기인가 — 그렇다면 메뉴가 아니라 버려야 한다.
+
+    `(돈육:국내산, 고춧가루:중국산)`처럼 여러 재료가 나열된 경우도 잡는다.
+    반대로 `우삼겹구이(우육:호주산)`처럼 **메뉴명이 앞에 붙어 있으면 False**를
+    돌려준다 — 통째로 버리면 메뉴 자체가 사라지므로, 그건 뒤쪽 주석만 떼는
+    `_strip_origin_annotation`이 담당한다.
+    """
+    t = text.strip().lstrip(_ORIGIN_MARKER_PREFIXES).strip()
+    if not t:
+        return False
+    if t.startswith("(") and t.endswith(")"):
+        inner, allow_bare = t[1:-1], True
+    elif "(" not in t and ")" not in t:
+        inner, allow_bare = t, False  # 괄호 없는 `*돈육:국내산` 형태
+    else:
+        return False  # 메뉴명 + 주석 혼합
+    entries = [e for e in inner.split(",") if e.strip()]
+    return bool(entries) and all(_is_origin_entry(e, allow_bare=allow_bare) for e in entries)
+
+
+_TRAILING_PAREN_PATTERN = re.compile(r"\s*\(([^()]*)\)\s*$")
 
 
 class WeeklyMenuParseError(ValueError):
@@ -95,12 +153,42 @@ def find_header_row(
 
 
 def _strip_origin_annotation(name: str) -> str:
-    """메뉴명 끝에 붙은 "(재료:원산지)" 주석을 제거해 메인메뉴명만 남긴다."""
+    """메뉴명 끝에 붙은 "(재료:원산지)" 주석을 제거해 메인메뉴명만 남긴다.
+
+    괄호 안 마지막 토큰이 원산지처럼 보일 때만 뗀다 — `(오징어볶음-매운맛)`처럼
+    메뉴 설명이 붙은 경우를 지우면 안 된다.
+    """
     while True:
-        stripped = _TRAILING_ORIGIN_ANNOTATION_PATTERN.sub("", name).strip()
-        if stripped == name:
-            return stripped
-        name = stripped
+        match = _TRAILING_PAREN_PATTERN.search(name)
+        if match is None:
+            return name.strip()
+        entries = [e for e in match.group(1).split(",") if e.strip()]
+        if not entries or not all(_is_origin_entry(e, allow_bare=True) for e in entries):
+            return name.strip()
+        name = name[: match.start()].strip()
+
+
+def _split_top_level(text: str) -> list[str]:
+    """`,` `/` `·` 와 줄바꿈에서 자르되 **괄호 안에서는 자르지 않는다**.
+
+    이걸 안 하면 `우삼겹구이(우육:호주산, 돈육:국내산)`이 괄호 한가운데서 잘려
+    메인 이름이 `우삼겹구이(우육:호주산`으로 망가진다(2026-08 실사용 신고).
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        if depth == 0 and (ch in ",/·" or ch in "\n\r"):
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    out.append("".join(buf))
+    return [p for p in (x.strip() for x in out) if p]
 
 
 def split_cell_into_items(raw_text: str) -> list[str]:
@@ -116,7 +204,12 @@ def split_cell_into_items(raw_text: str) -> list[str]:
     """
     if not raw_text.strip():
         return []
-    parts = [_strip_origin_annotation(p.strip()) for p in _ITEM_SPLIT_PATTERN.split(raw_text)]
+    # 통째로 원산지인 조각은 버리고, 메뉴명 뒤에 붙은 주석만 떼어낸다.
+    parts = [
+        _strip_origin_annotation(p)
+        for p in _split_top_level(raw_text)
+        if not is_origin_annotation_text(p)
+    ]
     parts = [p for p in parts if p]
     items: list[str] = []
     for part in parts:
@@ -209,7 +302,7 @@ def parse_weekly_menu_grid(
                 if not cell:
                     continue
                 raw_texts.append(cell)  # 감사/디버깅용 — 버려지는 셀도 원문은 남긴다
-                if _INGREDIENT_ANNOTATION_PATTERN.match(cell):
+                if is_origin_annotation_text(cell):
                     continue  # 재료/원산지 주석은 메뉴 데이터가 아니므로 버림
                 if _SPECIAL_TAG_PATTERN.match(cell):
                     continue  # 특별식 태그 자체는 메뉴명이 아님 — 바로 아래 행이 실제 메인

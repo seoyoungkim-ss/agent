@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_ingest_token
 from app.db import get_db
-from app.models.enums import MenuRole
+from app.models.enums import MenuRole, MenuRoleSource
 from app.models.logs import MealLog, WeeklyMenuPlan
 from app.schemas.ingest import (
     IngestResult,
@@ -20,6 +20,32 @@ def ingest_weekly_menu(payload: WeeklyMenuIngestRequest, db: Session = Depends(g
     new_corners = 0
     new_menus = 0
     inserted = 0
+    replaced = 0
+
+    if payload.replace_existing:
+        # 슬롯 단위로 통째 교체한다. 이걸 안 하면 같은 파일을 다시 올릴 때
+        # 행이 그대로 쌓여 편성 횟수·중복 판정이 전부 2배가 된다(dedup 없는 append).
+        #
+        # 단 role_source가 MANUAL인 행(관리자가 화면에서 직접 고친 주찬/부찬,
+        # 건강가든 수기 입력)은 **교체 대상에서 제외**한다 — 사람이 손으로 넣은
+        # 값이 재업로드로 조용히 날아가면 안 된다.
+        slots = set()
+        for row in payload.rows:
+            corner, is_new_corner = get_or_create_corner(db, row.corner_name)
+            if is_new_corner:
+                new_corners += 1
+            slots.add((row.plan_date, corner.corner_id, row.meal_type))
+        for plan_date, corner_id, meal_type in slots:
+            replaced += (
+                db.query(WeeklyMenuPlan)
+                .filter(
+                    WeeklyMenuPlan.plan_date == plan_date,
+                    WeeklyMenuPlan.corner_id == corner_id,
+                    WeeklyMenuPlan.meal_type == meal_type,
+                    WeeklyMenuPlan.role_source != MenuRoleSource.MANUAL,
+                )
+                .delete(synchronize_session=False)
+            )
 
     for row in payload.rows:
         corner, is_new_corner = get_or_create_corner(db, row.corner_name)

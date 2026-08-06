@@ -3155,3 +3155,97 @@ def test_request_scoped_caches_do_not_leak_across_requests(client):
     after = client.get("/api/analysis/headcount-trend", params=params).json()
     total_after = sum(r["headcount"] for r in after)
     assert total_after == total_before + 1, "직전 요청의 캐시가 남아 새 취식이 안 보인다"
+
+
+def test_reingest_without_replace_duplicates_rows(client):
+    """기본 동작 확인 — dedup이 없으므로 그냥 다시 올리면 행이 쌓인다.
+
+    이 성질 때문에 원산지 파싱 수정 후 재업로드가 필요해지면서
+    replace_existing이 생겼다. 기본값을 바꾸면 여기서 깨진다.
+    """
+    body = {"rows": [_plan_row(MONDAY, "제육볶음", "메인"), _plan_row(MONDAY, "계란후라이", "부찬")]}
+    client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+    client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+
+    listed = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    ).json()
+    slot = listed[0]
+    assert len(slot["sides"]) == 3, "메인 중복분이 sides로 밀려 총 3개가 되어야 한다"
+
+
+def test_reingest_with_replace_existing_is_idempotent(client):
+    """같은 payload를 몇 번 보내도 슬롯 내용이 그대로여야 한다."""
+    body = {
+        "rows": [_plan_row(MONDAY, "제육볶음", "메인"), _plan_row(MONDAY, "계란후라이", "부찬")],
+        "replace_existing": True,
+    }
+    for _ in range(3):
+        resp = client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
+        assert resp.status_code == 200, resp.text
+
+    listed = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    ).json()
+    slot = listed[0]
+    assert slot["main"]["menu_name"] == "제육볶음"
+    assert [s["menu_name"] for s in slot["sides"]] == ["계란후라이"]
+
+
+def test_replace_existing_preserves_manually_edited_rows(client, db_session):
+    """관리자가 손으로 넣은 건강가든이 재업로드로 조용히 날아가면 안 된다."""
+    _ingest_weekly_menu(client)
+    corner_id = _corner_id(db_session, "한식")
+    client.put(
+        "/api/analysis/weekly-menu/health-garden",
+        json={
+            "plan_date": MONDAY.isoformat(),
+            "corner_id": corner_id,
+            "meal_type": "중식",
+            "menu_names_raw": "구운채소",
+        },
+    )
+
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [_plan_row(MONDAY, "돈까스", "메인"), _plan_row(MONDAY, "단무지", "부찬")],
+            "replace_existing": True,
+        },
+        headers=AUTH_HEADERS,
+    )
+
+    listed = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    ).json()
+    slot = next(s for s in listed if s["corner_id"] == corner_id)
+    assert slot["main"]["menu_name"] == "돈까스"  # 식단표는 교체됨
+    assert [i["menu_name"] for i in slot["health_garden"]] == ["구운채소"]  # 수기 입력은 보존
+
+
+def test_origin_annotation_rows_no_longer_become_side_dishes(client):
+    """파서 수정 전에는 `(계육-국산)`이 부찬으로 들어왔다.
+
+    백엔드도 같은 정규화를 하므로, 설령 그런 이름이 적재 요청으로 들어와도
+    메뉴명에서 원산지가 떨어져 유령 부찬이 생기지 않는지 확인한다.
+    """
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "우삼겹구이(우육:호주산)", "메인"),
+                _plan_row(MONDAY, "오징어(중국산)", "부찬"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    listed = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    ).json()
+    slot = listed[0]
+    assert slot["main"]["menu_name"] == "우삼겹구이"
+    assert [s["menu_name"] for s in slot["sides"]] == ["오징어"]
