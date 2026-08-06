@@ -4,7 +4,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -117,7 +117,18 @@ def _corner_id_by_menu_from_meal_log(
     "코너 미배정"으로 나오는 원인이었음) — meal_log.corner_id는 POS 취식기록
     자체에 이미 실려 있어 meal-log만 적재해도 항상 채워진다. 그래서 코너 배정은
     weekly_menu_plan 대신 meal_log에서 그 메뉴가 가장 많이 찍힌 코너를 쓴다.
+
+    **요청 단위 캐시**: 이 함수는 180일치 meal_log를 GROUP BY 하는데,
+    `_menu_popularity_multiplier`(simulation.py)가 코너·슬롯마다 호출해 한 화면에서
+    수백 번 재실행됐다(2026-08 성능 조사). 같은 기간에 대한 결과는 요청 안에서
+    변하지 않으므로 `Session.info`(SQLAlchemy가 세션 스코프 저장소로 제공)에
+    담아 재사용한다 — 세션이 끝나면 같이 사라지므로 값이 오래되어 틀릴 일이 없다.
     """
+    cache: dict = db.info.setdefault("_corner_id_by_menu_cache", {})
+    cache_key = (period_start, period_end)
+    if cache_key in cache:
+        return cache[cache_key]
+
     query = db.query(MealLog.menu_id, MealLog.corner_id, func.count().label("cnt")).filter(
         MealLog.menu_id.isnot(None)
     )
@@ -133,6 +144,7 @@ def _corner_id_by_menu_from_meal_log(
     corner_id_by_menu: dict[int, int] = {}
     for menu_id, corner_id, _cnt in rows:
         corner_id_by_menu.setdefault(menu_id, corner_id)  # count 내림차순이라 최빈 코너가 먼저 잡힘
+    cache[cache_key] = corner_id_by_menu
     return corner_id_by_menu
 
 
@@ -216,33 +228,55 @@ def headcount_trend(
     period_start_dt = dt.datetime.combine(period_start, dt.time())
     period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
 
+    # 날짜 단위로 SQL에서 미리 집계한다. 예전엔 기간 내 취식 행을 **전부** 파이썬으로
+    # 끌어와 세었는데(월간 선택 시 365일치 전량), 8개월치가 적재되면서 화면이 느려졌다
+    # (2026-08 실사용 신고). 그룹 키는 (날짜, 코너, 끼니, 회사구분)이라 카디널리티가
+    # 날짜×코너×3×3 수준으로 작고, 기간 버킷(주/월)은 그 위에서 접으면 된다.
+    date_col = func.date(MealLog.eaten_at).label("stat_date")
     query = (
-        db.query(MealLog.eaten_at, MealLog.corner_id, MealLog.meal_type, EmployeeMaster.division)
+        db.query(
+            date_col,
+            MealLog.corner_id,
+            MealLog.meal_type,
+            EmployeeMaster.division,
+            func.count().label("cnt"),
+        )
         # 사번이 employee_master에 없을 수 있다 — aggregation.py::aggregate_daily_stats가
         # 그런 행을 Division.OTHER로 집계하므로(dict.get 기본값) 여기서도 버리지 않고
         # 같은 규칙으로 맞춰야 daily_division_stats와 합계가 어긋나지 않는다.
         .outerjoin(EmployeeMaster, MealLog.employee_id == EmployeeMaster.employee_id)
         .filter(MealLog.eaten_at >= period_start_dt, MealLog.eaten_at < period_end_exclusive)
+        .group_by(date_col, MealLog.corner_id, MealLog.meal_type, EmployeeMaster.division)
     )
     if meal_types:
         query = query.filter(MealLog.meal_type.in_(meal_types))
     if corner_ids:
         query = query.filter(MealLog.corner_id.in_(corner_ids))
+    if divisions:
+        # 회사구분 필터는 SQL로 내린다. 단 Division.OTHER를 고른 경우엔 employee_master에
+        # 없는 사번(division IS NULL)도 함께 잡아야 위 outerjoin 규칙과 일치한다.
+        division_clause = EmployeeMaster.division.in_(divisions)
+        if Division.OTHER in divisions:
+            division_clause = or_(division_clause, EmployeeMaster.division.is_(None))
+        query = query.filter(division_clause)
 
     corner_names = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
     # meal_log엔 is_holiday 컬럼이 없어 _apply_classification_filter(집계 테이블 전용)를
-    # 못 쓴다 — HolidayService가 holiday_calendar를 한 번만 캐싱하므로 행별 분류가 싸다.
-    holiday_svc = HolidayService(db)
-    division_filter = set(divisions) if divisions else None
+    # 못 쓴다. 대신 기간의 날짜별 분류를 한 번에 만들어 두고 조회한다 — 예전엔 취식
+    # 행마다 classify()를 불러 같은 날짜를 그 날 취식 건수만큼 재계산했다.
+    classification_by_date = (
+        HolidayService(db).classify_range(period_start, period_end) if classification else {}
+    )
 
     totals: dict[tuple[str, str, str], int] = {}
-    for eaten_at, corner_id, meal_type, division in query.all():
+    for stat_date, corner_id, meal_type, division, cnt in query.all():
+        # func.date()는 백엔드에 따라 date 또는 문자열을 준다 — 양쪽 다 받는다.
+        if isinstance(stat_date, str):
+            stat_date = dt.date.fromisoformat(stat_date)
         division = division or Division.OTHER
-        if division_filter is not None and division not in division_filter:
-            continue
-        stat_date = eaten_at.date()
-        if classification and holiday_svc.classify(stat_date).value != classification:
-            continue
+        if classification and classification_by_date.get(stat_date) is not None:
+            if classification_by_date[stat_date].value != classification:
+                continue
 
         if group_by == "corner":
             series_key, series_label = str(corner_id), corner_names.get(corner_id) or "코너 미배정"
@@ -254,7 +288,7 @@ def headcount_trend(
             series_key = series_label = "전체"
 
         key = (_period_bucket(stat_date, granularity), series_key, series_label)
-        totals[key] = totals.get(key, 0) + 1
+        totals[key] = totals.get(key, 0) + cnt
 
     return [
         {"period": period, "series_key": series_key, "series_label": series_label, "headcount": headcount}

@@ -28,10 +28,10 @@ from app.models.logs import WeeklyMenuPlan
 from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import MenuPerformanceStats
 from app.services.corner_core_layer import build_employee_corner_counts, classify_corner_core_layer
-from app.services.holidays import HolidayService
+from app.services.holidays import HolidayService, get_holiday_service
 from app.services.llm_client import InternalLLMClient
 from app.services.menu_affinity import build_employee_menu_sets
-from app.services.menu_combination import build_side_combos_for_main_menu, compute_combo_satisfaction_summary
+from app.services.menu_combination import build_side_combos_bulk, compute_combo_satisfaction_summary
 from app.services.menu_throughput import (
     build_corner_daily_peak_share,
     build_corner_daily_throughput,
@@ -173,7 +173,17 @@ def compute_predicted_numbers(db: Session, plan_id: int) -> dict | None:
         )
         .all()
     )
-    combo_days = build_side_combos_for_main_menu(db, plan.menu_id, period_start, period_end)
+    # 단건 함수(build_side_combos_for_main_menu)는 과거 슬롯마다 meal_log 쿼리를
+    # 1번씩 던진다. 이 함수가 주간 전체 슬롯에 대해 반복 호출되면 그게 쿼리 수의
+    # 대부분을 차지했다(2026-08 측정: 30슬롯 1122쿼리 중 약 600). 기간이 같은
+    # 슬롯끼리는 결과를 공유할 수 있으므로 쿼리 3개짜리 벌크 버전을 세션에
+    # 캐시해 쓴다. 두 경로가 같은 값을 낸다는 건 동치성 테스트가 보증한다
+    # (test_bulk_combo_loader_matches_single_menu_loader).
+    combo_cache = db.info.setdefault("_side_combos_bulk_cache", {})
+    combo_key = (period_start, period_end)
+    if combo_key not in combo_cache:
+        combo_cache[combo_key] = build_side_combos_bulk(db, period_start, period_end)
+    combo_days = combo_cache[combo_key].get(plan.menu_id, [])
     combo_summaries = compute_combo_satisfaction_summary(combo_days)
     combo_match = next((c for c in combo_summaries if c.side_menu_ids == current_side_ids), None)
 
@@ -190,7 +200,7 @@ def compute_predicted_numbers(db: Session, plan_id: int) -> dict | None:
         _planned_main_menu_id,
     )
 
-    holiday_svc = HolidayService(db)
+    holiday_svc = get_holiday_service(db)
     classification = holiday_svc.classify(plan.plan_date)
 
     share_multiplier = _menu_popularity_multiplier(db, plan.corner_id, plan.menu_id)

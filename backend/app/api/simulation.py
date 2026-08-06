@@ -42,7 +42,14 @@ def _planned_main_menu_id(
 ) -> int | None:
     """그 날짜·코너·식사구분에 weekly_menu_plan으로 계획된 메인 메뉴 — 미입력이면
     None(폴백은 호출부가 처리, 32절 "meal_log 우선, weekly_menu_plan은 있으면
-    보강" 원칙과 동일)."""
+    보강" 원칙과 동일).
+
+    예측 경로가 슬롯마다 전 코너를 훑어 같은 (코너, 끼니, 날짜)를 반복 조회하므로
+    요청 단위로 캐시한다(2026-08 성능 조사)."""
+    cache = db.info.setdefault("_planned_main_menu_cache", {})
+    cache_key = (corner_id, meal_type, target_date)
+    if cache_key in cache:
+        return cache[cache_key]
     row = (
         db.query(WeeklyMenuPlan.menu_id)
         .filter(
@@ -53,40 +60,52 @@ def _planned_main_menu_id(
         )
         .first()
     )
-    return row[0] if row else None
+    cache[cache_key] = row[0] if row else None
+    return cache[cache_key]
 
 
 def _menu_popularity_multiplier(db: Session, corner_id: int, menu_id: int) -> float | None:
     """그 메뉴의 최근 share_of_traffic이 코너 평균 대비 얼마나 높은지 배수로
-    돌려준다 — 성과 데이터가 없으면(신메뉴 등) None."""
-    menu_stats = (
-        db.query(MenuPerformanceStats)
-        .filter_by(menu_id=menu_id)
-        .order_by(MenuPerformanceStats.period_end.desc())
-        .first()
-    )
-    if menu_stats is None or menu_stats.share_of_traffic is None:
-        return None
+    돌려준다 — 성과 데이터가 없으면(신메뉴 등) None.
 
-    corner_id_by_menu = _corner_id_by_menu_from_meal_log(db, menu_stats.period_start, menu_stats.period_end)
-    corner_menu_ids = {m for m, c in corner_id_by_menu.items() if c == corner_id}
-    if not corner_menu_ids:
-        return None
-    corner_shares = [
-        r.share_of_traffic
-        for r in db.query(MenuPerformanceStats)
-        .filter(
-            MenuPerformanceStats.menu_id.in_(corner_menu_ids),
-            MenuPerformanceStats.period_start == menu_stats.period_start,
-            MenuPerformanceStats.period_end == menu_stats.period_end,
+    같은 (코너, 메뉴)를 슬롯·날짜마다 반복 조회하므로 요청 단위로 캐시한다."""
+    pop_cache = db.info.setdefault("_menu_popularity_cache", {})
+    pop_key = (corner_id, menu_id)
+    if pop_key in pop_cache:
+        return pop_cache[pop_key]
+
+    def _compute() -> float | None:
+        menu_stats = (
+            db.query(MenuPerformanceStats)
+            .filter_by(menu_id=menu_id)
+            .order_by(MenuPerformanceStats.period_end.desc())
+            .first()
         )
-        .all()
-        if r.share_of_traffic is not None
-    ]
-    corner_avg_share = statistics.fmean(corner_shares) if corner_shares else 0.0
-    if corner_avg_share <= 0:
-        return None
-    return menu_stats.share_of_traffic / corner_avg_share
+        if menu_stats is None or menu_stats.share_of_traffic is None:
+            return None
+
+        corner_id_by_menu = _corner_id_by_menu_from_meal_log(db, menu_stats.period_start, menu_stats.period_end)
+        corner_menu_ids = {m for m, c in corner_id_by_menu.items() if c == corner_id}
+        if not corner_menu_ids:
+            return None
+        corner_shares = [
+            r.share_of_traffic
+            for r in db.query(MenuPerformanceStats)
+            .filter(
+                MenuPerformanceStats.menu_id.in_(corner_menu_ids),
+                MenuPerformanceStats.period_start == menu_stats.period_start,
+                MenuPerformanceStats.period_end == menu_stats.period_end,
+            )
+            .all()
+            if r.share_of_traffic is not None
+        ]
+        corner_avg_share = statistics.fmean(corner_shares) if corner_shares else 0.0
+        if corner_avg_share <= 0:
+            return None
+        return menu_stats.share_of_traffic / corner_avg_share
+
+    pop_cache[pop_key] = _compute()
+    return pop_cache[pop_key]
 
 
 class Weather(str, Enum):
@@ -169,8 +188,16 @@ def _fetch_classification_history(
 
 
 def _baseline_headcount(db: Session, corner_id: int, meal_type: MealType, classification: DayClassification) -> float:
+    """예측 경로가 슬롯·날짜마다 같은 (코너, 끼니, 분류)로 반복 호출하므로
+    요청 단위로 캐시한다(2026-08 성능 조사)."""
+    cache = db.info.setdefault("_baseline_headcount_cache", {})
+    cache_key = (corner_id, meal_type, classification)
+    if cache_key in cache:
+        return cache[cache_key]
     history = _fetch_classification_history(db, corner_id, meal_type, classification)
-    return statistics.fmean([h.headcount for h in history]) if history else 0.0
+    value = statistics.fmean([h.headcount for h in history]) if history else 0.0
+    cache[cache_key] = value
+    return value
 
 
 @router.post("/what-if")

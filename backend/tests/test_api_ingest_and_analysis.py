@@ -3131,3 +3131,27 @@ def test_repertoire_reports_diversity_per_corner_and_role(client):
     assert main["unique_menus"] == 2
     assert main["top_menus"][0] == {"menu_name": "돈까스", "count": 2}
     assert ("일품", "부찬") in items
+
+
+def test_request_scoped_caches_do_not_leak_across_requests(client):
+    """성능용 세션 캐시(db.info)가 요청 경계를 넘어 오래된 값을 주면 안 된다.
+
+    `_corner_id_by_menu_from_meal_log` 등은 180일 GROUP BY를 요청 단위로 캐시한다
+    (2026-08 성능 개선). 캐시 수명이 요청보다 길어지면 새로 적재한 데이터가 화면에
+    안 보이는 조용한 버그가 된다 — get_db가 요청마다 세션을 새로 만들기 때문에
+    안전한데, 그 전제가 깨지면 이 테스트가 깨지도록 못박는다.
+    """
+    params = {
+        "period_start": MONDAY.isoformat(),
+        "period_end": (MONDAY + dt.timedelta(days=5)).isoformat(),
+        "granularity": "daily",
+        "group_by": "total",
+    }
+    before = client.get("/api/analysis/headcount-trend", params=params).json()
+    total_before = sum(r["headcount"] for r in before)
+
+    _ingest_meal_log(client, "CACHE1", "맛남", corner_name="한식", menu_name="제육볶음")
+
+    after = client.get("/api/analysis/headcount-trend", params=params).json()
+    total_after = sum(r["headcount"] for r in after)
+    assert total_after == total_before + 1, "직전 요청의 캐시가 남아 새 취식이 안 보인다"

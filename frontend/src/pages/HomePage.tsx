@@ -165,7 +165,14 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   // 사내 행사(전사 워크숍·교육 등)는 시뮬레이션 탭의 what-if에 있던 유일한 실질
   // 입력이었다. 탭을 없애면서 이 토글만 여기로 흡수했다(2026-08).
   const [hasCompanyEvent, setHasCompanyEvent] = useState(false);
+  // 이 두 예측은 슬롯·코너·날짜마다 과거 180일을 다시 훑는 구조라 요청 하나가
+  // 수백~수천 SQL이 된다. 백엔드 docstring도 원래 "버튼 클릭 시에만 호출"이라고
+  // 적혀 있었는데, 2026-08 현황 재편 때 홈 진입 즉시 호출로 바뀌면서 화면이
+  // "불러오는 중"에서 멈췄다(실사용 신고). 버튼 뒤로 되돌린다 — 한 번 계산하면
+  // React Query 캐시(main.tsx의 staleTime)로 그 주는 즉시 다시 뜬다.
+  const [forecastRequested, setForecastRequested] = useState(false);
   const weeklyForecast = useQuery({
+    enabled: forecastRequested,
     queryKey: [
       "weekly-congestion-forecast",
       selectedMonday,
@@ -185,6 +192,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   });
   // 점유율/대기시간은 주간 식단표 예측 요약을 그대로 재사용한다(백엔드 변경 없음).
   const predictedImpact = useQuery({
+    enabled: forecastRequested,
     queryKey: ["weekly-predicted-impact", selectedMonday, saturdayOfSelected],
     queryFn: () =>
       api.weeklyMenuPredictedImpactSummary({ period_start: selectedMonday, period_end: saturdayOfSelected }),
@@ -723,6 +731,18 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
           추정합니다. 식당이 쉬는 주말·공휴일은 빠집니다. <strong>날씨·연휴 전후 배수는 실측 보정 전
           가정치</strong>라 방향성 참고용입니다 — 연휴 표본이 쌓이면 보정이 필요합니다.
         </p>
+        {!forecastRequested && (
+          <div
+            className="mb-3 rounded-md border p-3"
+            style={{ borderColor: "var(--border)" }}
+          >
+            <p className="mb-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+              이 예측은 코너·날짜마다 과거 6개월 이력을 다시 계산하므로 시간이 걸립니다. 조건을 고른 뒤
+              계산을 눌러주세요 — 한 번 계산하면 같은 주는 바로 다시 뜹니다.
+            </p>
+            <Button onClick={() => setForecastRequested(true)}>예측 계산하기</Button>
+          </div>
+        )}
         <div className="mb-3 flex flex-wrap items-center gap-4">
           <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
             끼니
@@ -754,7 +774,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
             사내 행사 있음 (식수 −10% 가정)
           </label>
         </div>
-        {weeklyForecast.isLoading && <LoadingState />}
+        {forecastRequested && weeklyForecast.isLoading && <LoadingState />}
         {weeklyForecast.isError && <ErrorState error={weeklyForecast.error} />}
         {weeklyForecast.data && forecastDays.length === 0 && (
           <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>

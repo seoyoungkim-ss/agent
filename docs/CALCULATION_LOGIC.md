@@ -3255,3 +3255,102 @@ test_api_ingest_and_analysis.py`, `frontend/src/api/client.ts`,
 `backend/tests/test_menu_plan_analytics.py`(신규),
 `backend/tests/test_api_ingest_and_analysis.py`,
 `frontend/src/api/client.ts`, `frontend/src/pages/AnalysisPage.tsx`.
+
+---
+
+## 50. 성능 회귀 복구 — 홈이 "불러오는 중"에서 멈추던 문제 (2026-08)
+
+**증상(실사용 신고)**: "데이터 불러오는 중 속도가 느리고 로딩되다가 결국 결과가
+나오지 않음."
+
+### 50.1 직접 원인 — 버튼 뒤에 있던 호출이 자동 호출로 바뀐 회귀
+
+홈 진입 시 무조건 나가던 API 중 둘이 사실상 끝나지 않았다:
+
+| 엔드포인트 | 비용(측정) |
+|---|---|
+| `/analysis/weekly-menu/predicted-impact-summary` | 슬롯 30개 기준 **1,122 쿼리 / 1,399ms** |
+| `/simulation/congestion-forecast/weekly` | 코너·날짜마다 180일 스캔 반복 |
+
+`compute_predicted_numbers_for_period`가 슬롯마다 `compute_predicted_numbers`를
+부르고, 그 안에서 다시 코너 루프를 돌며 180일치 `meal_log`를 반복해서 읽는
+구조다. `analysis.py`의 docstring에도 **"전체 예측 비교 버튼을 눌렀을 때만
+호출한다(자동 실행 아님)"** 고 적혀 있었는데, **커밋 `60960f9`(현황 재편 —
+점유율·대기시간을 홈으로 이동)에서 이 호출이 `enabled` 없이 마운트 시점 호출로
+바뀌었다.** 화면을 옮기면서 원래의 호출 조건을 같이 옮기지 않은 것이 원인이다.
+
+**조치**: 두 쿼리에 `enabled: forecastRequested` 게이트를 걸고 카드에 "예측
+계산하기" 버튼을 뒀다. 카드 자리와 설명은 그대로 둬서 기능이 사라진 것으로
+보이지 않게 했다. 홈 진입 시 무거운 예측 호출 **0개**(Playwright로 확인).
+
+### 50.2 React Query 기본값이 없어 탭 전환마다 전량 재요청
+
+`main.tsx`의 `new QueryClient()`에 옵션이 하나도 없어 `staleTime: 0`이었다 —
+탭을 오갈 때마다 모든 쿼리가 다시 나갔다. 취식·식단표 데이터는 하루 1회 배치로만
+갱신되므로 `staleTime: 5분`, `gcTime: 30분`, `refetchOnWindowFocus: false`로 뒀다.
+
+### 50.3 요청 단위 캐시 — `Session.info`
+
+예측 경로가 **같은 인자로 같은 무거운 조회를 수백 번** 반복하고 있었다. 결과가
+요청 안에서 변하지 않는 것들을 `Session.info`(SQLAlchemy가 세션 스코프 저장소로
+제공)에 담아 재사용한다:
+
+| 대상 | 캐시 키 |
+|---|---|
+| `_corner_id_by_menu_from_meal_log` (180일 GROUP BY) | `(period_start, period_end)` |
+| `build_corner_daily_throughput` / `build_corner_daily_peak_share` | `(corner_id, period_start, period_end)` |
+| `_baseline_headcount` | `(corner_id, meal_type, classification)` |
+| `_planned_main_menu_id` | `(corner_id, meal_type, plan_date)` |
+| `_menu_popularity_multiplier` | `(corner_id, menu_id)` |
+| `HolidayService` (`get_holiday_service`) | 세션당 1개 |
+
+**캐시 수명이 요청과 정확히 같다는 게 안전성의 전제다** — `get_db`가 요청마다
+세션을 새로 만들고 닫기 때문이다. 이 전제가 깨지면(예: scoped session 도입)
+새로 적재한 데이터가 화면에 안 보이는 조용한 버그가 되므로,
+`test_request_scoped_caches_do_not_leak_across_requests`로 못박았다.
+
+`HolidayService`는 캐시가 **인스턴스 스코프**라 루프 안에서 `HolidayService(db)`를
+새로 만들면 그 횟수만큼 `holiday_calendar`를 다시 읽는다 — 예측 경로가 실제로
+그랬다. `get_holiday_service(db)`로 세션당 1개를 재사용한다.
+
+### 50.4 예측 경로가 벌크 조합 로더를 쓰게 함
+
+`compute_predicted_numbers`가 쓰던 `build_side_combos_for_main_menu`는 **과거
+슬롯마다 `meal_log` 쿼리를 1번씩** 던진다 — 30슬롯 1,122쿼리 중 약 600이 여기서
+나왔다. §49.4에서 만든 쿼리 3개짜리 `build_side_combos_bulk`를 세션 캐시와 함께
+쓰도록 바꿨다. 두 경로가 같은 값을 낸다는 건
+`test_bulk_combo_loader_matches_single_menu_loader`가 이미 보증한다.
+
+### 50.5 `headcount-trend`를 SQL 집계로 전환
+
+기간 내 취식 행을 **전부 파이썬으로 끌어와** 세고 있었다(월간 선택 시 365일치
+전량). 회사구분·분류 필터도 파이썬이라 범위를 좁혀도 읽는 양이 그대로였다.
+
+→ `GROUP BY (날짜, 코너, 끼니, 회사구분)`으로 SQL에서 집계하고, 회사구분 필터는
+WHERE로 내렸다. `Division.OTHER`를 고른 경우 `employee_master`에 없는 사번
+(`division IS NULL`)도 함께 잡아야 기존 outerjoin 규칙과 일치한다(§49의
+`daily_division_stats` 합계 일치 조건).
+
+분류(평일/주말+공휴일/패밀리데이) 필터는 `HolidayService.classify_range()`로
+**날짜 dict를 한 번 만들어** 조회한다 — 예전엔 취식 행마다 `classify()`를 불러
+같은 날짜를 그 날 취식 건수만큼 재계산했다. `classify_range`는 이미 있었지만
+코드베이스 어디서도 쓰이지 않고 있었다.
+
+### 50.6 복합 인덱스 (`b3f81c47d052`)
+
+초기 스키마 이후 `meal_log`/`weekly_menu_plan`에 인덱스가 **하나도 추가된 적이
+없고 전부 단일 컬럼**이었다. 실제 쿼리 형태에 맞춰 6개를 추가했다 —
+`meal_log(corner_id, eaten_at)`, `(menu_id, eaten_at)`,
+`(eaten_at, corner_id, meal_type)`, `weekly_menu_plan(plan_date, menu_role)`,
+`menu_performance_stats(menu_id, period_end)`,
+`daily_corner_stats(corner_id, meal_type, is_holiday, stat_date)`.
+
+### 50.7 결과
+
+슬롯 30개 기준 `predicted-impact-summary`: **1,122 쿼리 / 1,399ms →
+364 쿼리 / 647ms** (쿼리 67% 감소). 여기에 홈 진입 시 이 호출 자체가 안 나가므로
+체감 개선은 더 크다.
+
+**남은 것**: `menu-pairs/top`의 조합 폭발(`menu_affinity.py`, O(사번 × 메뉴종수²))과
+`congestion_forecast` 테이블이 있는데 아무 배치도 안 채우는 문제는 그대로다 —
+예측을 배치 산출물로 옮기는 게 다음 단계다.

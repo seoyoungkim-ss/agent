@@ -141,3 +141,17 @@ class HolidayService:
             result[current] = self.classify(current)
             current += dt.timedelta(days=1)
         return result
+
+
+def get_holiday_service(db) -> "HolidayService":
+    """세션당 하나의 HolidayService를 재사용한다.
+
+    캐시(`_holiday_dates`)가 **인스턴스 스코프**라 `HolidayService(db)`를 루프
+    안에서 새로 만들면 그 횟수만큼 holiday_calendar를 다시 읽는다 — 예측 경로가
+    실제로 그랬다(2026-08 성능 조사). 새로 만들 이유가 없는 곳은 이 함수를 쓴다.
+    """
+    svc = db.info.get("_holiday_service")
+    if svc is None:
+        svc = HolidayService(db)
+        db.info["_holiday_service"] = svc
+    return svc

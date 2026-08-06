@@ -56,7 +56,15 @@ def build_corner_daily_throughput(
     period_end: dt.date,
     settings: Settings | None = None,
 ) -> list[DayThroughput]:
-    """기간 내 그 코너의 날짜별 (대표 메뉴, 피크타임 분당 서브)를 만든다."""
+    """기간 내 그 코너의 날짜별 (대표 메뉴, 피크타임 분당 서브)를 만든다.
+
+    예측 경로가 코너·슬롯마다 같은 (코너, 기간)으로 반복 호출해 180일치를 계속
+    다시 읽었다(2026-08 성능 조사) — `Session.info`에 요청 단위로 캐시한다.
+    """
+    cache = db.info.setdefault("_corner_throughput_cache", {})
+    cache_key = (corner_id, period_start, period_end)
+    if cache_key in cache:
+        return cache[cache_key]
     settings = settings or get_settings()
     period_start_dt = dt.datetime.combine(period_start, dt.time())
     period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
@@ -88,6 +96,7 @@ def build_corner_daily_throughput(
 
         results.append(DayThroughput(date=date, menu_id=dominant_menu_id, throughput=throughput))
 
+    cache[cache_key] = results
     return results
 
 
@@ -128,12 +137,18 @@ def build_corner_daily_peak_share(
 ) -> tuple[int, int]:
     """그 코너의 기간 내 (피크타임 건수, 전체 중식시간대 건수) 합계.
 
+    build_corner_daily_throughput과 같은 이유로 요청 단위 캐시를 쓴다.
+
     "혼잡 예상" 계산이 예전엔 예상 식수 전체를 피크타임 처리량 하나로 나눠
     비현실적으로 큰 숫자가 나왔다(2026-07 실사용 피드백) — 전체 중식시간대
     (settings.meal_period_start~end) 대비 피크타임에 실제로 얼마나 몰리는지
     실측 비율을 구해서 보정하기 위한 원자료. `build_corner_daily_throughput`과
     같은 방식(전체 행을 가져와 파이썬에서 시각 비교)으로 DB 방언에 무관하게 만든다.
     """
+    cache = db.info.setdefault("_corner_peak_share_cache", {})
+    cache_key = (corner_id, period_start, period_end)
+    if cache_key in cache:
+        return cache[cache_key]
     settings = settings or get_settings()
     period_start_dt = dt.datetime.combine(period_start, dt.time())
     period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
@@ -162,6 +177,7 @@ def build_corner_daily_peak_share(
             if peak_start_t <= t < peak_end_t:
                 peak_count += 1
 
+    cache[cache_key] = (peak_count, meal_count)
     return peak_count, meal_count
 
 
