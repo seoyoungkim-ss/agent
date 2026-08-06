@@ -161,3 +161,57 @@ def test_empty_directory_exits_nonzero(batch_env):
 
 def test_nonexistent_directory_exits_nonzero(tmp_path):
     assert cli.main(["weekly-menu-batch", str(tmp_path / "없는폴더"), "--yes"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# 경로 진단 (2026-08 실사용 신고: "폴더가 아니라고 뜬다")
+# ---------------------------------------------------------------------------
+
+
+def test_quoted_path_is_accepted(tmp_path):
+    """탐색기 "경로로 복사"는 따옴표까지 같이 복사해 준다."""
+    target = tmp_path / "식단표"
+    target.mkdir()
+    assert cli._clean_path_argument(f'"{target}"') == target
+
+
+def test_trailing_backslash_leftover_quote_is_stripped(tmp_path):
+    r"""`"C:\식단표\"`로 치면 셸이 `\"`를 이스케이프로 읽어 따옴표가 남는다."""
+    target = tmp_path / "식단표"
+    target.mkdir()
+    assert cli._clean_path_argument(f'{target}/"') == target
+
+
+def test_trailing_separator_is_stripped_but_root_survives():
+    assert cli._clean_path_argument("/tmp/식단표/") == cli.Path("/tmp/식단표")
+    assert cli._clean_path_argument("C:\\") == cli.Path("C:\\")
+
+
+def test_file_path_suggests_the_single_file_command(tmp_path, capsys):
+    """폴더 대신 파일을 지정하는 건 단건 명령을 쓰던 습관 때문에 흔하다."""
+    xlsx = tmp_path / "식단표.xlsx"
+    xlsx.write_text("")
+    assert cli.main(["weekly-menu-batch", str(xlsx), "--dry-run"]) == 1
+    out = capsys.readouterr().out
+    assert "폴더가 아니라" in out
+    assert "cli.py weekly-menu" in out  # 바로 복붙할 명령을 준다
+
+
+def test_typo_in_folder_name_lists_siblings(tmp_path, capsys):
+    (tmp_path / "식단표").mkdir()
+    assert cli.main(["weekly-menu-batch", str(tmp_path / "식단표오타"), "--dry-run"]) == 1
+    out = capsys.readouterr().out
+    assert "상위 폴더" in out and "식단표" in out
+
+
+def test_missing_parent_says_so(tmp_path, capsys):
+    assert cli.main(["weekly-menu-batch", str(tmp_path / "없음" / "더없음"), "--dry-run"]) == 1
+    assert "상위 폴더" in capsys.readouterr().out
+
+
+def test_files_only_in_subfolders_suggests_recursive(tmp_path, capsys):
+    """월별 폴더로 나눠 보관하는 경우가 흔하다."""
+    (tmp_path / "2026-07").mkdir()
+    (tmp_path / "2026-07" / "a.xlsx").write_text("")
+    assert cli.main(["weekly-menu-batch", str(tmp_path), "--dry-run"]) == 1
+    assert "--recursive" in capsys.readouterr().out

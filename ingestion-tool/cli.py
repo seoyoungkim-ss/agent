@@ -204,15 +204,65 @@ def _collect_menu_files(directory: Path, recursive: bool) -> list[Path]:
     )
 
 
+def _clean_path_argument(raw: str) -> Path:
+    """운영자가 붙여넣은 경로를 다듬는다.
+
+    윈도우에서 흔한 두 가지를 흡수한다:
+    - 탐색기 "경로로 복사"가 `"C:\\식단표"`처럼 **따옴표를 포함해** 복사해 준다.
+    - 끝에 `\\`를 붙여 `"C:\\식단표\\"`로 치면 셸이 `\\"`를 이스케이프로 읽어
+      경로 끝에 따옴표가 남는다.
+    """
+    cleaned = raw.strip().strip('"').strip("'").strip()
+    # 끝의 구분자는 떼되 `C:\`나 `/` 같은 루트는 남긴다.
+    while len(cleaned) > 3 and cleaned[-1] in "\\/":
+        cleaned = cleaned[:-1]
+    return Path(cleaned)
+
+
+def _explain_bad_directory(raw: str, directory: Path) -> None:
+    """왜 폴더로 안 잡혔는지 구체적으로 알려준다 — 추측하게 두지 않는다."""
+    print(f"⚠️ 폴더를 찾지 못했습니다.")
+    print(f"   입력한 값 : {raw!r}")
+    print(f"   찾아본 경로: {directory}")
+
+    if directory.is_file():
+        print("\n   → 이건 폴더가 아니라 **파일**입니다. 파일 1개는 이 명령을 쓰세요:")
+        print(f'      python cli.py weekly-menu "{directory}"')
+        return
+
+    parent = directory.parent
+    if parent.is_dir():
+        siblings = sorted(p.name for p in parent.iterdir() if p.is_dir())[:10]
+        print(f"\n   → 상위 폴더({parent})는 존재합니다. 그 안의 폴더 목록:")
+        for name in siblings or ["(하위 폴더 없음)"]:
+            print(f"      {name}")
+        print("   이름이 정확한지, 오타나 띄어쓰기가 없는지 확인하세요.")
+    else:
+        print(f"\n   → 상위 폴더({parent})도 없습니다. 경로 전체를 다시 확인하세요.")
+
+    if raw != raw.strip() or '"' in raw or raw.rstrip().endswith(("\\", "/")):
+        print(
+            "\n   → 입력값에 따옴표나 끝 역슬래시가 섞여 있습니다. "
+            '폴더 경로 끝의 `\\`는 빼고 `"C:\\식단표"` 형태로 넣으세요.'
+        )
+
+
 def _cmd_weekly_menu_batch(args: argparse.Namespace) -> int:
-    directory = Path(args.directory)
+    directory = _clean_path_argument(args.directory)
     if not directory.is_dir():
-        print(f"⚠️ 폴더가 아닙니다: {directory}")
+        _explain_bad_directory(args.directory, directory)
         return 1
 
     files = _collect_menu_files(directory, args.recursive)
     if not files:
         print(f"⚠️ {directory}에 식단표 파일(.xlsx/.xlsm/.xls)이 없습니다.")
+        entries = sorted(p.name for p in directory.iterdir())[:15]
+        print("   폴더 안에 있는 것:")
+        for name in entries or ["(비어 있음)"]:
+            print(f"      {name}")
+        if not args.recursive and any(p.is_dir() for p in directory.iterdir()):
+            # 월별/연도별 하위 폴더로 나눠 보관하는 경우가 흔하다.
+            print("\n   → 하위 폴더에 들어 있다면 --recursive 를 붙이세요.")
         return 1
 
     print(f"{len(files)}개 파일을 읽습니다 — Excel 인스턴스 1개를 재사용합니다.\n")
