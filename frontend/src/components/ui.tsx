@@ -224,31 +224,42 @@ export function Table({
   rowKey: (row: Record<string, ReactNode>, i: number) => string;
 }) {
   return (
-    <table className="w-full text-[13px]" style={{ color: "var(--ink)" }}>
-      <thead>
-        <tr>
-          {columns.map((col) => (
-            <th
-              key={col.key}
-              className={clsx("border-b py-2.5 pr-4 font-medium", col.align === "right" && "text-right")}
-              style={{ borderColor: "var(--border-strong)", color: "var(--ink-muted)" }}
-            >
-              {col.label}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row, i) => (
-          <tr key={rowKey(row, i)} className="border-b" style={{ borderColor: "var(--border)" }}>
+    // 열 내용(특히 긴 코너명 등)이 좁은 칸에서 세로로 늘어지는 문제
+    // (2026-08 신고) — 셀은 줄바꿈하지 않고 넘치면 컨테이너가 가로 스크롤로
+    // 받는다. 이 컴포넌트를 쓰는 모든 표에 한 번에 적용된다.
+    <div className="overflow-x-auto">
+      <table className="w-full text-[13px]" style={{ color: "var(--ink)" }}>
+        <thead>
+          <tr>
             {columns.map((col) => (
-              <td key={col.key} className={clsx("py-2.5 pr-4", col.align === "right" && "text-right")}>
-                {row[col.key]}
-              </td>
+              <th
+                key={col.key}
+                className={clsx(
+                  "whitespace-nowrap border-b py-2.5 pr-4 font-medium",
+                  col.align === "right" && "text-right",
+                )}
+                style={{ borderColor: "var(--border-strong)", color: "var(--ink-muted)" }}
+              >
+                {col.label}
+              </th>
             ))}
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={rowKey(row, i)} className="border-b" style={{ borderColor: "var(--border)" }}>
+              {columns.map((col) => (
+                <td
+                  key={col.key}
+                  className={clsx("whitespace-nowrap py-2.5 pr-4", col.align === "right" && "text-right")}
+                >
+                  {row[col.key]}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

@@ -2780,6 +2780,15 @@ function DuplicationCheckSection() {
   const [warningsOnly, setWarningsOnly] = useState(true);
   const periodEnd = weeklyAddDays(selectedMonday, 6);
 
+  // 회전 이력(재편성 과다/평소보다 이름 등)을 임의 기간으로 — 담당자: "주차별로
+  // 보지 말고 기간을 설정하면 그 기간동안 재편성과다/평소보다이름 카테고리
+  // 표현해줘". 우측 "한 끼 구성 겹침" 축은 이번 요청 범위 밖이라 그대로 위
+  // 주간 네비게이션(selectedMonday)을 쓴다 — 이 표만 독립된 기간을 쓴다.
+  const [rotationStart, setRotationStart] = useState(PERIOD_START);
+  const [rotationEnd, setRotationEnd] = useState(PERIOD_END);
+  const [showAllRotation, setShowAllRotation] = useState(false);
+  const ROTATION_PREVIEW_COUNT = 15;
+
   // 자주 반복되는 부찬 랭킹 — 담당자: "부찬 중복 볼 때 보기가 너무 불편함, 정말
   // 자주 나오고 돌려막기한 부찬을 보고싶어". 위 주간 회전표는 한 주씩 넘기는
   // 구조라 "지난 몇 달간 자주 반복됐다"는 그림이 안 나온다 — 그래서 이 서브
@@ -2791,8 +2800,8 @@ function DuplicationCheckSection() {
   const REPEATED_PREVIEW_COUNT = 20;
 
   const rotation = useQuery({
-    queryKey: ["weekly-menu-rotation", selectedMonday],
-    queryFn: () => api.weeklyMenuRotation({ period_start: selectedMonday, period_end: periodEnd }),
+    queryKey: ["weekly-menu-rotation", rotationStart, rotationEnd],
+    queryFn: () => api.weeklyMenuRotation({ period_start: rotationStart, period_end: rotationEnd }),
   });
   const clash = useQuery({
     queryKey: ["weekly-menu-combination-check", selectedMonday],
@@ -2824,6 +2833,11 @@ function DuplicationCheckSection() {
   // 담당자 우선순위: 메인 과다 편성이 1순위, 부찬은 그다음.
   const mainRotation = rotationItems.filter((r) => r.menu_role === "메인");
   const sideRotation = rotationItems.filter((r) => r.menu_role !== "메인");
+  // 기간을 넓게 잡으면 행이 많아질 수 있어 §61과 같은 미리보기 안전판을 둔다.
+  const rotationHasMore =
+    mainRotation.length > ROTATION_PREVIEW_COUNT || sideRotation.length > ROTATION_PREVIEW_COUNT;
+  const visibleMainRotation = showAllRotation ? mainRotation : mainRotation.slice(0, ROTATION_PREVIEW_COUNT);
+  const visibleSideRotation = showAllRotation ? sideRotation : sideRotation.slice(0, ROTATION_PREVIEW_COUNT);
   const rotationWarnings = (rotation.data?.items ?? []).filter(isRotationWarning).length;
   const mainWarnings = (rotation.data?.items ?? []).filter(
     (r) => r.menu_role === "메인" && isRotationWarning(r),
@@ -2859,8 +2873,33 @@ function DuplicationCheckSection() {
             {rotation.data ? ` ${rotation.data.min_rotation_gap_days}` : " 14"}일 미만이면 "재편성 과다")과
             <strong>횟수</strong>(최근 {rotation.data ? rotation.data.rotation_window_days : 90}일에 메인은
             2회, 부찬은 6회까지 무난). "14일은 넘겼지만 분기에 3번"은 간격만으론 안 잡힙니다.
-            <strong>메인 과다 편성이 1순위 문제</strong>라 위에 따로 놓았습니다.
+            <strong>메인 과다 편성이 1순위 문제</strong>라 위에 따로 놓았습니다. 기간은 직접 고를 수
+            있습니다 — 위 주간 네비게이션과 별개입니다.
           </p>
+          <div className="mb-3 flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+              시작일
+              <input
+                type="date"
+                className="rounded-md border px-3 py-2 text-[13px]"
+                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                value={rotationStart}
+                max={rotationEnd}
+                onChange={(e) => setRotationStart(e.target.value)}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+              종료일
+              <input
+                type="date"
+                className="rounded-md border px-3 py-2 text-[13px]"
+                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                value={rotationEnd}
+                min={rotationStart}
+                onChange={(e) => setRotationEnd(e.target.value)}
+              />
+            </label>
+          </div>
           {rotation.data && (
             <p
               className="mb-2 text-xs"
@@ -2879,7 +2918,7 @@ function DuplicationCheckSection() {
             </p>
           )}
           {(["메인", "부찬·건강가든"] as const).map((group) => {
-            const rows = group === "메인" ? mainRotation : sideRotation;
+            const rows = group === "메인" ? visibleMainRotation : visibleSideRotation;
             if (rows.length === 0) return null;
             const isMain = group === "메인";
             return (
@@ -2896,6 +2935,7 @@ function DuplicationCheckSection() {
                     { key: "menu", label: "메뉴" },
                     { key: "flag", label: "판정" },
                     { key: "gap", label: "직전 이후", align: "right" },
+                    { key: "interval", label: "평균 주기", align: "right" },
                     { key: "freq", label: "3개월", align: "right" },
                   ]}
                   rows={rows.map((r, i) => ({
@@ -2911,6 +2951,7 @@ function DuplicationCheckSection() {
                       r.gap_days == null
                         ? "-"
                         : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`,
+                    interval: r.avg_interval_days == null ? "-" : `${r.avg_interval_days}일`,
                     freq: (
                       <span
                         style={{
@@ -2930,93 +2971,15 @@ function DuplicationCheckSection() {
               </div>
             );
           })}
-          <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--border)" }}>
-            <p className="mb-1 text-[13px] font-medium">자주 반복되는 부찬 랭킹</p>
-            <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-              위 표와 달리 기간을 직접 골라 볼 수 있습니다 — "지난 3개월 동안 이 부찬이 유독 자주
-              돌아갔다" 같은 그림은 한 주씩 넘겨선 안 보이기 때문입니다. 같은 코너 안에서만
-              세고(다른 코너에 같은 반찬이 나온 건 중복이 아님), 건강가든은 공용이라 어느 코너와
-              겹쳐도 셉니다.
-            </p>
-            <div className="mb-3 flex flex-wrap items-end gap-3">
-              <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-                시작일
-                <input
-                  type="date"
-                  className="rounded-md border px-3 py-2 text-[13px]"
-                  style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                  value={repeatStart}
-                  max={repeatEnd}
-                  onChange={(e) => setRepeatStart(e.target.value)}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-                종료일
-                <input
-                  type="date"
-                  className="rounded-md border px-3 py-2 text-[13px]"
-                  style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                  value={repeatEnd}
-                  min={repeatStart}
-                  onChange={(e) => setRepeatEnd(e.target.value)}
-                />
-              </label>
-              <div className="flex flex-col gap-1">
-                <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-                  코너
-                </span>
-                <SegmentedControl
-                  value={repeatCornerId != null ? String(repeatCornerId) : ""}
-                  options={[
-                    { label: "전체", value: "" },
-                    ...(repeatCorners.data ?? []).map((c) => ({
-                      label: c.corner_name,
-                      value: String(c.corner_id),
-                    })),
-                  ]}
-                  onChange={(v) => setRepeatCornerId(v === "" ? null : Number(v))}
-                />
-              </div>
-            </div>
-            {repeated.isLoading && <LoadingState />}
-            {repeated.isError && <ErrorState error={repeated.error} />}
-            {repeated.data && repeatedItems.length === 0 && (
-              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                이 기간·코너에 반복 편성된 부찬이 없습니다.
-              </p>
-            )}
-            {repeatedItems.length > 0 && (
-              <>
-                <Table
-                  columns={[
-                    { key: "rank", label: "순위", align: "right" },
-                    { key: "corner", label: "코너" },
-                    { key: "menu", label: "메뉴" },
-                    { key: "role", label: "역할" },
-                    { key: "count", label: "횟수", align: "right" },
-                  ]}
-                  rows={visibleRepeatedItems.map((o, i) => ({
-                    key: `${o.corner_name}-${o.menu_name}`,
-                    rank: i + 1,
-                    corner: o.corner_name,
-                    menu: o.menu_name,
-                    role: o.menu_role,
-                    count: `${o.count}회`,
-                  }))}
-                  rowKey={(r) => r.key as string}
-                />
-                {repeatedItems.length > REPEATED_PREVIEW_COUNT && (
-                  <button
-                    className="mt-2 text-xs underline"
-                    style={{ color: "var(--accent)" }}
-                    onClick={() => setShowAllRepeated((v) => !v)}
-                  >
-                    {showAllRepeated ? "접기" : `전체 ${repeatedItems.length}개 보기`}
-                  </button>
-                )}
-              </>
-            )}
-          </div>
+          {rotationHasMore && (
+            <button
+              className="mb-3 text-xs underline"
+              style={{ color: "var(--accent)" }}
+              onClick={() => setShowAllRotation((v) => !v)}
+            >
+              {showAllRotation ? "접기" : "전체 보기"}
+            </button>
+          )}
         </div>
 
         {/* 축 2 — 슬롯 내 재료·특성 중복 */}
@@ -3073,6 +3036,97 @@ function DuplicationCheckSection() {
             ))}
           </div>
         </div>
+      </div>
+
+      {/* 자주 반복되는 부찬 랭킹 — 코너 열이 있는 5열 표라 좌우 절반 폭에
+          갇히면 코너명이 좁은 칸에서 줄바꿈된다(2026-08 신고). grid 밖,
+          카드 전체 폭을 쓰는 섹션으로 둔다. */}
+      <div className="mt-6 border-t pt-6" style={{ borderColor: "var(--border)" }}>
+        <p className="mb-1 text-[13px] font-medium">자주 반복되는 부찬 랭킹</p>
+        <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+          위 표와 달리 기간을 직접 골라 볼 수 있습니다 — "지난 3개월 동안 이 부찬이 유독 자주
+          돌아갔다" 같은 그림은 한 주씩 넘겨선 안 보이기 때문입니다. 같은 코너 안에서만
+          세고(다른 코너에 같은 반찬이 나온 건 중복이 아님), 건강가든은 공용이라 어느 코너와
+          겹쳐도 셉니다.
+        </p>
+        <div className="mb-3 flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            시작일
+            <input
+              type="date"
+              className="rounded-md border px-3 py-2 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              value={repeatStart}
+              max={repeatEnd}
+              onChange={(e) => setRepeatStart(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            종료일
+            <input
+              type="date"
+              className="rounded-md border px-3 py-2 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              value={repeatEnd}
+              min={repeatStart}
+              onChange={(e) => setRepeatEnd(e.target.value)}
+            />
+          </label>
+          <div className="flex flex-col gap-1">
+            <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+              코너
+            </span>
+            <SegmentedControl
+              value={repeatCornerId != null ? String(repeatCornerId) : ""}
+              options={[
+                { label: "전체", value: "" },
+                ...(repeatCorners.data ?? []).map((c) => ({
+                  label: c.corner_name,
+                  value: String(c.corner_id),
+                })),
+              ]}
+              onChange={(v) => setRepeatCornerId(v === "" ? null : Number(v))}
+            />
+          </div>
+        </div>
+        {repeated.isLoading && <LoadingState />}
+        {repeated.isError && <ErrorState error={repeated.error} />}
+        {repeated.data && repeatedItems.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이 기간·코너에 반복 편성된 부찬이 없습니다.
+          </p>
+        )}
+        {repeatedItems.length > 0 && (
+          <>
+            <Table
+              columns={[
+                { key: "rank", label: "순위", align: "right" },
+                { key: "corner", label: "코너" },
+                { key: "menu", label: "메뉴" },
+                { key: "role", label: "역할" },
+                { key: "count", label: "횟수", align: "right" },
+              ]}
+              rows={visibleRepeatedItems.map((o, i) => ({
+                key: `${o.corner_name}-${o.menu_name}`,
+                rank: i + 1,
+                corner: o.corner_name,
+                menu: o.menu_name,
+                role: o.menu_role,
+                count: `${o.count}회`,
+              }))}
+              rowKey={(r) => r.key as string}
+            />
+            {repeatedItems.length > REPEATED_PREVIEW_COUNT && (
+              <button
+                className="mt-2 text-xs underline"
+                style={{ color: "var(--accent)" }}
+                onClick={() => setShowAllRepeated((v) => !v)}
+              >
+                {showAllRepeated ? "접기" : `전체 ${repeatedItems.length}개 보기`}
+              </button>
+            )}
+          </>
+        )}
       </div>
     </Card>
   );
