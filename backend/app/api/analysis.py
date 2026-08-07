@@ -48,6 +48,7 @@ from app.services.food_vector_tagging import run_llm_food_vector_tagging, run_ll
 from app.services.holidays import DayClassification, HolidayService, family_day_dates_in_range
 from app.services.llm_client import InternalLLMClient
 from app.services.master_data import PLACEHOLDER_MENU_NAMES, TAKE_OUT_CORNER_NAME
+from app.services.menu_name import pair_likely_same_menu
 from app.services.menu_performance import (
     classify_menu_loyalty,
     classify_menu_quadrant,
@@ -84,6 +85,7 @@ from app.services.menu_rotation import (
     ROTATION_WINDOW_DAYS,
     RotationFlag,
     classify_rotation,
+    build_corner_menu_dates,
     count_in_window,
     find_overused_menus,
     is_over_frequency,
@@ -1295,20 +1297,33 @@ def weekly_menu_rotation(
         .all()
     )
 
-    # 메뉴별 전체 편성일(과거 + 조회 기간) — classify_rotation이 같은 날 중복까지
-    # 보도록 중복 날짜를 제거하지 않고 그대로 넘긴다.
-    dates_by_menu: dict[int, list[dt.date]] = {}
-    for plan_date, menu_id, *_ in rows:
-        dates_by_menu.setdefault(menu_id, []).append(plan_date)
+    # (코너, 메뉴)별 전체 편성일(과거 + 조회 기간).
+    #
+    # ⚠️ 코너를 키에 넣는다(2026-08 담당자 기준): "포기김치가 다른 코너에서 각각
+    # 나왔다고 중복이면 안 된다." 예전엔 메뉴만으로 묶어서 다른 코너에 같은 날 깔린
+    # 게 SAME_DAY 경고로 떴는데, 이제 그건 중복이 아니다. 건강가든은 공용이라
+    # 예외로 모든 코너에 합쳐진다 — `build_corner_menu_dates`가 그 규칙을 담는다.
+    # 같은 화면의 회전 이력과 과다 편성이 서로 다른 기준을 쓰면 안 되므로 둘 다
+    # 이 집합을 쓴다(§55.2에서 겪은 문제).
+    all_planned: list[tuple[dt.date, str, str, str]] = [
+        (
+            plan_date,
+            corner_name,
+            menu_name,
+            menu_role.value if hasattr(menu_role, "value") else str(menu_role),
+        )
+        for plan_date, _menu_id, menu_name, menu_role, _corner_id, corner_name, _meal_type in rows
+    ]
+    dates_by_corner_menu = build_corner_menu_dates(all_planned)
 
     results = []
-    planned_in_period: list[tuple[dt.date, str, str]] = []
+    planned_in_period: list[tuple[dt.date, str, str, str]] = []
     for plan_date, menu_id, menu_name, menu_role, corner_id, corner_name, meal_type in rows:
         if plan_date < period_start:
             continue  # 과거 이력은 판정 기준으로만 쓰고 결과에는 안 넣는다
         role_value = menu_role.value if hasattr(menu_role, "value") else str(menu_role)
-        planned_in_period.append((plan_date, menu_name, role_value))
-        menu_dates = dates_by_menu.get(menu_id, [])
+        planned_in_period.append((plan_date, corner_name, menu_name, role_value))
+        menu_dates = dates_by_corner_menu.get((corner_name, menu_name), [])
         verdict = classify_rotation(plan_date, menu_dates)
         results.append(
             {
@@ -1356,6 +1371,7 @@ def weekly_menu_rotation(
             {
                 "menu_name": o.menu_name,
                 "menu_role": o.menu_role,
+                "corner_name": o.corner_name,
                 "count": o.count,
                 "dates": [d.isoformat() for d in o.dates],
             }
@@ -1594,6 +1610,14 @@ def menu_plan_performance(
         for m in db.query(MenuMaster).filter(MenuMaster.menu_id.in_(log_only_ids)).all()
     } if log_only_ids else {}
 
+    plan_only = sorted(plan_name[mid] for mid in plan_only_ids)
+    log_only = sorted(log_only_names.values())
+
+    # 표기만 달라 갈라진 짝을 미리 짚어준다(2026-08). 담당자가 두 목록을 눈으로
+    # 대조해 "연어파피요트"와 "연어 파피요트"를 찾아내야 했다 — 정규화하면 같아지는
+    # 이름끼리는 기계가 찾아주는 게 맞다.
+    likely_pairs = pair_likely_same_menu(plan_only, log_only)
+
     return {
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
@@ -1604,9 +1628,12 @@ def menu_plan_performance(
             "matched": len(planned_ids & logged_ids),
             # 편성됐는데 취식 0 — "진짜 아무도 안 먹음"과 "메뉴명이 안 맞아
             # 매칭 실패"가 섞여 있으므로 목록째 넘겨 담당자가 판단하게 한다.
-            "plan_only": sorted(plan_name[mid] for mid in plan_only_ids),
+            "plan_only": plan_only,
             # 취식은 있는데 그 기간 식단표에 MAIN으로 없는 메뉴
-            "log_only": sorted(log_only_names.values()),
+            "log_only": log_only,
+            # 양쪽에 있으면서 정규화하면 같아지는 짝 — 이름 표기 차이로 갈라진
+            # 것이고, merge_duplicate_menus로 합칠 수 있다.
+            "likely_same_menu": likely_pairs,
         },
     }
 

@@ -2655,8 +2655,13 @@ def test_rotation_history_outside_period_is_not_returned_as_item(client):
     assert galbi["gap_days"] == 60
 
 
-def test_rotation_flags_same_day_duplicate_across_corners(client):
-    """같은 날 다른 코너에 같은 메뉴가 들어가면 "같은 날 중복"."""
+def test_same_menu_in_two_corners_on_one_day_is_not_a_duplicate(client):
+    """다른 코너에 같은 메뉴가 깔린 건 중복이 아니다.
+
+    ⚠️ 이 테스트는 예전에 정반대를 주장했다 — "같은 날 다른 코너면 같은 날 중복"이
+    의도된 동작이었다. 2026-08 담당자 기준이 바뀌었다: "포기김치가 다른 코너에서
+    각각 나왔다고 중복이면 안 되고". 코너는 서로 다른 선택지지 중복이 아니다.
+    """
     client.post(
         "/api/ingest/weekly-menu",
         json={
@@ -2670,7 +2675,29 @@ def test_rotation_flags_same_day_duplicate_across_corners(client):
     data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
     kimchi = [i for i in data["items"] if i["menu_name"] == "김치찌개"]
     assert len(kimchi) == 2
-    assert all(i["flag"] == "같은 날 중복" for i in kimchi)
+    assert all(i["flag"] != "같은 날 중복" for i in kimchi), "코너가 다른데 중복으로 잡혔다"
+
+
+def test_side_dish_clashing_with_health_garden_same_day_is_a_duplicate(client):
+    """건강가든은 누구나 가져가는 공용이라 코너를 가로질러 겹침으로 본다.
+
+    담당자: "건강가든하고만 중복 봐야함".
+    """
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "제육볶음", "메인", corner_name="한식"),
+                _plan_row(MONDAY, "시금치나물", "부찬", corner_name="한식"),
+                _plan_row(MONDAY, "시금치나물", "건강가든", corner_name="그린미트"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    spinach = [i for i in data["items"] if i["menu_name"] == "시금치나물"]
+    assert spinach, "시금치나물이 회전 이력에 없다"
+    assert any(i["flag"] == "같은 날 중복" for i in spinach)
 
 
 def test_rotation_reports_overused_menus_in_period(client):
@@ -3431,3 +3458,40 @@ def test_duplicate_payload_rows_are_collapsed_even_without_replace(client):
     resp = client.post("/api/ingest/weekly-menu", json=body, headers=AUTH_HEADERS)
     assert resp.status_code == 200, resp.text
     assert resp.json()["skipped_duplicate"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 표기가 달라 같은 메뉴가 갈라지던 문제 (2026-08 "연어파피요트" 신고)
+# ---------------------------------------------------------------------------
+
+
+def test_menu_name_spacing_difference_still_matches_the_same_menu(client, db_session):
+    """식단표는 "연어 파피요트", POS는 "연어파피요트"로 와도 같은 메뉴여야 한다.
+
+    예전엔 menu_name 정확 일치로 찾아서 별개 행이 됐고, 매칭 진단에서 같은 이름이
+    plan_only와 log_only에 동시에 떴다.
+    """
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY, "연어 파피요트", "메인")]},
+        headers=AUTH_HEADERS,
+    )
+    _ingest_meal_log(client, "E12345", "맛남", menu_name="연어파피요트")
+
+    from app.models.master import MenuMaster
+
+    rows = [m for m in db_session.query(MenuMaster).all() if "파피요트" in m.menu_name]
+    assert len(rows) == 1, f"같은 메뉴가 여러 행으로 갈라졌다: {[m.menu_name for m in rows]}"
+
+
+def test_origin_annotation_longer_than_six_chars_is_still_stripped(client, db_session):
+    """`노르웨이자연산`(7자)을 못 떼서 메뉴가 갈라졌던 경로."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY, "연어파피요트(연어:노르웨이자연산)", "메인")]},
+        headers=AUTH_HEADERS,
+    )
+    from app.models.master import MenuMaster
+
+    rows = [m for m in db_session.query(MenuMaster).all() if "파피요트" in m.menu_name]
+    assert [m.menu_name for m in rows] == ["연어파피요트"]

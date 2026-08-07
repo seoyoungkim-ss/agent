@@ -2,24 +2,23 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { Button, Card, ErrorState, LoadingState } from "../components/ui";
-
-function mondayOf(date: Date): string {
-  const d = new Date(date);
-  const day = (d.getDay() + 6) % 7; // 월=0 ... 일=6
-  d.setDate(d.getDate() - day);
-  return d.toISOString().slice(0, 10);
-}
-
-function addDays(iso: string, days: number): string {
-  const d = new Date(iso);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
-}
+import { addDays, currentMonday } from "../lib/week";
 
 // PRD "금주 메뉴 VOE 상세" — 홈 화면 "금주 메뉴 과거 VOE" 카드 클릭 시 진입.
 // 이번 주 메인메뉴별로 과거 평가 이력(만족도 추이)을 아코디언으로 펼쳐본다.
-export function WeeklyMenuVoeDetailPage({ onBack }: { onBack: () => void }) {
-  const [selectedMonday] = useState(mondayOf(new Date()));
+export function WeeklyMenuVoeDetailPage({
+  onBack,
+  monday,
+}: {
+  onBack: () => void;
+  /** 홈에서 보고 있던 주의 월요일. 없이 진입하면 이번 주로 폴백한다.
+   *
+   * ⚠️ 예전엔 이 화면이 `useState(mondayOf(new Date()))`로 **현재 주에 고정**돼
+   * 있었다. 홈에서 주차를 옮겨 놓고 들어와도 최신 주를 조회해 "타일 숫자는 있는데
+   * 0건"으로 보였다(2026-08 실사용 신고). 홈이 보던 주를 그대로 받아 쓴다. */
+  monday?: string;
+}) {
+  const selectedMonday = monday ?? currentMonday();
   const saturdayOfSelected = addDays(selectedMonday, 5);
   const [expandedMenu, setExpandedMenu] = useState<string | null>(null);
 

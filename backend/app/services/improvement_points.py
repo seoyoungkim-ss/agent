@@ -189,9 +189,15 @@ def collect_planning_issues(
     """
     issues: list[str] = []
     if overused:
+        # 중복은 코너 안에서 판정하므로(2026-08), 어느 코너인지까지 있어야
+        # 담당자가 바로 그 코너 식단을 열어볼 수 있다.
         top = overused[:_OVERUSED_TOP_N]
-        names = ", ".join(f"{o['menu_name']}({o['count']}회)" for o in top)
-        issues.append(f"이번 주에 반복 편성된 메뉴: {names}")
+        names = ", ".join(
+            f"{o['corner_name']} {o['menu_name']}({o['count']}회)" if o.get("corner_name")
+            else f"{o['menu_name']}({o['count']}회)"
+            for o in top
+        )
+        issues.append(f"같은 코너에 반복 편성된 메뉴: {names}")
     if no_intake_menus:
         top = no_intake_menus[:_NO_INTAKE_TOP_N]
         names = ", ".join(o["menu_name"] for o in top)

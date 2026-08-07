@@ -2,6 +2,7 @@ import datetime as dt
 
 from app.services.menu_rotation import (
     RotationFlag,
+    build_corner_menu_dates,
     average_interval_days,
     classify_rotation,
     count_in_window,
@@ -76,26 +77,27 @@ def test_avg_interval_excludes_the_appearance_being_judged():
 
 def test_find_overused_menus_respects_threshold():
     planned = [
-        (d(1), "김치", "부찬"),
-        (d(2), "김치", "부찬"),
-        (d(3), "김치", "부찬"),
-        (d(4), "김치", "부찬"),
-        (d(1), "돈까스", "메인"),
-        (d(5), "돈까스", "메인"),
+        (d(1), "한식", "김치", "부찬"),
+        (d(2), "한식", "김치", "부찬"),
+        (d(3), "한식", "김치", "부찬"),
+        (d(4), "한식", "김치", "부찬"),
+        (d(1), "한식", "돈까스", "메인"),
+        (d(5), "한식", "돈까스", "메인"),
     ]
     result = find_overused_menus(planned, threshold=3)
     assert [o.menu_name for o in result] == ["김치"]
     assert result[0].count == 4
     assert result[0].menu_role == "부찬"
+    assert result[0].corner_name == "한식"
 
 
 def test_find_overused_menus_counts_across_roles():
     """같은 나물이 부찬/건강가든으로 흩어져도 먹는 사람에겐 중복이다."""
     planned = [
-        (d(1), "시금치나물", "부찬"),
-        (d(2), "시금치나물", "건강가든"),
-        (d(3), "시금치나물", "건강가든"),
-        (d(4), "시금치나물", "건강가든"),
+        (d(1), "한식", "시금치나물", "부찬"),
+        (d(2), "한식", "시금치나물", "건강가든"),
+        (d(3), "한식", "시금치나물", "건강가든"),
+        (d(4), "한식", "시금치나물", "건강가든"),
     ]
     result = find_overused_menus(planned, threshold=3)
     assert result[0].count == 4
@@ -157,9 +159,9 @@ def test_same_menu_on_the_same_day_in_two_corners_counts_once():
     같은 날 중복이 안 보이게 되는 건 아니다: SAME_DAY 플래그가 그 축을 담당한다.
     """
     planned = [
-        (dt.date(2026, 7, 6), "김치", "부찬"),
-        (dt.date(2026, 7, 6), "김치", "부찬"),  # 다른 코너, 같은 날
-        (dt.date(2026, 7, 7), "김치", "부찬"),
+        (dt.date(2026, 7, 6), "한식", "김치", "부찬"),
+        (dt.date(2026, 7, 6), "한식", "김치", "부찬"),  # 같은 코너에 중복 행
+        (dt.date(2026, 7, 7), "한식", "김치", "부찬"),
     ]
     result = find_overused_menus(planned, threshold=1)
     assert len(result) == 1
@@ -169,19 +171,19 @@ def test_same_menu_on_the_same_day_in_two_corners_counts_once():
 
 def test_duplicate_rows_do_not_inflate_the_count():
     """DB에 중복 행이 남아 있어도 편성 횟수가 부풀지 않아야 한다."""
-    planned = [(dt.date(2026, 7, 6), "김치", "부찬")] * 5
+    planned = [(dt.date(2026, 7, 6), "한식", "김치", "부찬")] * 5
     assert find_overused_menus(planned, threshold=1) == []
 
 
 def test_threshold_is_applied_to_unique_days():
     """임계 비교도 고유 날짜 기준이라야 일관된다."""
-    same_day = [(dt.date(2026, 7, 6), "김치", "부찬")] * 3
+    same_day = [(dt.date(2026, 7, 6), "한식", "김치", "부찬")] * 3
     assert find_overused_menus(same_day, threshold=2) == []
 
     three_days = [
-        (dt.date(2026, 7, 6), "김치", "부찬"),
-        (dt.date(2026, 7, 7), "김치", "부찬"),
-        (dt.date(2026, 7, 8), "김치", "부찬"),
+        (dt.date(2026, 7, 6), "한식", "김치", "부찬"),
+        (dt.date(2026, 7, 7), "한식", "김치", "부찬"),
+        (dt.date(2026, 7, 8), "한식", "김치", "부찬"),
     ]
     assert len(find_overused_menus(three_days, threshold=2)) == 1
 
@@ -189,6 +191,80 @@ def test_threshold_is_applied_to_unique_days():
 def test_overuse_count_agrees_with_count_in_window():
     """같은 화면의 두 숫자가 서로 다른 규칙이면 담당자가 못 믿는다."""
     dates = [dt.date(2026, 7, 6), dt.date(2026, 7, 6), dt.date(2026, 7, 20)]
-    planned = [(d, "김치", "부찬") for d in dates]
+    planned = [(d, "한식", "김치", "부찬") for d in dates]
     overused = find_overused_menus(planned, threshold=1)
     assert overused[0].count == count_in_window(dt.date(2026, 7, 20), dates)
+
+
+# ---------------------------------------------------------------------------
+# 중복은 코너 안에서 — 건강가든만 예외 (2026-08 담당자 기준)
+# ---------------------------------------------------------------------------
+# "중복은 코너 안에서 봐야함 포기김치가 다른 코너에서 각각 나왔다고 중복이면
+#  안되고 건강가든하고만 중복 봐야함"
+
+
+def test_same_menu_in_different_corners_is_not_overuse():
+    """한식 포기김치와 분식 포기김치는 서로 다른 선택지다."""
+    planned = [
+        (d(1), "한식", "포기김치", "부찬"),
+        (d(2), "분식", "포기김치", "부찬"),
+        (d(3), "양식", "포기김치", "부찬"),
+        (d(4), "일품", "포기김치", "부찬"),
+    ]
+    assert find_overused_menus(planned, threshold=3) == []
+
+
+def test_repetition_inside_one_corner_is_overuse():
+    """같은 코너에서 반복되면 그건 중복이 맞다."""
+    planned = [(d(i), "한식", "포기김치", "부찬") for i in range(1, 5)]
+    result = find_overused_menus(planned, threshold=3)
+    assert [(o.corner_name, o.menu_name, o.count) for o in result] == [("한식", "포기김치", 4)]
+
+
+def test_health_garden_counts_against_every_corner():
+    """건강가든은 공용이라 어느 코너 부찬과 겹쳐도 중복이다."""
+    planned = [
+        (d(1), "한식", "시금치나물", "부찬"),
+        (d(2), "한식", "시금치나물", "부찬"),
+        (d(3), "그린미트", "시금치나물", "건강가든"),
+        (d(4), "그린미트", "시금치나물", "건강가든"),
+    ]
+    result = find_overused_menus(planned, threshold=3)
+    corners = {o.corner_name for o in result}
+    assert "한식" in corners, "건강가든 등장이 한식 부찬 반복에 합쳐지지 않았다"
+    assert all(o.count == 4 for o in result)
+
+
+def test_health_garden_only_menu_does_not_explode_into_every_corner_falsely():
+    """건강가든에만 있고 다른 코너엔 없으면, 그 자체의 반복만 잡혀야 한다."""
+    planned = [
+        (d(1), "한식", "제육볶음", "메인"),  # 코너 목록에 한식이 들어가게 하는 행
+        *[(d(i), "그린미트", "샐러드", "건강가든") for i in range(1, 5)],
+    ]
+    result = find_overused_menus(planned, threshold=3)
+    assert {o.menu_name for o in result} == {"샐러드"}
+    assert all(o.count == 4 for o in result)
+
+
+def test_build_corner_menu_dates_keeps_same_day_duplicate_for_clash_detection():
+    """SAME_DAY 판정이 살아 있어야 하므로 같은 날짜 중복을 남긴다.
+
+    같은 코너 부찬 + 같은 날 건강가든 → 날짜가 두 번 들어가 SAME_DAY로 잡힌다.
+    다른 코너끼리는 각 코너에 한 번씩만 들어가 안 잡힌다.
+    """
+    dates = build_corner_menu_dates(
+        [
+            (d(1), "한식", "시금치나물", "부찬"),
+            (d(1), "그린미트", "시금치나물", "건강가든"),
+        ]
+    )
+    assert dates[("한식", "시금치나물")] == [d(1), d(1)]  # 겹침 → SAME_DAY
+
+    dates2 = build_corner_menu_dates(
+        [
+            (d(1), "한식", "포기김치", "부찬"),
+            (d(1), "분식", "포기김치", "부찬"),
+        ]
+    )
+    assert dates2[("한식", "포기김치")] == [d(1)]
+    assert dates2[("분식", "포기김치")] == [d(1)]

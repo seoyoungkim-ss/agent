@@ -16,16 +16,24 @@
 """
 
 import re
+import unicodedata
 
 _TRAILING_PAREN = re.compile(r"\s*\(([^()]*)\)\s*$")
 _ORIGIN_SEPARATOR = re.compile(r"[:\-–—/]|\s+")
 _ORIGIN_EXPLICIT_TOKENS = {"국내산", "국산", "외국산", "수입산", "원양산"}
+# 원산지 토큰 길이 상한. 6자였는데 `노르웨이자연산`(7자)을 못 잡아 메뉴가 갈라졌다
+# (2026-08 "연어파피요트가 매칭 안 됨" 신고). 8자면 `뉴질랜드산`류까지 덮는다.
+_ORIGIN_TOKEN_MAX_LEN = 8
+
+# POS 표시명 앞에 붙는 판매 형태 표기 — 메뉴 이름이 아니다.
+# `strip_origin_annotation`은 `$` 앵커라 뒤쪽만 떼므로 앞쪽은 여기서 처리한다.
+_LEADING_ANNOTATIONS = ("(포장)", "(테이크아웃)", "(take out)", "(TO)")
 
 
 def looks_like_origin_token(token: str) -> bool:
-    """"국내산", "호주산", "브라질산"처럼 원산지 이름으로 보이는 토큰인가.
+    """"국내산", "호주산", "노르웨이자연산"처럼 원산지 이름으로 보이는 토큰인가.
 
-    "산"으로 끝나는 2~6자만 인정한다 — "매운맛"·"얼큰한맛"·"태양초" 같은 메뉴
+    "산"으로 끝나는 2~8자만 인정한다 — "매운맛"·"얼큰한맛"·"태양초" 같은 메뉴
     설명이 원산지로 오인되면 멀쩡한 이름이 잘려 나간다.
     """
     t = token.strip()
@@ -33,7 +41,7 @@ def looks_like_origin_token(token: str) -> bool:
         return False
     if t in _ORIGIN_EXPLICIT_TOKENS:
         return True
-    return 2 <= len(t) <= 6 and t.endswith("산")
+    return 2 <= len(t) <= _ORIGIN_TOKEN_MAX_LEN and t.endswith("산")
 
 
 def is_origin_entry(entry: str, *, allow_bare: bool = False) -> bool:
@@ -62,8 +70,37 @@ def strip_origin_annotation(menu_name: str) -> str:
         menu_name = menu_name[: match.start()].strip()
 
 
+# 조리법 어미 — 이걸로 끝나는 토큰은 재료가 아니라 **요리 이름**이다.
+# `(오징어볶음-매운맛)`처럼 괄호 안에 메뉴명이 통째로 들어온 경우를 재료 주석과
+# 구분하는 단서. 재료 주석의 앞 토큰은 `햄`·`돈육`·`계육`처럼 재료명이다.
+# ⚠️ 휴리스틱이다 — 여기 없는 조리법으로 끝나는 메뉴가 괄호 안에 통째로 들어오면
+# 주석으로 오인해 지운다. 실제 파일을 보며 계속 보강해야 한다.
+_DISH_SUFFIXES: tuple[str, ...] = (
+    "볶음", "구이", "찜", "탕", "조림", "무침", "튀김", "전", "국", "찌개", "말이",
+    "쌈", "샐러드", "steak", "스테이크", "까스", "카츠", "덮밥", "밥", "면", "국수",
+    "만두", "죽", "스프", "수프", "피자", "파스타", "그라탕", "리조또",
+)
+
+
+def _looks_like_dish_name(token: str) -> bool:
+    t = token.strip()
+    return bool(t) and t.endswith(_DISH_SUFFIXES)
+
+
+def is_ingredient_pair(entry: str) -> bool:
+    """`햄-계육` / `돈육:국내산`처럼 **재료 짝**으로 적힌 항목인가.
+
+    담당자 요청(2026-08): `(햄-계육, 돈육:국내산)`처럼 원산지가 아닌 재료 구성이
+    섞여 있어도 통째로 주석으로 봐야 한다.
+    """
+    parts = [p for p in _ORIGIN_SEPARATOR.split(entry.strip()) if p]
+    if len(parts) < 2:
+        return False
+    return not _looks_like_dish_name(parts[0])
+
+
 def is_origin_annotation_text(text: str) -> bool:
-    """이 문자열이 **통째로** 원산지 표기인가 — 메뉴가 아니라 버려야 하는 줄인지.
+    """이 문자열이 **통째로** 재료/원산지 표기인가 — 버려야 하는 줄인지.
 
     `우삼겹구이(우육:호주산)`처럼 메뉴명이 앞에 붙어 있으면 False다 — 통째로
     버리면 메뉴가 사라지므로 그건 `strip_origin_annotation`이 담당한다.
@@ -78,4 +115,69 @@ def is_origin_annotation_text(text: str) -> bool:
     else:
         return False  # 메뉴명 + 주석 혼합
     entries = [e for e in inner.split(",") if e.strip()]
-    return bool(entries) and all(is_origin_entry(e, allow_bare=allow_bare) for e in entries)
+    if not entries:
+        return False
+    if all(is_origin_entry(e, allow_bare=allow_bare) for e in entries):
+        return True
+    return allow_bare and all(is_ingredient_pair(e) for e in entries)
+
+
+# ---------------------------------------------------------------------------
+# 매칭 키 — 표시명과 분리한다 (2026-08)
+# ---------------------------------------------------------------------------
+# 신고: "연어파피요트 취식현황에도 있고 주간식단표에 있는데 매칭이 안되고있음".
+#
+# 원인은 메뉴 join이 사실상 **정확 문자열 비교**라는 것이었다. `menu_master.
+# menu_name`이 바이트 단위 unique라 아래가 전부 별개 행이 된다:
+#
+#   연어파피요트 / 연어 파피요트 / 연어파피요트（연어:노르웨이산） / (포장)연어파피요트
+#
+# ⚠️ **표시명을 정규화해 저장하면 안 된다.** 담당자가 화면에서 원문을 확인할 수
+# 없게 되고(엑셀 셀과 대조 불가), 감사 추적도 끊긴다. 그래서 원문은 그대로 두고
+# **조회용 키만 따로** 만든다(`menu_master.match_key`).
+
+
+def match_key(menu_name: str) -> str:
+    """같은 메뉴로 볼 이름들을 하나로 접는 **조회 전용** 키.
+
+    표시용이 아니다 — 공백까지 지우므로 사람이 읽으라고 만든 값이 아니다.
+
+    1. NFKC 정규화 — 전각 괄호 `（）`·전각 `＆`·전각 공백을 반각으로
+    2. 앞에 붙은 판매 형태 주석 제거 — `(포장)연어파피요트`
+    3. 뒤에 붙은 원산지 주석 제거 — `연어파피요트(연어:노르웨이산)`
+    4. 공백 전부 제거 — `연어 파피요트` == `연어파피요트`
+    5. 소문자화 — `Take Out` == `take out`
+    """
+    text = unicodedata.normalize("NFKC", menu_name or "").strip()
+
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _LEADING_ANNOTATIONS:
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix) :].strip()
+                changed = True
+        stripped = strip_origin_annotation(text)
+        if stripped != text:
+            text, changed = stripped, True
+
+    return "".join(text.split()).lower()
+
+
+def pair_likely_same_menu(
+    plan_only: list[str], log_only: list[str]
+) -> list[dict[str, str]]:
+    """양쪽 목록에서 **정규화하면 같아지는** 이름 짝을 찾는다.
+
+    매칭 진단은 `menu_id` 정수 비교라, 표기만 다른 같은 메뉴가 `plan_only`와
+    `log_only`에 **동시에** 뜬다(2026-08 "연어파피요트" 신고). 담당자가 두 목록을
+    눈으로 대조해야 했던 걸 기계가 짚어준다.
+
+    순수 함수 — DB를 모른다(레포 관례).
+    """
+    log_by_key = {match_key(name): name for name in log_only}
+    return [
+        {"plan_name": name, "log_name": log_by_key[match_key(name)]}
+        for name in plan_only
+        if match_key(name) in log_by_key
+    ]

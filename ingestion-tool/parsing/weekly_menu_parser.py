@@ -44,6 +44,8 @@ _SPECIAL_TAG_PATTERN = re.compile(r"^\[.+\]$")  # 예: "[한상차림]" — 메�
 _ORIGIN_SEPARATOR_PATTERN = re.compile(r"[:\-–—/]|\s+")
 _ORIGIN_EXPLICIT_TOKENS = {"국내산", "국산", "외국산", "수입산", "원양산"}
 _ORIGIN_MARKER_PREFIXES = "*※ \t"
+# 백엔드 menu_name.py와 같은 값이어야 한다 — 짝 테스트가 어긋남을 잡는다.
+_ORIGIN_TOKEN_MAX_LEN = 8
 
 
 def _looks_like_origin_token(token: str) -> bool:
@@ -53,8 +55,9 @@ def _looks_like_origin_token(token: str) -> bool:
         return False
     if t in _ORIGIN_EXPLICIT_TOKENS:
         return True
-    # "산"으로 끝나는 2~6자 — 국가/지역명 + 산. "매운맛"·"태양초" 등은 안 걸린다.
-    return 2 <= len(t) <= 6 and t.endswith("산")
+    # "산"으로 끝나는 2~8자 — 국가/지역명 + 산. "매운맛"·"태양초" 등은 안 걸린다.
+    # 6자였을 땐 `노르웨이자연산`(7자)을 못 잡아 메뉴가 갈라졌다(2026-08 신고).
+    return 2 <= len(t) <= _ORIGIN_TOKEN_MAX_LEN and t.endswith("산")
 
 
 def _is_origin_entry(entry: str, *, allow_bare: bool = False) -> bool:
@@ -71,10 +74,44 @@ def _is_origin_entry(entry: str, *, allow_bare: bool = False) -> bool:
     return allow_bare and _looks_like_origin_token(parts[0])
 
 
-def is_origin_annotation_text(text: str) -> bool:
-    """이 셀/줄이 **통째로** 원산지 표기인가 — 그렇다면 메뉴가 아니라 버려야 한다.
+# 조리법 어미 — 이걸로 끝나는 토큰은 재료가 아니라 **요리 이름**이다.
+# `(오징어볶음-매운맛)`처럼 괄호 안에 메뉴명이 통째로 들어오는 경우를 재료 주석과
+# 구분하는 유일한 단서다. 재료 주석의 앞 토큰은 `햄`·`돈육`·`계육`처럼 재료명이다.
+#
+# ⚠️ 휴리스틱이다. 여기 없는 조리법으로 끝나는 메뉴가 괄호 안에 통째로 들어오면
+# 주석으로 오인해 지운다 — 실제 파일을 보며 계속 보강해야 한다.
+_DISH_SUFFIXES: tuple[str, ...] = (
+    "볶음", "구이", "찜", "탕", "조림", "무침", "튀김", "전", "국", "찌개", "말이",
+    "쌈", "샐러드", "steak", "스테이크", "까스", "카츠", "덮밥", "밥", "면", "국수",
+    "만두", "죽", "스프", "수프", "피자", "파스타", "그라탕", "리조또",
+)
 
-    `(돈육:국내산, 고춧가루:중국산)`처럼 여러 재료가 나열된 경우도 잡는다.
+
+def _looks_like_dish_name(token: str) -> bool:
+    t = token.strip()
+    return bool(t) and t.endswith(_DISH_SUFFIXES)
+
+
+def _is_ingredient_pair(entry: str) -> bool:
+    """`햄-계육` / `돈육:국내산`처럼 **재료 짝**으로 적힌 항목인가.
+
+    담당자 요청(2026-08): `(햄-계육, 돈육:국내산)`처럼 원산지가 아닌 재료 구성이
+    섞여 있어도 통째로 주석으로 봐야 한다. 예전엔 모든 항목이 원산지여야 해서
+    이런 셀이 유령 부찬으로 들어왔다.
+    """
+    parts = [p for p in _ORIGIN_SEPARATOR_PATTERN.split(entry.strip()) if p]
+    if len(parts) < 2:
+        return False
+    # 앞 토큰이 요리 이름이면 재료 주석이 아니라 메뉴명이다(`오징어볶음-매운맛`).
+    return not _looks_like_dish_name(parts[0])
+
+
+def is_origin_annotation_text(text: str) -> bool:
+    """이 셀/줄이 **통째로** 재료/원산지 표기인가 — 그렇다면 메뉴가 아니라 버려야 한다.
+
+    `(돈육:국내산, 고춧가루:중국산)`처럼 여러 재료가 나열된 경우도,
+    `(햄-계육, 돈육:국내산)`처럼 원산지가 아닌 재료 구성이 섞인 경우도 잡는다.
+
     반대로 `우삼겹구이(우육:호주산)`처럼 **메뉴명이 앞에 붙어 있으면 False**를
     돌려준다 — 통째로 버리면 메뉴 자체가 사라지므로, 그건 뒤쪽 주석만 떼는
     `_strip_origin_annotation`이 담당한다.
@@ -89,7 +126,12 @@ def is_origin_annotation_text(text: str) -> bool:
     else:
         return False  # 메뉴명 + 주석 혼합
     entries = [e for e in inner.split(",") if e.strip()]
-    return bool(entries) and all(_is_origin_entry(e, allow_bare=allow_bare) for e in entries)
+    if not entries:
+        return False
+    # 원산지로만 이뤄진 경우(기존 판정) 또는 재료 짝으로만 이뤄진 경우 둘 다 주석.
+    if all(_is_origin_entry(e, allow_bare=allow_bare) for e in entries):
+        return True
+    return allow_bare and all(_is_ingredient_pair(e) for e in entries)
 
 
 _TRAILING_PAREN_PATTERN = re.compile(r"\s*\(([^()]*)\)\s*$")
@@ -331,6 +373,23 @@ def split_cell_into_items(raw_text: str) -> list[str]:
     return items
 
 
+def _merge_ampersand_fragments(items: Sequence[str]) -> list[str]:
+    """`&`로 시작하는 항목을 직전 항목에 이어붙인다.
+
+    `함박스테이크&소스`가 엑셀에서 두 줄(또는 두 행)로 나뉘어 들어오면 `&소스`가
+    별도 부찬이 됐다. 담당자: "메인메뉴가 '&'로 연결된 경우 & 뒤에까지 메인메뉴임".
+
+    앞에 붙일 항목이 없으면(첫 항목이 `&`로 시작) 그대로 둔다 — 지어낼 수 없다.
+    """
+    merged: list[str] = []
+    for item in items:
+        if item.startswith("&") and merged:
+            merged[-1] += item
+        else:
+            merged.append(item)
+    return merged
+
+
 def _forward_fill_column(grid: Sequence[Sequence[Any]], col: int, start_row: int) -> list[str]:
     filled: list[str] = []
     last_value = ""
@@ -409,8 +468,7 @@ def parse_weekly_menu_grid(
             col = first_day_col + day_offset * day_col_span
             plan_date = week_start_date + dt.timedelta(days=day_offset)
 
-            main_name: str | None = None
-            side_names: list[str] = []
+            items: list[str] = []
             raw_texts: list[str] = []
 
             for row_idx in range(start, end):
@@ -423,14 +481,17 @@ def parse_weekly_menu_grid(
                     continue  # 재료/원산지 주석은 메뉴 데이터가 아니므로 버림
                 if _SPECIAL_TAG_PATTERN.match(cell):
                     continue  # 특별식 태그 자체는 메뉴명이 아님 — 바로 아래 행이 실제 메인
-                for item in split_cell_into_items(cell):
-                    if main_name is None:
-                        main_name = item
-                    else:
-                        side_names.append(item)
+                items.extend(split_cell_into_items(cell))
 
-            if main_name is None:
+            # `함박스테이크` / `&소스`처럼 "&"로 이어지는 메뉴명이 **서로 다른 행**에
+            # 들어오는 경우를 다시 이어붙인다. split_cell_into_items는 셀 안에서만
+            # 이어붙이므로, 엑셀에서 줄이 나뉘어 있으면 `&소스`가 별도 부찬이 됐다
+            # (2026-08 실사용 신고). 셀 경계와 무관하게 같은 규칙을 적용한다.
+            items = _merge_ampersand_fragments(items)
+
+            if not items:
                 continue
+            main_name, side_names = items[0], items[1:]
 
             source_row_raw = " / ".join(raw_texts)
             rows.append(

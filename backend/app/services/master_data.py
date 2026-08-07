@@ -8,7 +8,7 @@ from app.models.enums import FoodVectorSource
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.services.company_classification import classify_division
 from app.services.food_vector_tagging import tag_food_vector_from_name
-from app.services.menu_name import strip_origin_annotation
+from app.services.menu_name import match_key, strip_origin_annotation
 
 _GREEN_MEAT_NAMES = {"그린미트"}
 
@@ -75,11 +75,22 @@ def get_or_create_menu(db: Session, menu_name: str) -> tuple[MenuMaster, bool]:
     조정을 기다린다.
     """
     menu_name = _normalize_menu_name(menu_name)
-    menu = db.query(MenuMaster).filter_by(menu_name=menu_name).one_or_none()
+    # ⚠️ 이름이 아니라 **매칭 키**로 찾는다(2026-08). 이름으로 찾으면 `연어 파피요트`와
+    # `연어파피요트`가 별개 행이 돼 식단표와 취식기록이 서로 안 붙는다.
+    # 같은 키를 가진 행이 여럿이면(예전에 갈라진 것들) 가장 먼저 만들어진 걸 쓴다 —
+    # 정리는 `app/maintenance/merge_duplicate_menus.py`가 한다.
+    key = match_key(menu_name)
+    menu = (
+        db.query(MenuMaster)
+        .filter(MenuMaster.match_key == key)
+        .order_by(MenuMaster.menu_id)
+        .first()
+    )
     if menu is None:
         vector, matched_any = tag_food_vector_from_name(menu_name)
         menu = MenuMaster(
             menu_name=menu_name,
+            match_key=key,
             food_vector=vector if matched_any else None,
             food_vector_source=FoodVectorSource.RULE if matched_any else None,
         )

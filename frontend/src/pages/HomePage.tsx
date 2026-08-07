@@ -26,19 +26,7 @@ import {
   useChartTheme,
 } from "../components/ui";
 import { CornerMetricComparisonSection } from "./AnalysisPage";
-
-function mondayOf(date: Date): string {
-  const d = new Date(date);
-  const day = (d.getDay() + 6) % 7; // 월=0 ... 일=6
-  d.setDate(d.getDate() - day);
-  return d.toISOString().slice(0, 10);
-}
-
-function isoDaysAgo(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
-}
+import { addDays, isoDaysAgo, mondayOf } from "../lib/week";
 
 const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
 
@@ -76,12 +64,6 @@ function axisTooltipFormatter(
     return `${p.marker}${p.seriesName}: ${formatTooltipNumber(value as number | string)}`;
   });
   return [header, ...lines].join("<br/>");
-}
-
-function addDays(iso: string, days: number): string {
-  const d = new Date(iso);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
 }
 
 const RECOMPUTE_PERIOD_START = isoDaysAgo(180); // PRD: 취식 데이터 6개월 누적 기준
@@ -169,7 +151,7 @@ function MenuTrendList({ rows, tone }: { rows: MenuTrendEntry[]; tone: "good" | 
   );
 }
 
-export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) {
+export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: string) => void }) {
   const [classification, setClassification] = useState<Classification | "전체">("전체");
   // 토요일은 평일과 식수 규모가 달라 같은 추이 라인에 섞으면 오해하기 쉽다 —
   // 기본은 숨기고 버튼으로 켜서 볼 수 있게 한다("주간 식수 추이"/"코너별 주간
@@ -245,6 +227,8 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
   // "불러오는 중"에서 멈췄다(실사용 신고). 버튼 뒤로 되돌린다 — 한 번 계산하면
   // React Query 캐시(main.tsx의 staleTime)로 그 주는 즉시 다시 뜬다.
   const [forecastRequested, setForecastRequested] = useState(false);
+  // 총계/코너별 보기 — 이미 받아온 응답을 다시 그리는 것뿐이라 재요청이 없다.
+  const [forecastView, setForecastView] = useState<"total" | "corner">("total");
   const weeklyForecast = useQuery({
     enabled: forecastRequested,
     queryKey: [
@@ -482,6 +466,45 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
     ],
   };
 
+  // 코너별 예상 식수 — 백엔드가 날짜마다 corners 배열을 이미 같이 주는데(총계와
+  // 함께) 위 차트가 총계만 쓰고 버리고 있었다. 담당자 요청(2026-08)에 맞춰 그
+  // 배열을 그대로 다시 그린다.
+  //
+  // ⚠️ 새 쿼리 파라미터로 만들면 안 된다. 이 예측은 슬롯·코너·날짜마다 과거 180일을
+  // 다시 훑어서 요청 하나가 수백~수천 SQL이라 "예측 계산하기" 버튼 뒤에 있다(§50).
+  // 토글은 순수 클라이언트 측이라 추가 요청도 지연도 없다.
+  const forecastCornerNames = Array.from(
+    new Set(forecastDays.flatMap((d) => d.corners.map((c) => c.corner_name))),
+  );
+  const forecastByCornerOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    tooltip: { trigger: "axis" as const, axisPointer: { type: "shadow" as const }, formatter: axisTooltipFormatter },
+    legend: { data: forecastCornerNames, textStyle: { color: chartTheme.text }, type: "scroll" as const },
+    grid: { left: 48, right: 16, top: 48, bottom: 32 },
+    xAxis: {
+      type: "category" as const,
+      data: forecastDays.map((d) => d.target_date),
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text, formatter: (v: string) => weekdayLabel(v) },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value" as const,
+      name: "예상 식수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: forecastCornerNames.map((name, i) => ({
+      name,
+      type: "bar" as const,
+      stack: "corner", // 쌓아서 총계가 위 차트와 같아 보이게 한다
+      itemStyle: { color: resolveColor(`var(--series-${(i % 8) + 1})`) },
+      data: forecastDays.map(
+        (d) => d.corners.find((c) => c.corner_name === name)?.predicted_headcount ?? 0,
+      ),
+    })),
+  };
+
   // 툴팁은 시리즈 "이름"(코너명)만 알 수 있는데 main-menu-by-date는 corner_id로
   // 오므로, 코너 목록으로 id→이름을 옮겨 코너명 기준 키로 맞춘다.
   const cornerNameById = new Map((cornerListQuery.data ?? []).map((c) => [c.corner_id, c.corner_name]));
@@ -622,7 +645,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
           label="금주 메뉴 과거 VOE"
           value={weeklyVoeHistory.isLoading ? "…" : (weeklyVoeHistory.data ?? 0)}
           sub="클릭하면 메뉴별 상세를 볼 수 있어요"
-          onClick={onOpenWeeklyVoe}
+          onClick={onOpenWeeklyVoe ? () => onOpenWeeklyVoe(selectedMonday) : undefined}
         />
       </div>
 
@@ -855,7 +878,25 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: () => void }) 
             이 주에는 예측할 영업일이 없습니다.
           </p>
         )}
-        {forecastDays.length > 0 && <ReactECharts option={forecastOption} style={{ height: 260 }} />}
+        {forecastDays.length > 0 && (
+          <>
+            <div className="mb-2 flex items-center justify-end">
+              <SegmentedControl
+                options={[
+                  { label: "전체 합계", value: "total" },
+                  { label: "코너별", value: "corner" },
+                ]}
+                value={forecastView}
+                onChange={(v) => setForecastView(v as "total" | "corner")}
+              />
+            </div>
+            <ReactECharts
+              option={forecastView === "corner" ? forecastByCornerOption : forecastOption}
+              style={{ height: 260 }}
+              notMerge
+            />
+          </>
+        )}
 
         <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
           <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>

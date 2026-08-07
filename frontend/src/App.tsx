@@ -21,6 +21,9 @@ const TABS: { value: Tab; label: string }[] = [
 
 function App() {
   const [tab, setTab] = useState<Tab>("home");
+  // 홈에서 "금주 메뉴 과거 VOE"를 누른 시점의 주. 탭 전환은 상태 하나로만
+  // 이뤄지고 라우터/URL이 없어서, 주차가 흐를 통로를 여기 둔다.
+  const [weeklyVoeMonday, setWeeklyVoeMonday] = useState<string | undefined>(undefined);
 
   return (
     <div className="min-h-screen" style={{ background: "var(--page)", color: "var(--ink)" }}>
@@ -45,12 +48,23 @@ function App() {
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-6 py-6">
-        {tab === "home" && <HomePage onOpenWeeklyVoe={() => setTab("weekly-voe")} />}
+        {tab === "home" && (
+          <HomePage
+            onOpenWeeklyVoe={(monday) => {
+              // 홈에서 보고 있던 주를 그대로 넘긴다 — 안 넘기면 상세 화면이
+              // 오늘 기준으로 다시 계산해 다른 주를 연다(2026-08 신고).
+              setWeeklyVoeMonday(monday);
+              setTab("weekly-voe");
+            }}
+          />
+        )}
         {tab === "menu-planning" && <MenuPlanningPage />}
         {tab === "satisfaction" && <SatisfactionVoePage />}
         {tab === "chat" && <ChatPage />}
         {tab === "admin" && <AdminPage />}
-        {tab === "weekly-voe" && <WeeklyMenuVoeDetailPage onBack={() => setTab("home")} />}
+        {tab === "weekly-voe" && (
+          <WeeklyMenuVoeDetailPage monday={weeklyVoeMonday} onBack={() => setTab("home")} />
+        )}
       </main>
     </div>
   );

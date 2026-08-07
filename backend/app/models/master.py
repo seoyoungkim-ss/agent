@@ -43,7 +43,14 @@ class MenuMaster(Base):
     __tablename__ = "menu_master"
 
     menu_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 표시용 원문. 담당자가 엑셀 셀과 대조할 수 있어야 하므로 정규화하지 않는다.
     menu_name: Mapped[str] = mapped_column(String(128), unique=True)
+    # 조회 전용 키(`menu_name.match_key`). 표기가 달라 같은 메뉴가 갈라지는 걸
+    # 막는다 — `연어 파피요트`/`연어파피요트（연어:노르웨이산）`/`(포장)연어파피요트`가
+    # 전부 별개 행이 돼 취식기록과 식단표가 안 붙었다(2026-08 신고).
+    # unique를 안 거는 이유: 이미 갈라진 기존 행들이 있어 제약을 걸면 마이그레이션이
+    # 실패한다. 병합은 `app/maintenance/merge_duplicate_menus.py`가 담당한다.
+    match_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     food_vector: Mapped[list[float] | None] = mapped_column(Vector(FOOD_VECTOR_DIM), nullable=True)
     # 규칙기반/LLM추정/관리자수동 — MANUAL은 이후 자동 재태깅 대상에서 제외된다.

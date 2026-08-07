@@ -117,49 +117,98 @@ class OverusedMenu:
     menu_role: str
     count: int
     dates: list[dt.date]
+    corner_name: str = ""  # 어느 코너에서 반복됐는지 (2026-08 이후 항상 채워진다)
+
+
+# 건강가든은 특정 코너 소속처럼 저장되지만 실제로는 **누구나 가져가는 공용**이다.
+# 그래서 코너 안에서만 중복을 볼 때도 건강가든만은 코너를 가로질러 겹친 것으로 센다
+# (담당자: "중복은 코너 안에서 봐야함 ... 건강가든하고만 중복 봐야함").
+HEALTH_GARDEN_ROLE = "건강가든"
+
+
+def build_corner_menu_dates(
+    planned: Sequence[tuple[dt.date, str, str, str]],
+) -> dict[tuple[str, str], list[dt.date]]:
+    """`(코너, 메뉴) -> 등장 날짜 목록`. 건강가든 등장일은 **모든 코너에 합친다.**
+
+    `planned`는 `(plan_date, corner_name, menu_name, menu_role)` 튜플들.
+
+    담당자 요청(2026-08): "포기김치가 다른 코너에서 각각 나왔다고 중복이면 안 되고".
+    예전엔 코너를 아예 안 봐서 한식 포기김치와 분식 포기김치가 같은 메뉴의 반복
+    편성으로 잡혔다. 이제 코너 안에서 보되, 건강가든은 공용이므로 어느 코너
+    부찬과 겹쳐도 중복으로 본다.
+
+    ⚠️ **같은 날짜 중복을 일부러 남긴다.** `classify_rotation`이 SAME_DAY를 리스트
+    안의 날짜 중복으로 판정하기 때문이다. 이 구조 덕에 "한식 부찬 나물 + 같은 날
+    건강가든 나물"은 SAME_DAY로 잡히고, "한식 김치 + 분식 김치"는 각 코너에 한
+    번씩만 들어가 안 잡힌다 — 정확히 담당자가 요청한 구분이다.
+    횟수를 셀 때는 부르는 쪽에서 `set()`으로 접는다(`find_overused_menus`).
+    """
+    corners = {corner for _, corner, _, _ in planned}
+    by_key: dict[tuple[str, str], list[dt.date]] = {}
+    health_garden_dates: dict[str, list[dt.date]] = {}
+
+    for plan_date, corner_name, menu_name, menu_role in planned:
+        if menu_role == HEALTH_GARDEN_ROLE:
+            health_garden_dates.setdefault(menu_name, []).append(plan_date)
+        else:
+            by_key.setdefault((corner_name, menu_name), []).append(plan_date)
+
+    # 건강가든 등장일을 모든 코너에 얹는다 — 그 코너에 같은 날 같은 메뉴가 이미
+    # 있으면 날짜가 두 번 들어가 SAME_DAY로 잡힌다(의도).
+    for menu_name, dates in health_garden_dates.items():
+        for corner_name in corners:
+            by_key.setdefault((corner_name, menu_name), []).extend(dates)
+
+    for dates in by_key.values():
+        dates.sort()
+    return by_key
 
 
 def find_overused_menus(
-    planned: Sequence[tuple[dt.date, str, str]],
+    planned: Sequence[tuple[dt.date, str, str, str]],
     *,
     threshold: int = OVERUSE_COUNT_IN_PERIOD,
 ) -> list[OverusedMenu]:
-    """조회 기간 안에서 같은 메뉴가 threshold 회를 넘게 편성된 것들.
+    """조회 기간 안에서 **같은 코너에** 같은 메뉴가 threshold 회를 넘게 편성된 것들.
 
-    `planned`는 (plan_date, menu_name, menu_role) 튜플들. 메인/부찬/건강가든을
-    구분하지 않고 한 번에 받는 이유는, 담당자 요청이 "메인메뉴/부찬/건강가든
-    **조합**의 중복 최소화"라 역할을 가로질러 봐야 하기 때문이다 — 같은 나물이
-    어떤 날은 부찬, 어떤 날은 건강가든으로 들어가도 먹는 사람에겐 중복이다.
+    `planned`는 `(plan_date, corner_name, menu_name, menu_role)` 튜플들.
 
-    ⚠️ **횟수는 행이 아니라 고유 날짜로 센다.** 예전엔 `len(entries)`로 행을 세서,
-    같은 날 두 코너에 깔린 메뉴가 2회로 잡혔다("같은날 메뉴가 두번씩 카운트됨"
-    실사용 신고, 2026-08). 바로 아래 `count_in_window`는 처음부터 날짜 집합으로
-    세고 있었으니 **같은 모듈 안에서 규칙이 반대**였던 셈이다.
+    역할(메인/부찬/건강가든)을 가로질러 보는 건 유지한다 — 원 요청이 "메인메뉴/
+    부찬/건강가든 **조합**의 중복 최소화"였다. 같은 나물이 어떤 날은 부찬, 어떤
+    날은 건강가든으로 들어가도 먹는 사람에겐 중복이다.
 
-    같은 날 여러 코너에 깔린 중복이 안 보이게 되는 건 아니다 —
-    `classify_rotation`의 SAME_DAY 플래그가 그 축을 따로 담당한다.
+    ⚠️ **코너를 가로질러서는 세지 않는다**(2026-08 담당자 기준): "포기김치가 다른
+    코너에서 각각 나왔다고 중복이면 안 된다." 단 건강가든은 공용이라 예외다 —
+    자세한 건 `build_corner_menu_dates` 참고.
+
+    ⚠️ **횟수는 행이 아니라 고유 날짜로 센다.** 예전엔 행을 세서 같은 날 두 코너에
+    깔린 메뉴가 2회로 잡혔다("같은날 메뉴가 두번씩 카운트됨" 신고). `count_in_window`는
+    처음부터 날짜 집합으로 세고 있었으니 같은 모듈 안에서 규칙이 반대였던 셈이다.
     """
-    buckets: dict[str, list[tuple[dt.date, str]]] = {}
-    for plan_date, menu_name, menu_role in planned:
-        buckets.setdefault(menu_name, []).append((plan_date, menu_role))
+    dates_by_key = build_corner_menu_dates(planned)
+
+    # 대표 역할 표기용 — 그 (코너, 메뉴)에서 가장 많이 쓰인 역할.
+    roles_by_key: dict[tuple[str, str], list[str]] = {}
+    for _, corner_name, menu_name, menu_role in planned:
+        roles_by_key.setdefault((corner_name, menu_name), []).append(menu_role)
 
     results = []
-    for menu_name, entries in buckets.items():
-        unique_dates = sorted({d for d, _ in entries})
-        if len(unique_dates) <= threshold:
+    for (corner_name, menu_name), date_list in dates_by_key.items():
+        dates = set(date_list)  # 횟수는 고유 날짜 기준(§55.2)
+        if len(dates) <= threshold:
             continue
-        # 역할이 섞여 있으면 가장 많이 쓰인 역할로 대표 표기한다.
-        roles = [role for _, role in entries]
-        dominant_role = max(set(roles), key=roles.count)
+        roles = roles_by_key.get((corner_name, menu_name)) or [HEALTH_GARDEN_ROLE]
         results.append(
             OverusedMenu(
                 menu_name=menu_name,
-                menu_role=dominant_role,
-                count=len(unique_dates),
-                dates=unique_dates,
+                menu_role=max(set(roles), key=roles.count),
+                count=len(dates),
+                dates=sorted(dates),
+                corner_name=corner_name,
             )
         )
-    results.sort(key=lambda o: (-o.count, o.menu_name))
+    results.sort(key=lambda o: (-o.count, o.corner_name, o.menu_name))
     return results
 
 
