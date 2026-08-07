@@ -4060,3 +4060,90 @@ key menu_id is still referenced from table "menu_performance_stats"
 않는다**(§57.4의 `match_key`와 같은 실수를 다른 형태로 반복했다). 그리고 잘못될
 수 있는 지점에는 **원인을 말해 주는 실패**를 심어 둔다 — 이번에 두 번 다 스택만
 보고 어느 테이블인지 찾아야 했다.
+
+## §58. 원산지 주석이 문자열 끝이 아니면 안 떨어지던 버그 (2026-08)
+
+신고 두 건:
+
+```
+명란크림파스타(명란:미국산)&베이컨포테이토피자 → 명란크림파스타&베이컨포테이토피자가 메인 메뉴여야 하는데 안 떨어짐
+햄마늘종볶음(햄-계육, 돈육:국내산) → 햄마늘종볶음이 부찬이어야 하는데 안 떨어짐, 재료 중복 화면에 "햄마늘종볶음(햄-계육"처럼 잘려 나옴
+```
+
+### 58.1 원인 1 — 스트립이 문자열 끝에서만 동작했다
+
+`strip_origin_annotation`(백엔드)과 `_strip_origin_annotation`(파서)이 쓰던
+`_TRAILING_PAREN` 계열 정규식은 `\s*\(([^()]*)\)\s*$`로 **`$`(문자열 끝) 앵커**가
+걸려 있었다. `"명란크림파스타(명란:미국산)&베이컨포테이토피자"`는 괄호 뒤에
+`"&베이컨포테이토피자"`가 더 있어 괄호가 문자열 끝이 아니다 — 매치 자체가 안
+되고 원문이 그대로 반환됐다.
+
+**수정**: 끝에 고정된 패턴 + while 루프로 끝에서부터 벗겨내는 방식 대신,
+`_PAREN_GROUP_PATTERN = re.compile(r"\s*\(([^()]*)\)")`(`$` 앵커 제거)로
+**문자열 안의 모든 괄호 그룹**을 `re.sub`로 훑어 원산지/재료-짝으로 판정되는
+것만 제거한다.
+
+### 58.2 원인 2 — 두 판정 함수가 서로 다른 규칙을 썼다
+
+§56.5에서 "원산지가 아닌 재료 짝만 있어도 주석으로 본다"는 규칙
+(`is_ingredient_pair`)을 추가했는데, **`is_origin_annotation_text`(셀 전체가
+주석인지 판정)에만 넣고 `strip_origin_annotation`(이름 뒤 주석을 떼는 함수)에는
+안 넣었다.** `"햄-계육"`은 "산"으로 안 끝나 원산지로 안 잡힌다.
+`is_origin_annotation_text`는 재료-짝 폴백이 있어 `"(햄-계육, 돈육:국내산)"`
+같은 **단독** 셀은 통과시키지만, 이름 뒤에 붙은
+`"햄마늘종볶음(햄-계육, 돈육:국내산)"`을 떼는 스트립 함수는 그 폴백이 없어
+아예 못 뗐다.
+
+**수정**: `_entries_are_removable(entries, *, allow_bare)` 공유 헬퍼(원산지
+전부 OR 재료-짝 전부)를 뽑아 `is_origin_annotation_text`와
+`strip_origin_annotation` 양쪽이 같은 판정을 쓰게 했다. "한쪽만 규칙을 넓히고
+한쪽은 안 넓히는" 이번 사고 패턴이 구조적으로 막힌다.
+
+양쪽 파일에 동일 적용 — `ingestion-tool/parsing/weekly_menu_parser.py`와
+`backend/app/services/menu_name.py`는 코드 공유가 안 되는 복제 관계라(§51
+이후 관례) 짝 테스트(`test_weekly_menu_parser.py` ↔ `test_menu_name.py`의
+`ORIGIN_CASES`)로 어긋남을 잡는다.
+
+⚠️ 조리법 어미로 끝나는 경우(`"(오징어볶음-매운맛)"`) 보호 장치는 그대로다 —
+정상 메뉴명이 사라지는 회귀는 없다(기존 케이스 전부 재확인 완료).
+
+### 58.3 이미 저장된 오염 데이터 — 새 정리 스크립트
+
+`match_key`는 `strip_origin_annotation`을 호출해 계산되지만, 그건
+`before_insert`/`before_update` 이벤트가 있을 때만 재계산된다(§57.4). 코드를
+고쳐도 **이미 만들어진 `menu_master.menu_name`은 저절로 안 바뀐다.**
+
+새로 만든 `app/maintenance/rename_menus_with_leftover_annotation.py`(dry-run
+기본, `--apply`로 실행)가 `menu_name`에 아직 남은 주석을 정정된 값으로
+UPDATE한다. UPDATE하면 `match_key`가 이벤트로 자동 재계산된다.
+
+`menu_name`엔 unique 제약이 있어, 정정된 이름이 **이미 다른 행이 쓰고 있으면**
+그대로 옮길 수 없다(예: "햄마늘종볶음"이 이미 따로 있는데 이 행도 "햄마늘종볶음"이
+되려는 경우). 그런 행은 표시명은 그대로 두고 **`match_key`만** 손으로 정정된
+값으로 맞춘다 — `merge_duplicate_menus.backfill_missing_match_keys`(§57)가 이미
+쓰던 것과 같은 방식이다. 그러면 `merge_duplicate_menus.py`(§57에서 이미
+검증된 슬롯 충돌·스냅샷 FK·성과 통계 처리)가 다음 실행에서 정확히 병합
+대상으로 잡는다 — 이 스크립트는 자기 병합 로직을 새로 안 만든다.
+
+운영 순서: `rename_menus_with_leftover_annotation` → `merge_duplicate_menus`
+(둘 다 dry-run 먼저).
+
+### 58.4 검증
+
+두 신고 문자열을 그대로 재현해 고치기 전엔 실패, 고친 후엔 통과하는 것을
+직접 확인했다(`ORIGIN_CASES`에 케이스 추가 — 파서·백엔드 양쪽에 동일 반영):
+
+- `strip_origin_annotation("명란크림파스타(명란:미국산)&베이컨포테이토피자")
+  == "명란크림파스타&베이컨포테이토피자"`
+- `strip_origin_annotation("햄마늘종볶음(햄-계육, 돈육:국내산)") == "햄마늘종볶음"`
+- 괄호 두 개짜리도 확인: `"A(원산지1)&B(원산지2)"` → `"A&B"`
+
+수정을 되돌리면(`git stash`) 새 테스트 3건이 정확히 그 이유로 실패하고, 기존
+케이스는 그대로 통과하는 것을 확인했다. 복원 후 백엔드 471개·ingestion-tool
+170개 테스트 전부 통과.
+
+`rename_menus_with_leftover_annotation`은 (1) 끝 주석/비-끝 주석/재료-짝
+케이스 각각의 정정, (2) 주석 없는 이름은 그대로 두는지, (3) dry-run 무변경,
+(4) 멱등성, (5) 이름 충돌 시 `match_key`만 정정하고 unique 위반 없이 넘어가는지,
+(6) 정정 → `merge_duplicate_menus` 순서로 실행하면 실제로 병합까지 끝까지
+이어지는지(end-to-end) — 8개 테스트로 확인했다.

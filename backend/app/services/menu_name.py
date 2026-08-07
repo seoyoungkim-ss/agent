@@ -18,7 +18,7 @@
 import re
 import unicodedata
 
-_TRAILING_PAREN = re.compile(r"\s*\(([^()]*)\)\s*$")
+_PAREN_GROUP_PATTERN = re.compile(r"\s*\(([^()]*)\)")
 _ORIGIN_SEPARATOR = re.compile(r"[:\-–—/]|\s+")
 _ORIGIN_EXPLICIT_TOKENS = {"국내산", "국산", "외국산", "수입산", "원양산"}
 # 원산지 토큰 길이 상한. 6자였는데 `노르웨이자연산`(7자)을 못 잡아 메뉴가 갈라졌다
@@ -58,18 +58,6 @@ def is_origin_entry(entry: str, *, allow_bare: bool = False) -> bool:
     return allow_bare and looks_like_origin_token(parts[0])
 
 
-def strip_origin_annotation(menu_name: str) -> str:
-    """메뉴명 끝의 원산지 주석을 뗀다. 괄호 안이 전부 원산지일 때만 제거한다."""
-    while True:
-        match = _TRAILING_PAREN.search(menu_name)
-        if match is None:
-            return menu_name.strip()
-        entries = [e for e in match.group(1).split(",") if e.strip()]
-        if not entries or not all(is_origin_entry(e, allow_bare=True) for e in entries):
-            return menu_name.strip()
-        menu_name = menu_name[: match.start()].strip()
-
-
 # 조리법 어미 — 이걸로 끝나는 토큰은 재료가 아니라 **요리 이름**이다.
 # `(오징어볶음-매운맛)`처럼 괄호 안에 메뉴명이 통째로 들어온 경우를 재료 주석과
 # 구분하는 단서. 재료 주석의 앞 토큰은 `햄`·`돈육`·`계육`처럼 재료명이다.
@@ -99,6 +87,21 @@ def is_ingredient_pair(entry: str) -> bool:
     return not _looks_like_dish_name(parts[0])
 
 
+def _entries_are_removable(entries: list[str], *, allow_bare: bool) -> bool:
+    """괄호 안 항목들이 전부 원산지이거나 전부 재료 짝이면 지워도 된다.
+
+    `is_origin_annotation_text`(셀 전체 판정)와 `strip_origin_annotation`
+    (이름 뒤 주석 제거)이 각자 규칙을 따로 들고 있다가 한쪽만 재료-짝 폴백을
+    받고 한쪽은 못 받는 사고가 났다(2026-08, "햄마늘종볶음(햄-계육, 돈육:
+    국내산)"이 안 떨어짐). 하나로 합쳐 두 함수가 항상 같은 판정을 하게 한다.
+    """
+    if not entries:
+        return False
+    if all(is_origin_entry(e, allow_bare=allow_bare) for e in entries):
+        return True
+    return allow_bare and all(is_ingredient_pair(e) for e in entries)
+
+
 def is_origin_annotation_text(text: str) -> bool:
     """이 문자열이 **통째로** 재료/원산지 표기인가 — 버려야 하는 줄인지.
 
@@ -115,11 +118,28 @@ def is_origin_annotation_text(text: str) -> bool:
     else:
         return False  # 메뉴명 + 주석 혼합
     entries = [e for e in inner.split(",") if e.strip()]
-    if not entries:
-        return False
-    if all(is_origin_entry(e, allow_bare=allow_bare) for e in entries):
-        return True
-    return allow_bare and all(is_ingredient_pair(e) for e in entries)
+    return _entries_are_removable(entries, allow_bare=allow_bare)
+
+
+def strip_origin_annotation(menu_name: str) -> str:
+    """메뉴명 안에 있는 "(재료:원산지)" 주석을 제거해 메뉴명만 남긴다.
+
+    ⚠️ 문자열 끝에 있는 것만 지우지 않는다. 예전엔 끝에 고정된 패턴으로
+    돌면서 끝에서부터 벗겨냈는데, "명란크림파스타(명란:미국산)&베이컨포테이토
+    피자"처럼 괄호 뒤에 "&메뉴명"이 더 붙는 경우 괄호가 끝이 아니게 돼
+    아예 안 지워졌다(2026-08 실사용 신고). 이제 문자열 안의 모든 괄호
+    그룹을 훑어 원산지/재료 짝으로 판정되는 것만 지운다.
+
+    괄호 안 항목이 원산지처럼 보이지 않으면 지우지 않는다 —
+    "(오징어볶음-매운맛)"처럼 메뉴 설명이 붙은 경우를 지우면 안 된다.
+    """
+
+    def _replace(match: re.Match) -> str:
+        entries = [e for e in match.group(1).split(",") if e.strip()]
+        return "" if _entries_are_removable(entries, allow_bare=True) else match.group(0)
+
+    result = _PAREN_GROUP_PATTERN.sub(_replace, menu_name)
+    return re.sub(r"\s{2,}", " ", result).strip()
 
 
 # ---------------------------------------------------------------------------
