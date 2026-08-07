@@ -400,6 +400,35 @@ def test_ampersand_still_joins_inside_one_cell():
     assert _monday_items(_one_day_grid(["함박스테이크\n&소스"])) == [("함박스테이크&소스", "메인")]
 
 
+def test_ampersand_trailing_previous_row_also_joins():
+    """신고 재현 — "뽀모도로파스타&불고기피자"에서 &뒤가 여전히 부찬으로 분리됨.
+
+    `&`가 다음 행 머리("&소스")에 남는 경우만 챙기고 이번 행 꼬리
+    ("뽀모도로파스타&")에 남는 경우를 놓쳤었다. 엑셀 줄바꿈은 "&"의 어느 쪽에서
+    끊길지 예측할 수 없으므로 양쪽 다 잡아야 한다.
+    """
+    assert _monday_items(_one_day_grid(["뽀모도로파스타&", "불고기피자"])) == [
+        ("뽀모도로파스타&불고기피자", "메인")
+    ]
+    assert _monday_items(_one_day_grid(["중국식게살볶음밥&", "자장소스"])) == [
+        ("중국식게살볶음밥&자장소스", "메인")
+    ]
+
+
+def test_ampersand_trailing_previous_row_does_not_swallow_real_side_dishes():
+    assert _monday_items(_one_day_grid(["뽀모도로파스타&", "불고기피자", "김치"])) == [
+        ("뽀모도로파스타&불고기피자", "메인"),
+        ("김치", "부찬"),
+    ]
+
+
+def test_ampersand_trailing_inside_one_cell_also_joins():
+    """셀 안에서 줄바꿈이 "&" 뒤가 아니라 앞에서 끊기는 경우 — 신고의 실제 형태."""
+    assert _monday_items(_one_day_grid(["뽀모도로파스타&\n불고기피자"])) == [
+        ("뽀모도로파스타&불고기피자", "메인")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 재료 주석 판정 확대 (2026-08 신고)
 # ---------------------------------------------------------------------------

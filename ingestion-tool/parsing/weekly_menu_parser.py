@@ -359,16 +359,28 @@ def _split_top_level(text: str) -> list[str]:
     return [p for p in (x.strip() for x in out) if p]
 
 
+def _continues_previous(prev: str, part: str) -> bool:
+    """`part`가 "&"로 끊어진 이름의 뒷조각인가 — 앞에 이어붙여야 하는지.
+
+    "&"가 줄바꿈 **뒤**(다음 조각의 맨 앞)에 남는 경우만 챙기다
+    "뽀모도로파스타&\n불고기피자"처럼 "&"가 줄바꿈 **앞**(앞 조각의 끝)에 남는
+    경우를 놓쳤다(2026-08 신고 — "뽀모도로파스타&불고기피자"의 "&" 뒤가 여전히
+    부찬으로 분리됨). 셀 안 줄바꿈이 "&"의 어느 쪽에서 끊기든 엑셀 작성자
+    입장에선 같은 의도이므로 양쪽 다 이어붙인다.
+    """
+    return bool(prev) and (part.startswith("&") or prev.endswith("&"))
+
+
 def split_cell_into_items(raw_text: str) -> list[str]:
     """셀 텍스트를 메뉴 항목 목록으로 분리한다.
 
     "&"로 이어진 이름(예: "함박스테이크&소스")은 하나의 메뉴명으로 취급하고
     쪼개지 않는다 — 분리 패턴에 "&"가 없으므로 대부분 자연히 유지된다. 다만
-    셀 안에서 "제육볶음&미니우동"이 줄바꿈으로 감싸져
-    "제육볶음\n&미니우동"처럼 들어오면 줄바꿈 분리 때문에 "&미니우동"이라는
-    조각난 항목이 생기므로, "&"로 시작하는 조각은 독립 항목으로 보지 않고
-    바로 앞 항목에 다시 이어붙인다. 이름 끝에 붙은 원산지 주석(예:
-    "우삼겹구이(우육:호주산)")은 제거한다.
+    셀 안에서 "제육볶음&미니우동"이 줄바꿈으로 감싸져 "제육볶음\n&미니우동"
+    또는 "제육볶음&\n미니우동"처럼 들어오면 줄바꿈 분리 때문에 조각난 항목이
+    생기므로, "&"로 이어지는 조각은 독립 항목으로 보지 않고 바로 앞 항목에
+    다시 이어붙인다. 이름 끝에 붙은 원산지 주석(예: "우삼겹구이(우육:호주산)")은
+    제거한다.
     """
     if not raw_text.strip():
         return []
@@ -381,7 +393,7 @@ def split_cell_into_items(raw_text: str) -> list[str]:
     parts = [p for p in parts if p]
     items: list[str] = []
     for part in parts:
-        if part.startswith("&") and items:
+        if items and _continues_previous(items[-1], part):
             items[-1] = items[-1] + part
         else:
             items.append(part)
@@ -389,16 +401,19 @@ def split_cell_into_items(raw_text: str) -> list[str]:
 
 
 def _merge_ampersand_fragments(items: Sequence[str]) -> list[str]:
-    """`&`로 시작하는 항목을 직전 항목에 이어붙인다.
+    """`&`로 이어지는 항목을 직전 항목에 이어붙인다.
 
     `함박스테이크&소스`가 엑셀에서 두 줄(또는 두 행)로 나뉘어 들어오면 `&소스`가
     별도 부찬이 됐다. 담당자: "메인메뉴가 '&'로 연결된 경우 & 뒤에까지 메인메뉴임".
+    `&`가 다음 행 머리에 남든("&소스") 이번 행 꼬리에 남든("함박스테이크&") 같은
+    의도이므로 둘 다 잡는다(2026-08 신고 — 후자를 놓쳐 "뽀모도로파스타&불고기피자"
+    같은 이름의 뒷부분이 계속 부찬으로 떨어졌다).
 
     앞에 붙일 항목이 없으면(첫 항목이 `&`로 시작) 그대로 둔다 — 지어낼 수 없다.
     """
     merged: list[str] = []
     for item in items:
-        if item.startswith("&") and merged:
+        if merged and _continues_previous(merged[-1], item):
             merged[-1] += item
         else:
             merged.append(item)
