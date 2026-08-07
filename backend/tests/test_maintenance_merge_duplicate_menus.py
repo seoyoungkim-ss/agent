@@ -16,6 +16,7 @@ from app.maintenance.merge_duplicate_menus import merge_duplicate_menus
 from app.models.enums import Division, MealType, MenuRole
 from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
+from app.models.stats import MenuPerformanceStats
 
 MONDAY = dt.date(2026, 7, 6)
 
@@ -170,3 +171,72 @@ def test_is_idempotent(db_session):
 
     merge_duplicate_menus(db_session, apply=True)
     assert merge_duplicate_menus(db_session, apply=True) == 0
+
+
+# ---------------------------------------------------------------------------
+# menu_performance_stats 참조 (2026-08 두 번째 신고)
+# ---------------------------------------------------------------------------
+# "key menu id is still referenced from table menu performance stats"
+# FK를 weekly_menu_plan·meal_log만 챙기고 이 테이블을 빠뜨렸다.
+
+
+def _stats(db, menu, *, start=dt.date(2026, 1, 1), end=dt.date(2026, 6, 30)):
+    row = MenuPerformanceStats(
+        menu_id=menu.menu_id,
+        period_start=start,
+        period_end=end,
+        adjusted_score=4.0,
+        raw_score=4.0,
+        evaluation_count=10,
+        total_headcount=100,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def test_performance_stats_do_not_block_the_merge(db_session):
+    """신고 재현 — 통계 행이 남아 있으면 메뉴 삭제가 FK로 막혔다."""
+    a, b = _split_menus(db_session)
+    _stats(db_session, b)
+    db_session.commit()
+
+    merge_duplicate_menus(db_session, apply=True)
+
+    assert db_session.query(MenuMaster).filter(MenuMaster.menu_id == b.menu_id).count() == 0
+
+
+def test_stats_for_the_same_period_would_collide_so_both_are_dropped(db_session):
+    """같은 기간 통계가 양쪽에 있으면 옮길 수 없다 — (기간, 메뉴)가 유니크다.
+
+    두 행의 점수는 더할 수 있는 값이 아니라 원본에서 다시 계산해야 하므로,
+    대표 것까지 지우고 재계산에 맡긴다.
+    """
+    a, b = _split_menus(db_session)
+    _stats(db_session, a)
+    _stats(db_session, b)  # 같은 기간 — 옮기면 유니크 위반
+    db_session.commit()
+
+    merge_duplicate_menus(db_session, apply=True)
+
+    assert db_session.query(MenuPerformanceStats).count() == 0, "낡은 통계가 남았다"
+
+
+def test_merge_stops_with_a_named_table_if_a_new_reference_appears(db_session, monkeypatch):
+    """모르는 참조가 생기면 raw IntegrityError 대신 테이블 이름을 알려준다.
+
+    FK 목록을 손으로 관리하다 이번에 놓쳤다. 다음에 테이블이 늘면 스택만 보고
+    헤매지 않도록 삭제 직전에 검사한다.
+    """
+    import app.maintenance.merge_duplicate_menus as mod
+
+    a, b = _split_menus(db_session)
+    db_session.commit()
+    monkeypatch.setattr(mod, "_remaining_references", lambda db, ids: {"어떤새테이블.menu_id": 3})
+
+    try:
+        mod.merge_duplicate_menus(db_session, apply=True)
+    except RuntimeError as exc:
+        assert "어떤새테이블.menu_id" in str(exc)
+    else:
+        raise AssertionError("남은 참조를 못 잡았다")

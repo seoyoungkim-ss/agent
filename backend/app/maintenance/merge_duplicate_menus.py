@@ -26,11 +26,13 @@
 import argparse
 from collections import defaultdict
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import MenuMaster
+from app.models.stats import MenuPerformanceStats
 from app.services.menu_name import match_key
 
 
@@ -42,6 +44,45 @@ def _keeper_sort_key(menu: MenuMaster) -> tuple:
     """
     has_manual = menu.food_vector_source is not None or menu.new_menu_override is not None
     return (0 if has_manual else 1, menu.menu_id)
+
+
+def _referencing_columns(db: Session) -> list[tuple[str, str]]:
+    """`menu_master.menu_id`를 참조하는 (테이블, 컬럼) 전부를 DB에서 읽어온다.
+
+    손으로 목록을 관리하면 테이블이 늘 때 놓친다 — 실제로 그래서 터졌다(2026-08:
+    weekly_menu_plan·meal_log만 챙기고 menu_performance_stats를 빠뜨려
+    "menu_id is still referenced from table menu_performance_stats"). 삭제 직전에
+    이걸로 검사해, 새 참조가 생기면 raw IntegrityError 대신 이름을 알려준다.
+    """
+    rows = db.execute(
+        text(
+            """
+            SELECT tc.table_name, kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+            JOIN information_schema.constraint_column_usage ccu
+              ON tc.constraint_name = ccu.constraint_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND ccu.table_name = 'menu_master'
+              AND ccu.column_name = 'menu_id'
+            """
+        )
+    ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+def _remaining_references(db: Session, menu_ids: list[int]) -> dict[str, int]:
+    """아직 그 메뉴들을 가리키고 있는 곳. 비어 있어야 안전하게 삭제된다."""
+    remaining = {}
+    for table, column in _referencing_columns(db):
+        count = db.execute(
+            text(f"SELECT COUNT(*) FROM {table} WHERE {column} = ANY(:ids)"),  # noqa: S608
+            {"ids": menu_ids},
+        ).scalar()
+        if count:
+            remaining[f"{table}.{column}"] = count
+    return remaining
 
 
 def backfill_missing_match_keys(db: Session) -> int:
@@ -127,12 +168,26 @@ def merge_duplicate_menus(db: Session, *, apply: bool) -> int:
                     {MealLog.menu_snapshot_id: survivor_id}, synchronize_session=False
                 )
 
+        # menu_performance_stats는 **파생 집계**다(배치가 다시 만든다). 옮겨봐야
+        # (period_start, period_end, menu_id) 유니크에 걸리고, 설령 안 걸려도 두
+        # 행의 점수는 더할 수 있는 값이 아니라 원본에서 다시 계산해야 한다.
+        # 그래서 대표 것까지 통째로 지우고 재계산에 맡긴다 — 병합으로 그 메뉴의
+        # 취식 집합 자체가 바뀌었으니 대표 행 통계도 어차피 낡았다.
+        group_ids = [keeper.menu_id, *dup_ids]
+        stats_rows = (
+            db.query(MenuPerformanceStats)
+            .filter(MenuPerformanceStats.menu_id.in_(group_ids))
+            .count()
+        )
+
         names = ", ".join(f"{m.menu_name!r}(id={m.menu_id})" for m in rest)
         print(f"  {keeper.menu_name!r}(id={keeper.menu_id}) ← {names}")
         print(f"      식단표: {len(to_remap)}행 옮김 / {len(to_absorb)}행은 같은 슬롯에 이미 있어 합침")
         print(f"      취식기록: {log_refs}행 옮김")
         if snapshot_moves:
             print(f"      스냅샷 참조 재지정: {snapshot_moves}행")
+        if stats_rows:
+            print(f"      메뉴 성과 통계: {stats_rows}행 삭제 (재계산 필요)")
 
         if apply:
             for plan in to_absorb:
@@ -145,7 +200,20 @@ def merge_duplicate_menus(db: Session, *, apply: bool) -> int:
             db.query(MealLog).filter(MealLog.menu_id.in_(dup_ids)).update(
                 {MealLog.menu_id: keeper.menu_id}, synchronize_session=False
             )
+            db.query(MenuPerformanceStats).filter(
+                MenuPerformanceStats.menu_id.in_(group_ids)
+            ).delete(synchronize_session=False)
             db.flush()
+
+            # 남은 참조가 있으면 여기서 멈춘다 — 그냥 지우면 raw IntegrityError가
+            # 나고 어느 테이블인지 스택만 보고는 모른다(실제로 그렇게 헤맸다).
+            remaining = _remaining_references(db, dup_ids)
+            if remaining:
+                raise RuntimeError(
+                    f"{keeper.menu_name!r} 병합 중단 — 아직 참조가 남아 있습니다: {remaining}. "
+                    "이 스크립트가 모르는 테이블이 생겼습니다. 그 참조를 어떻게 처리할지"
+                    "(대표로 옮길지, 지울지) 정해서 merge_duplicate_menus에 추가해야 합니다."
+                )
             for dup in rest:
                 db.delete(dup)
         merged += len(rest)
