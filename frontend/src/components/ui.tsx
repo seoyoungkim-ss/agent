@@ -4,7 +4,7 @@ import clsx from "clsx";
 export function Card({ title, children, className }: { title?: string; children: ReactNode; className?: string }) {
   return (
     <div
-      className={clsx("rounded-md border p-5", className)}
+      className={clsx("rounded-2xl border p-6 shadow-sm", className)}
       style={{ borderColor: "var(--border)", background: "var(--surface)" }}
     >
       {title && (
@@ -42,7 +42,10 @@ export function StatTile({
   const toneColor = tone ? STAT_TILE_TONE_COLOR[tone] : undefined;
   return (
     <Tag
-      className={clsx("w-full rounded-md border p-4 text-left transition-colors", onClick && "hover:border-current")}
+      className={clsx(
+        "w-full rounded-2xl border p-5 text-left shadow-sm transition-colors",
+        onClick && "hover:border-current",
+      )}
       style={{
         borderColor: "var(--border)",
         background: "var(--surface)",
@@ -55,7 +58,7 @@ export function StatTile({
         {toneColor && <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: toneColor }} />}
         {label}
       </div>
-      <div className="mt-1 text-[28px] font-semibold leading-none" style={{ color: "var(--ink)" }}>
+      <div className="mt-1 text-[28px] font-bold leading-none" style={{ color: "var(--ink)" }}>
         {value}
       </div>
       {sub && (
@@ -82,7 +85,7 @@ export function QuadrantBadge({ label }: { label: string | null }) {
   if (!label) return <span style={{ color: "var(--ink-muted)" }}>-</span>;
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs"
+      className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs"
       style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
     >
       <span
@@ -127,14 +130,14 @@ export function SegmentedControl<T extends string>({
 }) {
   return (
     <div
-      className="inline-flex rounded-md border p-0.5"
+      className="inline-flex rounded-full border p-0.5"
       style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
     >
       {options.map((opt) => (
         <button
           key={opt.value}
           onClick={() => onChange(opt.value)}
-          className="rounded px-3 py-1.5 text-[13px] font-medium transition-colors"
+          className="rounded-full px-3.5 py-1.5 text-[13px] font-medium transition-colors"
           style={
             value === opt.value
               ? { background: "var(--surface)", color: "var(--ink)" }
@@ -160,7 +163,7 @@ export function ErrorState({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : String(error);
   return (
     <div
-      className="rounded-md border px-4 py-3 text-[13px]"
+      className="rounded-xl border px-4 py-3 text-[13px]"
       style={{ borderColor: "var(--critical)", color: "var(--critical)", background: "var(--surface-2)" }}
     >
       {message}
@@ -186,7 +189,7 @@ export function Button({
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className="rounded-md px-3.5 py-1.5 text-[13px] font-medium transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
+      className="rounded-xl px-4 py-2 text-[13px] font-medium transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
       style={
         variant === "primary"
           ? { background: "var(--accent)", color: "var(--accent-ink)" }
@@ -227,7 +230,7 @@ export function Table({
           {columns.map((col) => (
             <th
               key={col.key}
-              className={clsx("border-b py-2 pr-4 font-medium", col.align === "right" && "text-right")}
+              className={clsx("border-b py-2.5 pr-4 font-medium", col.align === "right" && "text-right")}
               style={{ borderColor: "var(--border-strong)", color: "var(--ink-muted)" }}
             >
               {col.label}
@@ -239,7 +242,7 @@ export function Table({
         {rows.map((row, i) => (
           <tr key={rowKey(row, i)} className="border-b" style={{ borderColor: "var(--border)" }}>
             {columns.map((col) => (
-              <td key={col.key} className={clsx("py-2 pr-4", col.align === "right" && "text-right")}>
+              <td key={col.key} className={clsx("py-2.5 pr-4", col.align === "right" && "text-right")}>
                 {row[col.key]}
               </td>
             ))}

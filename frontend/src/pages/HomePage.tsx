@@ -830,7 +830,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
         </p>
         {!forecastRequested && (
           <div
-            className="mb-3 rounded-md border p-3"
+            className="mb-3 rounded-xl border p-3"
             style={{ borderColor: "var(--border)" }}
           >
             <p className="mb-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>

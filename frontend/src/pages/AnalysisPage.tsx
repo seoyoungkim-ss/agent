@@ -920,7 +920,7 @@ function CornerCardGrid({
         <button
           key={cornerName}
           onClick={() => onSelect(cornerName)}
-          className="rounded-md border p-3 text-left transition-colors"
+          className="rounded-xl border p-3 text-left transition-colors"
           style={{
             borderColor: selected === cornerName ? "var(--accent)" : "var(--border)",
             background: selected === cornerName ? "var(--surface-2)" : "var(--surface)",
@@ -1480,7 +1480,7 @@ function MenuFoodVectorEditor({ row, onSaved }: { row: MenuFoodVectorRow; onSave
   });
 
   return (
-    <div className="rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
+    <div className="rounded-xl border p-3" style={{ borderColor: "var(--border)" }}>
       <div className="flex items-center justify-between">
         <div>
           <span className="text-[13px] font-medium">{row.menu_name}</span>
@@ -1818,7 +1818,7 @@ function MenuComboSection() {
       {query.data && query.data.combos.length > 0 && (
         <div className="space-y-2">
           {query.data.combos.map((c, i) => (
-            <div key={i} className="rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
+            <div key={i} className="rounded-xl border p-3" style={{ borderColor: "var(--border)" }}>
               <div className="flex items-center justify-between">
                 <span className="text-[13px] font-medium">
                   {c.sides.filter(Boolean).join(" + ") || "부찬 없음"}
@@ -1928,7 +1928,7 @@ function PredictedImpactPanel({ planId }: { planId: number }) {
 
   return (
     <div
-      className="mt-2 rounded-md border p-3 text-[13px]"
+      className="mt-2 rounded-xl border p-3 text-[13px]"
       style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
     >
       {query.isLoading && <LoadingState />}
@@ -2259,7 +2259,7 @@ function WeeklyMenuReviewTab() {
             const key = selectedSlotKey as string;
             const dday = daysUntil(selectedSlot.feedback_deadline);
             return (
-              <div className="mt-4 rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
+              <div className="mt-4 rounded-xl border p-3" style={{ borderColor: "var(--border)" }}>
                 <div className="flex items-center justify-between">
                   <span className="text-[13px] font-medium">
                     {weekdayLabel(selectedSlot.plan_date)} · {selectedSlot.corner_name} ({selectedSlot.meal_type})
@@ -2616,7 +2616,7 @@ function VoeAnalysisTab() {
                 <button
                   key={c.category}
                   onClick={() => setSelectedVoeCategory((cur) => (cur === c.category ? null : c.category))}
-                  className="rounded-md border p-3 text-left transition-colors"
+                  className="rounded-xl border p-3 text-left transition-colors"
                   style={{
                     borderColor: selectedVoeCategory === c.category ? "var(--accent)" : "var(--border)",
                     background: selectedVoeCategory === c.category ? "var(--surface-2)" : "var(--surface)",
@@ -2690,7 +2690,7 @@ function VoeAnalysisTab() {
             {voeClusters.data.map((c, i) => (
               <div
                 key={i}
-                className="rounded-md border p-3"
+                className="rounded-xl border p-3"
                 style={{ borderColor: "var(--border)", background: "var(--surface)" }}
               >
                 <div className="flex items-center justify-between gap-2">
@@ -3046,7 +3046,7 @@ function DuplicationCheckSection() {
             {clashSlots.map((s) => (
               <div
                 key={`${s.plan_date}-${s.corner_id}-${s.meal_type}`}
-                className="rounded-md border p-3"
+                className="rounded-xl border p-3"
                 style={{ borderColor: "var(--border)" }}
               >
                 <div className="text-[13px] font-medium">
@@ -3343,7 +3343,7 @@ function MenuRepertoireSection() {
         {(query.data?.items ?? []).map((r) => (
           <div
             key={`${r.corner_name}-${r.menu_role}`}
-            className="rounded-md border p-3"
+            className="rounded-xl border p-3"
             style={{ borderColor: "var(--border)" }}
           >
             <div className="flex items-baseline justify-between">

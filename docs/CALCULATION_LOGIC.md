@@ -4309,3 +4309,64 @@ API 레벨 테스트 5건: (1) 횟수 내림차순 정렬, (2) 메인은 결과�
 뜨는지, 코너 필터 클릭 시 그 코너(+건강가든)로만 좁혀지는지, 20개 초과 시
 "전체 N개 보기"를 눌러 펼쳐지고 "접기"로 되돌아가는지 — 전부 스크린샷으로
 확인. 백엔드 전체 484개 테스트 통과.
+
+## §62. Toss 스타일 UI 리디자인 — 팔레트 · 폰트 · 컴포넌트 (2026-08)
+
+담당자: "전반적인 UI도 toss 처럼 깔끔하고 전문적이게 바꿔줘 지금은 색상도 폰트도
+난잡함."
+
+### 조사 — "난잡함"의 실체는 색상이 아니라 폰트였다
+
+색상은 이미 `frontend/src/index.css`의 `:root`/다크모드 블록 하나에 토큰
+(`--ink`, `--surface`, `--accent`, `--critical` 등)으로 정리돼 있고, 컴포넌트는
+전부 `var(--token)`으로만 참조한다(하드코딩 색은 앱 전체 4곳뿐, 전부 의도된
+예외 — 히트맵 대비 계산 등, §40.5). 문제는 폰트였다:
+
+1. 한글 웹폰트가 아예 없었다 — `system-ui, ..., "Malgun Gothic", sans-serif`
+   (Windows 시스템 폰트 의존).
+2. 작은 텍스트가 `text-xs`(12px)와 `text-[13px]`로 204곳에 걸쳐 규칙 없이
+   섞여 있었다 — 같은 역할(표 셀·라벨·보조 텍스트)인데 크기가 들쭉날쭉.
+
+### 수정 — 토큰 이름은 그대로, 값만 교체해 336곳 호출부를 안 건드림
+
+**팔레트**: `index.css`의 `:root`/다크 블록 값을 Toss류 쿨 뉴트럴 그레이 +
+선명한 블루로 교체(`--page: #f9f9f7`→`#F2F4F6`, `--accent: #2a78d6`→`#3182F6`
+등). `--series-2`~`--series-8`, 차트 전용 값은 dataviz 스킬 기준으로 이미
+접근성 검증돼 있어 그대로 뒀다 — 이번 불만과 무관.
+
+**폰트**: Pretendard 가변 폰트(100~900 굵기 전부 커버, 파일 하나)를
+self-host했다. 사내망 배포(PRD 9.4)라 외부 CDN(jsdelivr 등)은 프록시
+정책상 막혀 있었고(`403`), `npm view pretendard dist.tarball`로 npm
+레지스트리(허용 목록에 있음)를 통해 받아 `frontend/public/fonts/`에 넣었다
+— `node_modules`를 통해 파일만 복사하고 `pretendard` npm 패키지 의존성 자체는
+바로 제거해 런타임에 안 남게 했다.
+
+**12px/13px 통일**: Tailwind v4의 CSS-first `@theme` 블록으로
+`--text-xs: 0.8125rem`(13px)를 재정의했다. 이러면 기존 `text-xs`(76곳)가
+전부 13px가 되어 더 많이 쓰인 `text-[13px]`(128곳)와 저절로 통일된다 — 204개
+호출부를 하나도 안 건드리고 전역 수정. 리터럴 `text-[13px]`를 `text-xs`로
+바꾸는 코드 정리는 급하지 않아 미룸(시각적으로 이미 같아짐).
+
+**컴포넌트 재단장**(`frontend/src/components/ui.tsx`): props/API는 그대로
+두고 클래스만 조정 — `Card`/`StatTile` `rounded-md`→`rounded-2xl` +
+`shadow-sm`, `Button`/`ErrorState` `rounded-md`→`rounded-xl`,
+`SegmentedControl`/`QuadrantBadge` 완전 라운드(`rounded-full`, Toss가 자주
+쓰는 필 형태), `Table` 행 패딩 소폭 확대, `StatTile` 값 텍스트
+`font-semibold`→`font-bold`. **"색은 점(dot)에만" 규칙(§39.12)은 그대로
+유지** — 상태색은 여전히 값 텍스트가 아니라 점·왼쪽 보더에만 입힌다.
+
+**스팟 체크**: `<Card>`를 안 쓰고 직접 마크업한 박스(`rounded-md border p-3`
+패턴, `AnalysisPage.tsx` 9곳 + `HomePage.tsx` 1곳 — 중복 점검의 슬롯 클래시
+카드 등)가 새 카드 스타일 옆에서 튀어 보여 `rounded-xl`로 맞췄다. 3400줄을
+전수 스윕하지 않고, 스크린샷으로 실제로 안 맞아 보이는 곳만 점 수정했다.
+
+### 검증
+
+`npm run build` 타입체크 통과(props 불변이라 컴파일 에러 없음). `uvicorn`+
+`vite` 개발 서버를 직접 띄우고 Playwright로 홈·메뉴 편성·운영(중복 점검
+포함) 페이지를 라이트·다크 둘 다 스크린샷 확인 — Pretendard 폰트가 실제
+`getComputedStyle`에 반영됐는지, 카드 라운드·그림자, 세그먼트 컨트롤 필
+형태, 색-온-점 규칙이 살아있는지, 콘솔 에러 없는지 확인. 스팟 체크로 찾은
+클래시 카드 수정 후 재스크린샷으로 통일 확인. 백엔드 484개 테스트는
+이번 라운드가 CSS/클래스만 바꿔서 영향 없음 — 회귀 확인용으로 재실행해
+전부 통과 확인.

@@ -1,21 +1,43 @@
 @import "tailwindcss";
 
+/* Pretendard — 사내망 배포라 self-host (외부 CDN 의존 지양). 가변 폰트 하나로
+   100~900 굵기를 전부 커버한다. */
+@font-face {
+  font-family: "Pretendard Variable";
+  src: url("/fonts/PretendardVariable.woff2") format("woff2");
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* 작은 텍스트 크기 드리프트 통일 — text-xs(12px)와 text-[13px]가 같은 역할
+   (표 셀·라벨·보조 텍스트)에 규칙 없이 섞여 쓰이고 있었다(2026-08 "폰트도
+   난잡함" 신고). 더 많이 쓰인 13px로 text-xs 자체를 재정의해, 204곳의
+   호출부를 하나도 안 건드리고 전역에서 한 번에 통일한다. */
+@theme {
+  --text-xs: 0.8125rem; /* 13px */
+  --text-xs--line-height: 1.125rem;
+}
+
 /* 디자인 토큰 — light/dark 모두 여기서만 정의하고, 컴포넌트는 var(--role)로만 참조한다.
-   접근성 검증된 참조 팔레트 값을 그대로 사용 (dataviz 스킬 references/palette.md). */
+   상태색(good/warning/serious/critical)과 series-2~8, 차트 전용 값은 접근성 검증된
+   참조 팔레트(dataviz 스킬 references/palette.md) 그대로 유지한다. page/surface/ink/
+   accent/series-1은 Toss류 제품이 쓰는 쿨한 뉴트럴 그레이 + 선명한 블루로 교체했다
+   (2026-08 "toss 처럼 깔끔하고 전문적이게" 요청). */
 :root {
   color-scheme: light;
 
-  --page: #f9f9f7;
-  --surface: #fcfcfb;
-  --surface-2: #f1f0ec;
-  --border: rgba(11, 11, 11, 0.1);
-  --border-strong: #e1e0d9;
+  --page: #f2f4f6;
+  --surface: #ffffff;
+  --surface-2: #ebeef1;
+  --border: rgba(15, 23, 32, 0.08);
+  --border-strong: #e1e5e9;
 
-  --ink: #0b0b0b;
-  --ink-secondary: #52514e;
-  --ink-muted: #898781;
+  --ink: #191f28;
+  --ink-secondary: #4e5968;
+  --ink-muted: #8b95a1;
 
-  --accent: #2a78d6;
+  --accent: #3182f6;
   --accent-ink: #ffffff;
 
   --good: #0ca30c;
@@ -23,7 +45,7 @@
   --serious: #ec835a;
   --critical: #d03b3b;
 
-  --series-1: #2a78d6; /* blue */
+  --series-1: #3182f6; /* accent와 동일 유지 */
   --series-2: #eb6834; /* orange */
   --series-3: #1baf7a; /* aqua */
   --series-4: #eda100; /* yellow */
@@ -44,17 +66,17 @@
   :root {
     color-scheme: dark;
 
-    --page: #0d0d0d;
-    --surface: #1a1a19;
-    --surface-2: #232320;
-    --border: rgba(255, 255, 255, 0.1);
-    --border-strong: #2c2c2a;
+    --page: #0f1216;
+    --surface: #1b1f24;
+    --surface-2: #23282e;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: #2e343b;
 
-    --ink: #ffffff;
-    --ink-secondary: #c3c2b7;
-    --ink-muted: #898781;
+    --ink: #f5f6f8;
+    --ink-secondary: #b0b8c1;
+    --ink-muted: #7c8591;
 
-    --accent: #3987e5;
+    --accent: #4993fa;
     --accent-ink: #ffffff;
 
     --good: #0ca30c;
@@ -62,7 +84,7 @@
     --serious: #ec835a;
     --critical: #e66767;
 
-    --series-1: #3987e5;
+    --series-1: #4993fa;
     --series-2: #d95926;
     --series-3: #199e70;
     --series-4: #c98500;
@@ -80,7 +102,8 @@
 
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+  font-family: "Pretendard Variable", Pretendard, system-ui, -apple-system, "Segoe UI",
+    "Malgun Gothic", sans-serif;
   background: var(--page);
   color: var(--ink);
   font-size: 14px;
