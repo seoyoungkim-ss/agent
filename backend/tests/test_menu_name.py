@@ -86,6 +86,27 @@ def test_real_soup_menus_still_tagged():
         assert vector[soup_index] >= 0.6, f"{menu}이 국물 메뉴로 안 잡힌다"
 
 
+def test_soup_suffix_does_not_match_words_that_merely_contain_tang():
+    """신고 재현 — "탕수육"이 "탕"을 포함한다고 국물로 오태깅됐다.
+
+    "국"과 같은 문제였다: 접두/중간에 "탕"이 있는 비국물 메뉴까지 걸렸다.
+    "감자탕"·"설렁탕"처럼 실제 국물 메뉴는 이름이 "탕"으로 끝나므로, "국"과
+    똑같이 접미어로만 인정해야 한다.
+    """
+    soup_index = FOOD_VECTOR_DIMENSIONS.index("soup_based")
+    for menu in ("탕수육", "탕평채"):
+        vector, _ = tag_food_vector_from_name(menu)
+        assert vector[soup_index] < 0.6, f"{menu}이 국물 메뉴로 태깅됐다"
+
+
+def test_tang_suffix_soup_menus_still_tagged():
+    """접미어로 좁혀도 "탕"으로 끝나는 진짜 국물 메뉴는 그대로 잡혀야 한다."""
+    soup_index = FOOD_VECTOR_DIMENSIONS.index("soup_based")
+    for menu in ("설렁탕", "삼계탕", "곰탕", "매운탕"):
+        vector, _ = tag_food_vector_from_name(menu)
+        assert vector[soup_index] >= 0.6, f"{menu}이 국물 메뉴로 안 잡힌다"
+
+
 def test_tagging_ignores_origin_annotation_in_name():
     """이름에 원산지가 남아 있어도 태깅이 오염되면 안 된다."""
     plain, _ = tag_food_vector_from_name("돈까스")

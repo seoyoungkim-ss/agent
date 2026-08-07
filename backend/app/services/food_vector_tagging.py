@@ -45,14 +45,19 @@ _KEYWORD_RULES: dict[str, tuple[str, ...]] = {
     # `food_vector IS NULL`만 대상으로 하므로 그 행이 **영구히 보정 대상에서
     # 빠진다**(3단계 안전망의 2단계 무력화). 국물 메뉴는 "국"이 이름 끝에 오므로
     # 접미어로 좁히고, 나머지는 더 구체적인 키워드로 잡는다.
-    "soup_based": ("국물", "탕", "찌개", "국밥", "스프", "우동", "전골", "샤브"),
+    #
+    # "탕"도 같은 문제였다(2026-08 실사용 신고) — "탕수육"은 국물 요리가 아닌데
+    # "탕"이 앞쪽에 들어 있어 걸렸다. "감자탕"·"설렁탕"·"삼계탕"처럼 실제 국물
+    # 메뉴는 "탕"이 이름 **끝**에 오므로, "국"과 똑같이 접미어로만 인정한다.
+    "soup_based": ("국물", "찌개", "국밥", "스프", "우동", "전골", "샤브"),
     "vegetable_ratio": ("나물", "샐러드", "채소", "야채", "무침", "쌈", "비빔"),
 }
 
 
-# "미역국"·"된장국"처럼 이름이 "국"으로 끝나는 국물 메뉴. 접미어로만 인정해
-# "중국산"·"외국산"이 걸리지 않게 한다.
-_SOUP_SUFFIX = "국"
+# "미역국"·"된장국"·"감자탕"·"설렁탕"처럼 이름이 이걸로 끝나는 국물 메뉴.
+# 접미어로만 인정해 "중국산"·"외국산"(국)이나 "탕수육"·"탕평채"(탕)가 걸리지
+# 않게 한다.
+_SOUP_SUFFIXES = ("국", "탕")
 
 
 def tag_food_vector_from_name(menu_name: str) -> tuple[list[float], bool]:
@@ -68,7 +73,7 @@ def tag_food_vector_from_name(menu_name: str) -> tuple[list[float], bool]:
     for dim in FOOD_VECTOR_DIMENSIONS:
         matched = any(kw in menu_name for kw in _KEYWORD_RULES.get(dim, ()))
         if dim == "soup_based" and not matched:
-            matched = menu_name.endswith(_SOUP_SUFFIX)
+            matched = menu_name.endswith(_SOUP_SUFFIXES)
         if matched:
             vector.append(_MATCH_SCORE)
             matched_any = True
