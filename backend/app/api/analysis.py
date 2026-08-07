@@ -47,7 +47,11 @@ from app.services.food_vector import (
 from app.services.food_vector_tagging import run_llm_food_vector_tagging, run_llm_ingredient_extraction
 from app.services.holidays import DayClassification, HolidayService, family_day_dates_in_range
 from app.services.llm_client import InternalLLMClient
-from app.services.master_data import PLACEHOLDER_MENU_NAMES, TAKE_OUT_CORNER_NAME
+from app.services.master_data import (
+    PLACEHOLDER_MENU_NAMES,
+    TAKE_OUT_CORNER_NAME,
+    find_menu_by_name,
+)
 from app.services.menu_name import pair_likely_same_menu
 from app.services.menu_performance import (
     classify_menu_loyalty,
@@ -1059,7 +1063,7 @@ def update_new_menu_status(payload: NewMenuStatusUpdateRequest, db: Session = De
     깨지기 쉽고, 30일이 지나면 강제로 빠지는 문제를 관리자가 직접 보정할 수
     있게 한다(2026-07 실사용 요청).
     """
-    menu = db.query(MenuMaster).filter(MenuMaster.menu_name == payload.menu_name).first()
+    menu = find_menu_by_name(db, payload.menu_name)
     if menu is None:
         raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다")
 
@@ -1778,7 +1782,7 @@ def menu_side_combinations(
     비교한다. 같은 메인메뉴는 항상 같은 부찬을 받는다는 전제(2026-07 확인)로
     날짜 단위 비교를 쓴다 — meal_log는 개인이 어떤 부찬을 골랐는지 모른다.
     """
-    menu = db.query(MenuMaster).filter_by(menu_name=menu_name).one_or_none()
+    menu = find_menu_by_name(db, menu_name)
     if menu is None:
         raise HTTPException(status_code=404, detail=f"'{menu_name}' 메뉴를 찾을 수 없습니다")
 

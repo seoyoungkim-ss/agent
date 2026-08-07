@@ -26,6 +26,7 @@ from app.services.improvement_points import (
     summarize_voe_comments,
 )
 from app.services.llm_analysis import KIND_MENU_TREND, KIND_PLANNING_NOTICE, get_cached
+from app.services.master_data import find_menu_by_name
 from app.services.llm_client import InternalLLMClient
 from app.services.menu_highlights import (
     compute_menu_satisfaction_trends,
@@ -175,7 +176,7 @@ def weekly_summary_export(
 @router.get("/menu-history/{menu_name}")
 def menu_history(menu_name: str, db: Session = Depends(get_db)):
     """PRD 5.2: 이번주 메뉴의 과거 제공 이력(만족도 추이)."""
-    menu = db.query(MenuMaster).filter_by(menu_name=menu_name).one_or_none()
+    menu = find_menu_by_name(db, menu_name)
     if menu is None:
         raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다")
 
@@ -205,7 +206,7 @@ def menu_comments(menu_name: str, limit: int = 20, db: Session = Depends(get_db)
     없다는 피드백(2026-07, improvement_points의 voe_summary와 같은 문제의식)에
     따라 원문을 그대로 보여준다.
     """
-    menu = db.query(MenuMaster).filter_by(menu_name=menu_name).one_or_none()
+    menu = find_menu_by_name(db, menu_name)
     if menu is None:
         raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다")
 

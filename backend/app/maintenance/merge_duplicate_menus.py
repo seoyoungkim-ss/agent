@@ -44,6 +44,21 @@ def _keeper_sort_key(menu: MenuMaster) -> tuple:
     return (0 if has_manual else 1, menu.menu_id)
 
 
+def backfill_missing_match_keys(db: Session) -> int:
+    """`match_key`가 비어 있는 행을 채운다. 채운 개수를 반환.
+
+    이제 모델 이벤트가 항상 계산하지만(`models/master.py`), 그 이전에 만들어진
+    행이 남아 있을 수 있다 — 건강가든 수기 입력이 `get_or_create_menu`를 안 쓰던
+    시절의 행들. NULL이면 조회가 못 찾아 unique 위반이 나므로 먼저 메운다.
+    """
+    pending = db.query(MenuMaster).filter(MenuMaster.match_key.is_(None)).all()
+    for menu in pending:
+        menu.match_key = match_key(menu.menu_name)
+    if pending:
+        db.commit()
+    return len(pending)
+
+
 def find_duplicate_groups(db: Session) -> list[tuple[str, MenuMaster, list[MenuMaster]]]:
     """(match_key, 남길 행, 합칠 행들). DB를 바꾸지 않는다."""
     groups: dict[str, list[MenuMaster]] = defaultdict(list)
@@ -62,6 +77,10 @@ def find_duplicate_groups(db: Session) -> list[tuple[str, MenuMaster, list[MenuM
 
 
 def merge_duplicate_menus(db: Session, *, apply: bool) -> int:
+    filled = backfill_missing_match_keys(db)
+    if filled:
+        print(f"match_key가 비어 있던 {filled}행을 먼저 채웠습니다.\n")
+
     duplicates = find_duplicate_groups(db)
     if not duplicates:
         print("표기만 다른 중복 메뉴가 없습니다.")
@@ -71,22 +90,62 @@ def merge_duplicate_menus(db: Session, *, apply: bool) -> int:
     print(f"중복 그룹 {len(duplicates)}개:\n")
     for _key, keeper, rest in duplicates:
         dup_ids = [m.menu_id for m in rest]
-        plan_refs = (
-            db.query(WeeklyMenuPlan).filter(WeeklyMenuPlan.menu_id.in_(dup_ids)).count()
-        )
+        dup_plans = db.query(WeeklyMenuPlan).filter(WeeklyMenuPlan.menu_id.in_(dup_ids)).all()
         log_refs = db.query(MealLog).filter(MealLog.menu_id.in_(dup_ids)).count()
+
+        # 대표 메뉴가 그 슬롯·역할에 이미 있으면 옮길 수 없다 — 옮기면 기존 행과
+        # 완전히 같아져 uq_weekly_menu_plan_slot_menu_role을 위반한다(§55.4).
+        # 식단표에 두 표기가 같이 올라간 게 갈라짐의 원인이라, **병합이 필요한
+        # 데이터일수록 이 충돌이 흔하다**(2026-08 실사용에서 바로 터졌다).
+        keeper_slots = {
+            (p.plan_date, p.corner_id, p.meal_type, p.menu_role)
+            for p in db.query(WeeklyMenuPlan).filter(WeeklyMenuPlan.menu_id == keeper.menu_id)
+        }
+        to_remap, to_absorb = [], []
+        for plan in dup_plans:
+            slot = (plan.plan_date, plan.corner_id, plan.meal_type, plan.menu_role)
+            if slot in keeper_slots:
+                to_absorb.append(plan)  # 진짜 중복 — 대표 행에 흡수
+            else:
+                to_remap.append(plan)
+                keeper_slots.add(slot)  # 같은 그룹 안에서 또 겹치지 않게
+
+        # 흡수되는 행을 취식기록이 참조 중이면(FK) 먼저 살아남는 행으로 옮긴다.
+        # NULL로 밀면 과거 취식 이력이 끊긴다 — §56.1에서 문제 삼은 그 실수다.
+        snapshot_moves = 0
+        keeper_plan_by_slot = {
+            (p.plan_date, p.corner_id, p.meal_type, p.menu_role): p.id
+            for p in db.query(WeeklyMenuPlan).filter(WeeklyMenuPlan.menu_id == keeper.menu_id)
+        }
+        for plan in to_absorb:
+            slot = (plan.plan_date, plan.corner_id, plan.meal_type, plan.menu_role)
+            survivor_id = keeper_plan_by_slot.get(slot)
+            refs = db.query(MealLog).filter(MealLog.menu_snapshot_id == plan.id).count()
+            snapshot_moves += refs
+            if apply and refs and survivor_id is not None:
+                db.query(MealLog).filter(MealLog.menu_snapshot_id == plan.id).update(
+                    {MealLog.menu_snapshot_id: survivor_id}, synchronize_session=False
+                )
+
         names = ", ".join(f"{m.menu_name!r}(id={m.menu_id})" for m in rest)
         print(f"  {keeper.menu_name!r}(id={keeper.menu_id}) ← {names}")
-        print(f"      옮길 참조: 식단표 {plan_refs}행 / 취식기록 {log_refs}행")
+        print(f"      식단표: {len(to_remap)}행 옮김 / {len(to_absorb)}행은 같은 슬롯에 이미 있어 합침")
+        print(f"      취식기록: {log_refs}행 옮김")
+        if snapshot_moves:
+            print(f"      스냅샷 참조 재지정: {snapshot_moves}행")
 
         if apply:
-            db.query(WeeklyMenuPlan).filter(WeeklyMenuPlan.menu_id.in_(dup_ids)).update(
-                {WeeklyMenuPlan.menu_id: keeper.menu_id}, synchronize_session=False
-            )
+            for plan in to_absorb:
+                db.delete(plan)
+            db.flush()  # 삭제를 먼저 반영해야 아래 UPDATE가 제약에 안 걸린다
+            if to_remap:
+                db.query(WeeklyMenuPlan).filter(
+                    WeeklyMenuPlan.id.in_([p.id for p in to_remap])
+                ).update({WeeklyMenuPlan.menu_id: keeper.menu_id}, synchronize_session=False)
             db.query(MealLog).filter(MealLog.menu_id.in_(dup_ids)).update(
                 {MealLog.menu_id: keeper.menu_id}, synchronize_session=False
             )
-            # menu_snapshot_id는 weekly_menu_plan.id를 가리키므로 건드리지 않는다.
+            db.flush()
             for dup in rest:
                 db.delete(dup)
         merged += len(rest)

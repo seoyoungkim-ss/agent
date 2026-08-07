@@ -122,3 +122,25 @@ def get_or_create_employee(
         employee.company_name = company_name
         employee.division = division
     return employee
+
+
+def find_menu_by_name(db: Session, menu_name: str) -> MenuMaster | None:
+    """표기가 달라도 찾아주는 메뉴 조회 (2026-08).
+
+    `match_key`로 먼저 찾고, 없으면 이름 정확 일치로 폴백한다. 담당자가 검색창에
+    `연어 파피요트`라고 띄어 써도 `연어파피요트`가 나와야 한다 — `get_or_create_menu`만
+    키를 쓰게 바꿔놔서 조회 화면들은 여전히 못 찾고 있었다.
+
+    폴백을 남기는 이유: `match_key`가 아직 안 채워진 행이 남아 있을 수 있고,
+    그때 조용히 "없음"이 되는 것보다 이름으로라도 찾는 게 낫다.
+    """
+    key = match_key(menu_name)
+    menu = (
+        db.query(MenuMaster)
+        .filter(MenuMaster.match_key == key)
+        .order_by(MenuMaster.menu_id)
+        .first()
+    )
+    if menu is not None:
+        return menu
+    return db.query(MenuMaster).filter(MenuMaster.menu_name == menu_name).first()

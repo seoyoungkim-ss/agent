@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.models.enums import MenuRole, MenuRoleSource
 from app.models.logs import WeeklyMenuFeedback, WeeklyMenuPlan
 from app.models.master import CornerMaster, MenuMaster
+from app.services.master_data import get_or_create_menu
 
 FEEDBACK_LEAD_DAYS = 7  # plan_date - 7일까지 개선의견 제출 가능
 
@@ -222,11 +223,11 @@ def set_health_garden_menus(
 
     created = []
     for name in menu_names:
-        menu = db.query(MenuMaster).filter_by(menu_name=name).one_or_none()
-        if menu is None:
-            menu = MenuMaster(menu_name=name)
-            db.add(menu)
-            db.flush()
+        # `get_or_create_menu`를 쓴다 — 예전엔 여기서 직접 조회·생성하느라
+        # match_key가 NULL로 남았고, 같은 이름이 나중에 식단표로 들어오면 조회가
+        # 못 찾아 menu_name unique 위반이 났다(2026-08). 덤으로 건강가든 메뉴도
+        # food_vector 태깅을 받는데, 한 끼 구성 중복 판정이 그 값을 쓴다.
+        menu, _is_new = get_or_create_menu(db, name)
         row = WeeklyMenuPlan(
             plan_date=plan_date,
             corner_id=corner_id,

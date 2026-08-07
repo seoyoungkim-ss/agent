@@ -3495,3 +3495,38 @@ def test_origin_annotation_longer_than_six_chars_is_still_stripped(client, db_se
 
     rows = [m for m in db_session.query(MenuMaster).all() if "파피요트" in m.menu_name]
     assert [m.menu_name for m in rows] == ["연어파피요트"]
+
+
+def test_health_garden_menu_can_later_appear_in_the_weekly_sheet(client, db_session):
+    """건강가든으로 만든 메뉴가 나중에 식단표로 들어와도 터지면 안 된다.
+
+    예전엔 건강가든 경로가 get_or_create_menu를 안 써서 match_key가 NULL로 남았고,
+    나중에 같은 이름이 들어오면 조회가 못 찾아 menu_name unique 위반이 났다
+    (2026-08, 병합 스크립트 오류와 같은 뿌리).
+    """
+    _ingest_weekly_menu(client)
+    corner_id = _corner_id(db_session, "한식")
+    resp = client.put(
+        "/api/analysis/weekly-menu/health-garden",
+        json={
+            "plan_date": MONDAY.isoformat(),
+            "corner_id": corner_id,
+            "meal_type": "중식",
+            "menu_names_raw": "구운채소",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    # 같은 이름이 식단표로 들어온다 — 여기서 예전엔 IntegrityError가 났다.
+    resp = client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY + dt.timedelta(days=1), "구운채소", "부찬")]},
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+
+    from app.models.master import MenuMaster
+
+    rows = [m for m in db_session.query(MenuMaster).all() if m.menu_name == "구운채소"]
+    assert len(rows) == 1
+    assert rows[0].match_key == "구운채소", "match_key가 안 채워졌다"

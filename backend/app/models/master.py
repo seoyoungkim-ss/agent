@@ -1,7 +1,7 @@
 import datetime as dt
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import ARRAY, Boolean, Date, Enum as SAEnum, Integer, String, Text
+from sqlalchemy import ARRAY, Boolean, Date, Enum as SAEnum, Integer, String, Text, event
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -73,6 +73,21 @@ class MenuMaster(Base):
         SAEnum(FoodVectorSource, values_callable=lambda e: [x.value for x in e], native_enum=False),
         nullable=True,
     )
+
+
+# match_key는 menu_name에서 **항상 계산되는 파생값**이다 (2026-08).
+#
+# 컬럼을 손으로 채우게 두면 한 곳만 빠뜨려도 조용히 깨진다 — 실제로
+# `weekly_menu_review.set_health_garden_menus`가 `get_or_create_menu`를 안 쓰고
+# 직접 `MenuMaster(menu_name=...)`를 만들어 match_key가 NULL로 남았고, 나중에 같은
+# 이름이 식단표로 들어오면 조회가 못 찾아 unique 위반이 나는 상태였다.
+# 이벤트로 걸어두면 **어떤 코드 경로로 만들든** 키가 맞는다.
+@event.listens_for(MenuMaster, "before_insert")
+@event.listens_for(MenuMaster, "before_update")
+def _sync_menu_match_key(_mapper, _connection, target: "MenuMaster") -> None:
+    from app.services.menu_name import match_key
+
+    target.match_key = match_key(target.menu_name)
 
 
 class HolidayCalendar(Base):
