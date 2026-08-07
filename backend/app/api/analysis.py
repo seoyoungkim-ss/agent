@@ -1384,6 +1384,71 @@ def weekly_menu_rotation(
     }
 
 
+@router.get("/weekly-menu/repeated-side-dishes")
+def weekly_menu_repeated_side_dishes(
+    period_start: dt.date,
+    period_end: dt.date,
+    corner_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """자주 반복되는 부찬 랭킹 — "부찬 중복 볼 때 보기가 너무 불편함, 정말 자주
+    나오고 돌려막기한 부찬을 보고싶어"(2026-08 신고).
+
+    기존 `/weekly-menu/rotation`의 `overused`는 **화면이 요청한 한 주치**만 보여준다
+    — "이번 주에 몇 번"은 보여도 "지난 3개월 동안 유독 자주 돌아갔다"는 그림은
+    한 주씩 넘기며 눈으로 합산해야 했다. 이 엔드포인트는 담당자가 직접 고른
+    임의의 기간(길어도 됨) 하나로 그 랭킹을 바로 낸다.
+
+    `find_overused_menus`를 그대로 재사용한다 — 코너 안에서 고유 날짜 기준으로
+    세고 건강가든을 공용으로 접는 규칙(§128, §132)이 이미 구현돼 있다.
+    `/weekly-menu/rotation`을 재사용하지 않는 이유는 그쪽이 매 행마다
+    `classify_rotation` 회전 판정(`items`)까지 계산해서다 — 이번 요청엔 집계만
+    필요하므로 그 연산을 안 하는 별도 엔드포인트가 긴 기간에도 가볍다(§117).
+
+    `threshold=0`으로 호출해 컷오프 없이 전부 받고, 메인은 빼고 부찬·건강가든만
+    남긴다 — 기존 화면이 이미 "부찬 · 건강가든"을 한 그룹으로 묶어 보여주는
+    경계와 같다. 순위는 이미 `find_overused_menus`가 매긴 `-count` 정렬을 그대로 쓴다.
+    """
+    filters = [WeeklyMenuPlan.plan_date.between(period_start, period_end)]
+    if corner_id is not None:
+        filters.append(WeeklyMenuPlan.corner_id == corner_id)
+    rows = (
+        db.query(
+            WeeklyMenuPlan.plan_date,
+            MenuMaster.menu_name,
+            WeeklyMenuPlan.menu_role,
+            CornerMaster.corner_name,
+        )
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
+        .filter(*filters)
+        .all()
+    )
+    planned = [
+        (plan_date, corner_name, menu_name, menu_role.value if hasattr(menu_role, "value") else str(menu_role))
+        for plan_date, menu_name, menu_role, corner_name in rows
+    ]
+    overused = find_overused_menus(planned, threshold=0)
+    side_roles = {MenuRole.SIDE.value, MenuRole.HEALTH_GARDEN.value}
+    items = [o for o in overused if o.menu_role in side_roles]
+
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "corner_id": corner_id,
+        "items": [
+            {
+                "corner_name": o.corner_name,
+                "menu_name": o.menu_name,
+                "menu_role": o.menu_role,
+                "count": o.count,
+                "dates": [d.isoformat() for d in o.dates],
+            }
+            for o in items
+        ],
+    }
+
+
 class MenuRoleUpdateRequest(BaseModel):
     menu_role: MenuRole
 

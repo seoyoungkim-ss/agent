@@ -2780,6 +2780,16 @@ function DuplicationCheckSection() {
   const [warningsOnly, setWarningsOnly] = useState(true);
   const periodEnd = weeklyAddDays(selectedMonday, 6);
 
+  // 자주 반복되는 부찬 랭킹 — 담당자: "부찬 중복 볼 때 보기가 너무 불편함, 정말
+  // 자주 나오고 돌려막기한 부찬을 보고싶어". 위 주간 회전표는 한 주씩 넘기는
+  // 구조라 "지난 몇 달간 자주 반복됐다"는 그림이 안 나온다 — 그래서 이 서브
+  // 섹션만 독립된 기간(직접 선택 가능)과 코너 필터를 쓴다.
+  const [repeatStart, setRepeatStart] = useState(PERIOD_START);
+  const [repeatEnd, setRepeatEnd] = useState(PERIOD_END);
+  const [repeatCornerId, setRepeatCornerId] = useState<number | null>(null);
+  const [showAllRepeated, setShowAllRepeated] = useState(false);
+  const REPEATED_PREVIEW_COUNT = 20;
+
   const rotation = useQuery({
     queryKey: ["weekly-menu-rotation", selectedMonday],
     queryFn: () => api.weeklyMenuRotation({ period_start: selectedMonday, period_end: periodEnd }),
@@ -2789,6 +2799,20 @@ function DuplicationCheckSection() {
     queryFn: () =>
       api.weeklyMenuCombinationCheck({ period_start: selectedMonday, period_end: periodEnd }),
   });
+  const repeatCorners = useQuery({ queryKey: ["corner-list"], queryFn: () => api.cornerList() });
+  const repeated = useQuery({
+    queryKey: ["weekly-menu-repeated-side-dishes", repeatStart, repeatEnd, repeatCornerId],
+    queryFn: () =>
+      api.weeklyMenuRepeatedSideDishes({
+        period_start: repeatStart,
+        period_end: repeatEnd,
+        ...(repeatCornerId != null ? { corner_id: repeatCornerId } : {}),
+      }),
+  });
+  const repeatedItems = repeated.data?.items ?? [];
+  const visibleRepeatedItems = showAllRepeated
+    ? repeatedItems
+    : repeatedItems.slice(0, REPEATED_PREVIEW_COUNT);
 
   // 경고는 두 축이다 — 간격(직전 이후 며칠)과 횟수(3개월에 몇 번).
   // "14일은 넘겼지만 분기에 3번"은 간격만 봐선 안 잡힌다.
@@ -2906,24 +2930,93 @@ function DuplicationCheckSection() {
               </div>
             );
           })}
-          {rotation.data && rotation.data.overused.length > 0 && (
-            <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--border)" }}>
-              <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-                이 주에 여러 번 들어간 메뉴 — 역할(메인/부찬/건강가든)을 가로질러 셉니다.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {rotation.data.overused.map((o) => (
-                  <span
-                    key={o.menu_name}
-                    className="rounded-md border px-2 py-1 text-xs"
-                    style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
-                  >
-                    {o.menu_name} ({o.menu_role}) · {o.count}회
-                  </span>
-                ))}
+          <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+            <p className="mb-1 text-[13px] font-medium">자주 반복되는 부찬 랭킹</p>
+            <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+              위 표와 달리 기간을 직접 골라 볼 수 있습니다 — "지난 3개월 동안 이 부찬이 유독 자주
+              돌아갔다" 같은 그림은 한 주씩 넘겨선 안 보이기 때문입니다. 같은 코너 안에서만
+              세고(다른 코너에 같은 반찬이 나온 건 중복이 아님), 건강가든은 공용이라 어느 코너와
+              겹쳐도 셉니다.
+            </p>
+            <div className="mb-3 flex flex-wrap items-end gap-3">
+              <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                시작일
+                <input
+                  type="date"
+                  className="rounded-md border px-3 py-2 text-[13px]"
+                  style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                  value={repeatStart}
+                  max={repeatEnd}
+                  onChange={(e) => setRepeatStart(e.target.value)}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                종료일
+                <input
+                  type="date"
+                  className="rounded-md border px-3 py-2 text-[13px]"
+                  style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                  value={repeatEnd}
+                  min={repeatStart}
+                  onChange={(e) => setRepeatEnd(e.target.value)}
+                />
+              </label>
+              <div className="flex flex-col gap-1">
+                <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                  코너
+                </span>
+                <SegmentedControl
+                  value={repeatCornerId != null ? String(repeatCornerId) : ""}
+                  options={[
+                    { label: "전체", value: "" },
+                    ...(repeatCorners.data ?? []).map((c) => ({
+                      label: c.corner_name,
+                      value: String(c.corner_id),
+                    })),
+                  ]}
+                  onChange={(v) => setRepeatCornerId(v === "" ? null : Number(v))}
+                />
               </div>
             </div>
-          )}
+            {repeated.isLoading && <LoadingState />}
+            {repeated.isError && <ErrorState error={repeated.error} />}
+            {repeated.data && repeatedItems.length === 0 && (
+              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                이 기간·코너에 반복 편성된 부찬이 없습니다.
+              </p>
+            )}
+            {repeatedItems.length > 0 && (
+              <>
+                <Table
+                  columns={[
+                    { key: "rank", label: "순위", align: "right" },
+                    { key: "corner", label: "코너" },
+                    { key: "menu", label: "메뉴" },
+                    { key: "role", label: "역할" },
+                    { key: "count", label: "횟수", align: "right" },
+                  ]}
+                  rows={visibleRepeatedItems.map((o, i) => ({
+                    key: `${o.corner_name}-${o.menu_name}`,
+                    rank: i + 1,
+                    corner: o.corner_name,
+                    menu: o.menu_name,
+                    role: o.menu_role,
+                    count: `${o.count}회`,
+                  }))}
+                  rowKey={(r) => r.key as string}
+                />
+                {repeatedItems.length > REPEATED_PREVIEW_COUNT && (
+                  <button
+                    className="mt-2 text-xs underline"
+                    style={{ color: "var(--accent)" }}
+                    onClick={() => setShowAllRepeated((v) => !v)}
+                  >
+                    {showAllRepeated ? "접기" : `전체 ${repeatedItems.length}개 보기`}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {/* 축 2 — 슬롯 내 재료·특성 중복 */}

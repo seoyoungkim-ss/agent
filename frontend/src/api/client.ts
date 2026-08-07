@@ -372,6 +372,23 @@ export interface MenuRotationResponse {
   overused: { menu_name: string; menu_role: string; count: number; dates: string[] }[];
 }
 
+// 자주 반복되는 부찬 랭킹 — 담당자가 고른 임의 기간 하나로 코너 안 고유 날짜
+// 기준 등장 횟수를 매긴다(2026-08, "부찬 중복 볼 때 보기가 너무 불편함" 신고).
+export interface RepeatedSideDish {
+  corner_name: string;
+  menu_name: string;
+  menu_role: string; // "부찬" | "건강가든"
+  count: number;
+  dates: string[];
+}
+
+export interface RepeatedSideDishResponse {
+  period_start: string;
+  period_end: string;
+  corner_id: number | null;
+  items: RepeatedSideDish[];
+}
+
 // 슬롯 내 재료·특성 중복 진단 (2026-08). menu_rotation과 축이 다르다 —
 // 저쪽은 "이 메뉴 최근에 또 내보내지 않았나", 이쪽은 "이 한 끼 구성이 겹치지 않나".
 export interface IngredientClash {
@@ -717,6 +734,9 @@ export const api = {
 
   weeklyMenuRotation: (params: { period_start: string; period_end: string; lookback_days?: number }) =>
     request<MenuRotationResponse>(`/analysis/weekly-menu/rotation${qs(params)}`),
+
+  weeklyMenuRepeatedSideDishes: (params: { period_start: string; period_end: string; corner_id?: number }) =>
+    request<RepeatedSideDishResponse>(`/analysis/weekly-menu/repeated-side-dishes${qs(params)}`),
 
   updateHealthGarden: (body: {
     plan_date: string;

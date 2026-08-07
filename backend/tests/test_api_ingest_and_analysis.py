@@ -2716,6 +2716,101 @@ def test_rotation_reports_overused_menus_in_period(client):
     assert overused["시금치나물"]["count"] == 4
 
 
+# ---------------------------------------------------------------------------
+# 자주 반복되는 부찬 랭킹 — 임의 기간 (2026-08)
+# ---------------------------------------------------------------------------
+# 담당자: "부찬 중복 볼 때 보기가 너무 불편함, 정말 자주 나오고 돌려막기한 부찬을
+# 보고싶어". /weekly-menu/rotation의 overused는 화면이 요청한 한 주치만 보여줘서
+# "지난 3개월 동안 자주 반복됐다"는 그림이 안 나왔다. 이 엔드포인트는 담당자가
+# 고른 임의 기간 하나로 그 랭킹을 낸다 — find_overused_menus 자체(코너 스코프·
+# 고유 날짜·정렬)는 이미 검증돼 있으므로(tests/test_menu_rotation.py), 여기선
+# 배선(역할 필터·코너 필터·정렬 전달)만 확인한다.
+
+
+def _repeated(client, **params):
+    resp = client.get("/api/analysis/weekly-menu/repeated-side-dishes", params=params)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_repeated_side_dishes_sorted_by_count_desc(client):
+    rows = [
+        _plan_row(MONDAY + dt.timedelta(days=i), "시금치나물", "부찬") for i in range(5)
+    ] + [_plan_row(MONDAY + dt.timedelta(days=i), "콩나물무침", "부찬") for i in range(2)]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+
+    data = _repeated(
+        client, period_start=MONDAY.isoformat(), period_end=(MONDAY + dt.timedelta(days=6)).isoformat()
+    )
+    names = [i["menu_name"] for i in data["items"]]
+    assert names.index("시금치나물") < names.index("콩나물무침")
+    counts = {i["menu_name"]: i["count"] for i in data["items"]}
+    assert counts["시금치나물"] == 5
+    assert counts["콩나물무침"] == 2
+
+
+def test_repeated_side_dishes_excludes_main_menu(client):
+    """부찬 랭킹이라 메인은 아무리 자주 나와도 빠져야 한다."""
+    rows = [_plan_row(MONDAY + dt.timedelta(days=i), "돈까스", "메인") for i in range(5)]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+
+    data = _repeated(
+        client, period_start=MONDAY.isoformat(), period_end=(MONDAY + dt.timedelta(days=6)).isoformat()
+    )
+    assert all(i["menu_name"] != "돈까스" for i in data["items"])
+
+
+def test_repeated_side_dishes_corner_filter_narrows_results(client, db_session):
+    """포기김치가 다른 코너에서 각각 나온 건 그 코너 안에서만 세야 한다(§132)."""
+    rows = [
+        _plan_row(MONDAY + dt.timedelta(days=i), "포기김치", "부찬", corner_name="한식") for i in range(3)
+    ] + [
+        _plan_row(MONDAY + dt.timedelta(days=i), "포기김치", "부찬", corner_name="일품") for i in range(2)
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    hansik_id = _corner_id(db_session, "한식")
+
+    data = _repeated(
+        client,
+        period_start=MONDAY.isoformat(),
+        period_end=(MONDAY + dt.timedelta(days=6)).isoformat(),
+        corner_id=hansik_id,
+    )
+    assert len(data["items"]) == 1
+    assert data["items"][0]["corner_name"] == "한식"
+    assert data["items"][0]["count"] == 3
+
+
+def test_repeated_side_dishes_includes_health_garden(client):
+    rows = [
+        _plan_row(MONDAY + dt.timedelta(days=i), "대추차", "건강가든") for i in range(3)
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+
+    data = _repeated(
+        client, period_start=MONDAY.isoformat(), period_end=(MONDAY + dt.timedelta(days=6)).isoformat()
+    )
+    item = next(i for i in data["items"] if i["menu_name"] == "대추차")
+    assert item["menu_role"] == "건강가든"
+    assert item["count"] == 3
+
+
+def test_repeated_side_dishes_counts_unique_dates_not_rows(client):
+    """같은 날 두 끼니(조식/중식)에 겹쳐 들어가도 그날은 1번으로 센다."""
+    rows = [
+        _plan_row(MONDAY, "김치", "부찬", meal_type="조식"),
+        _plan_row(MONDAY, "김치", "부찬", meal_type="중식"),
+        _plan_row(MONDAY + dt.timedelta(days=1), "김치", "부찬"),
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+
+    data = _repeated(
+        client, period_start=MONDAY.isoformat(), period_end=(MONDAY + dt.timedelta(days=1)).isoformat()
+    )
+    item = next(i for i in data["items"] if i["menu_name"] == "김치")
+    assert item["count"] == 2
+
+
 def test_health_garden_text_input_replaces_slot_and_feeds_rotation(client, db_session):
     """건강가든 텍스트 입력 → 식단표 조회에 반영되고 회전 판정에도 들어간다."""
     _ingest_weekly_menu(client)
