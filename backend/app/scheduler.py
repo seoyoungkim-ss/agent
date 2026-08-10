@@ -21,10 +21,12 @@ from app.services.aggregation import aggregate_daily_stats, aggregate_menu_perfo
 from app.services.food_vector_tagging import run_llm_ingredient_extraction
 from app.services.llm_analysis import refresh_llm_analyses
 from app.services.llm_client import InternalLLMClient
+from app.models.stats import DailyWeather
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
 from app.services.voe_category_llm import classify_monthly_voe_via_llm
 from app.services.voe_clustering import cluster_monthly_voe
+from app.services.weather_client import KmaWeatherClient
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +53,46 @@ async def _run_llm_daily_steps(db, period_start: dt.date, period_end: dt.date) -
     logger.info("LLM 분석 캐시 갱신 %s", counts)
 
 
+def _fetch_weather_step(db, target_date: dt.date) -> None:
+    """PRD 7.1: 전날 강수 실측치를 daily_weather에 채운다(2026-08).
+
+    사내망이 data.go.kr에 못 닿는 배포가 있을 수 있어(is_configured=False),
+    그 경우 아무 것도 하지 않고 조용히 넘어간다 — 나머지 배치를 절대 막지 않는다.
+    """
+    client = KmaWeatherClient(get_settings())
+    if not client.is_configured:
+        return
+    records = asyncio.run(client.fetch_daily_range(target_date, target_date))
+    for rec in records:
+        existing = db.get(DailyWeather, rec.stat_date)
+        if existing:
+            existing.precip_mm = rec.precip_mm
+            existing.avg_temp_c = rec.avg_temp_c
+            existing.had_rain = rec.had_rain
+            existing.source = "kma_api"
+        else:
+            db.add(
+                DailyWeather(
+                    stat_date=rec.stat_date,
+                    precip_mm=rec.precip_mm,
+                    avg_temp_c=rec.avg_temp_c,
+                    had_rain=rec.had_rain,
+                    source="kma_api",
+                )
+            )
+    db.commit()
+
+
 def run_daily_batch() -> None:
     db = SessionLocal()
     try:
         yesterday = dt.date.today() - dt.timedelta(days=1)
         aggregate_daily_stats(db, yesterday)
+
+        try:
+            _fetch_weather_step(db, yesterday)
+        except Exception:
+            logger.exception("날씨 수집 실패 — 나머지 배치는 계속 진행")
 
         period_end = yesterday
         period_start = period_end - dt.timedelta(days=MENU_PERFORMANCE_WINDOW_DAYS)

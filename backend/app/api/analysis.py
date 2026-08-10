@@ -22,6 +22,7 @@ from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import (
     DailyCornerStats,
     DailyDivisionStats,
+    DailyWeather,
     EmployeeTasteProfile,
     MenuPerformanceStats,
     TasteCluster,
@@ -304,6 +305,71 @@ def headcount_trend(
         {"period": period, "series_key": series_key, "series_label": series_label, "headcount": headcount}
         for (period, series_key, series_label), headcount in sorted(totals.items())
     ]
+
+
+@router.get("/weather-correlation")
+def weather_correlation(
+    period_start: dt.date,
+    period_end: dt.date,
+    db: Session = Depends(get_db),
+):
+    """PRD 7.1: 강수 여부 × 평일/주말+공휴일/패밀리데이 조합별 과거 실측 평균 식수(2026-08).
+
+    담당자 가설("비 오면 외부 식사가 막혀 오히려 식수가 늘 수 있다")을
+    `simulation.py`의 v0 감(`_WEATHER_MULTIPLIER[RAIN]=0.90`, 반대 가정)과 별개로
+    과거 데이터로 검증하기 위한 참고용 화면 — 이 결과가 그 배수를 자동으로
+    바꾸지 않는다.
+
+    분류를 섞은 전체 평균은 절대 계산하지 않는다. 평일과 주말+공휴일은 기저
+    식수 자체가 크게 달라(주말은 원래 인원이 훨씬 적음), 섞어서 평균 내면
+    "비가 많이 온 달에 마침 주말이 적었다" 같은 우연으로 왜곡될 수 있다.
+    """
+    settings = get_settings()
+
+    weather_rows = (
+        db.query(DailyWeather).filter(DailyWeather.stat_date.between(period_start, period_end)).all()
+    )
+    weather_by_date = {w.stat_date: w for w in weather_rows}
+
+    corner_rows, _ = _load_corner_stats(db, period_start, period_end, classification=None)
+    headcount_by_date: dict[dt.date, int] = {}
+    for row in corner_rows:
+        headcount_by_date[row.stat_date] = headcount_by_date.get(row.stat_date, 0) + row.headcount
+
+    classification_by_date = HolidayService(db).classify_range(period_start, period_end)
+
+    buckets: dict[tuple[str, bool], dict[str, int]] = {}
+    days_missing_weather = 0
+    for target_date, total_headcount in headcount_by_date.items():
+        weather = weather_by_date.get(target_date)
+        if weather is None:
+            days_missing_weather += 1
+            continue
+        classification = classification_by_date.get(target_date)
+        if classification is None:
+            continue
+        key = (classification.value, weather.had_rain)
+        bucket = buckets.setdefault(key, {"day_count": 0, "total_headcount": 0})
+        bucket["day_count"] += 1
+        bucket["total_headcount"] += total_headcount
+
+    results = []
+    for (classification, had_rain), agg in sorted(buckets.items()):
+        day_count = agg["day_count"]
+        results.append(
+            {
+                "classification": classification,
+                "had_rain": had_rain,
+                "day_count": day_count,
+                "avg_headcount": round(agg["total_headcount"] / day_count, 1) if day_count else None,
+                "low_sample": day_count < settings.weather_correlation_low_sample_days,
+            }
+        )
+
+    return {
+        "buckets": results,
+        "days_missing_weather": days_missing_weather,
+    }
 
 
 def _load_corner_stats(

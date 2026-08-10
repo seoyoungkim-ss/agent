@@ -25,7 +25,7 @@ import {
   Table,
   useChartTheme,
 } from "../components/ui";
-import { CornerMetricComparisonSection } from "./AnalysisPage";
+import { CornerMetricComparisonSection, WeatherCorrelationSection } from "./AnalysisPage";
 import { addDays, isoDaysAgo, mondayOf } from "../lib/week";
 
 const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
@@ -941,6 +941,9 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
           )}
         </div>
       </Card>
+
+      {/* 위 예측 카드의 날씨 배수(v0 가정치)를 실측으로 검증하는 참고 화면(2026-08). */}
+      <WeatherCorrelationSection />
 
       {/* 코너별 지표 비교 — 2026-08 재편으로 "분석 > 코너별" 탭에서 현황으로 옮겨왔다. */}
       <CornerMetricComparisonSection />

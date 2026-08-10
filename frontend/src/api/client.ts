@@ -218,6 +218,19 @@ export interface HeadcountTrendRow {
   headcount: number;
 }
 
+export interface WeatherCorrelationBucket {
+  classification: Classification;
+  had_rain: boolean;
+  day_count: number;
+  avg_headcount: number | null;
+  low_sample: boolean;
+}
+
+export interface WeatherCorrelationResponse {
+  buckets: WeatherCorrelationBucket[];
+  days_missing_weather: number;
+}
+
 export interface TasteProfile {
   employee_id: string;
   profile_vector: number[];
@@ -663,6 +676,12 @@ export const api = {
     divisions?: Division[];
     classification?: Classification;
   }) => request<HeadcountTrendRow[]>(`/analysis/headcount-trend${qs(params)}`),
+
+  // PRD 7.1(2026-08): 강수 여부 × 평일/주말+공휴일/패밀리데이 조합별 과거 실측
+  // 평균 식수 — "비가 오면 식수가 준다"는 기존 시뮬레이션 감(v0)을 실데이터로
+  // 검증하기 위한 참고용 화면. 배수를 자동으로 바꾸지 않는다.
+  weatherCorrelation: (params: { period_start: string; period_end: string }) =>
+    request<WeatherCorrelationResponse>(`/analysis/weather-correlation${qs(params)}`),
 
   recomputeDailyStats: (params: { period_start: string; period_end: string }) =>
     request<{ days_processed: number }>(`/analysis/daily-stats/recompute${qs(params)}`, {

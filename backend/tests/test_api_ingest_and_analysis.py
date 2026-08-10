@@ -3625,3 +3625,114 @@ def test_health_garden_menu_can_later_appear_in_the_weekly_sheet(client, db_sess
     rows = [m for m in db_session.query(MenuMaster).all() if m.menu_name == "구운채소"]
     assert len(rows) == 1
     assert rows[0].match_key == "구운채소", "match_key가 안 채워졌다"
+
+
+def test_ingest_weather_csv_upserts_by_date(client, db_session):
+    from app.models.stats import DailyWeather
+
+    rows = [
+        {"stat_date": "2026-08-01", "precip_mm": 12.5, "avg_temp_c": 24.3},
+        {"stat_date": "2026-08-02", "precip_mm": None, "avg_temp_c": 26.0},
+    ]
+    resp = client.post("/api/ingest/weather-csv", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"received": 2, "upserted": 2}
+
+    stored = {w.stat_date: w for w in db_session.query(DailyWeather).all()}
+    assert stored[dt.date(2026, 8, 1)].had_rain is True
+    assert stored[dt.date(2026, 8, 2)].had_rain is False
+    assert stored[dt.date(2026, 8, 1)].source == "csv_import"
+
+    # 같은 날짜를 다시 올리면 갱신되고 중복 행이 쌓이지 않는다.
+    resp = client.post(
+        "/api/ingest/weather-csv",
+        json={"rows": [{"stat_date": "2026-08-01", "precip_mm": 0, "avg_temp_c": 30.0}]},
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert db_session.query(DailyWeather).count() == 2
+    updated = db_session.get(DailyWeather, dt.date(2026, 8, 1))
+    db_session.refresh(updated)
+    assert updated.had_rain is False
+    assert updated.avg_temp_c == 30.0
+
+
+def test_ingest_weather_csv_requires_token(client):
+    resp = client.post("/api/ingest/weather-csv", json={"rows": []})
+    assert resp.status_code == 401
+
+
+def test_weather_correlation_buckets_by_classification_and_rain(client, db_session):
+    """평일 비/맑음, 주말 비/맑음 4개 버킷이 섞이지 않고 각각 평균이 계산되는지 확인.
+
+    MONDAY(2026-07-20, 평일)에 비/2명, 그 다음 화요일(평일, 맑음)에 4명,
+    토요일(주말, 비)에 1명이 취식한 걸로 시딩한다.
+    """
+    from app.models.stats import DailyWeather
+    from app.services.aggregation import aggregate_daily_stats
+
+    tuesday = MONDAY + dt.timedelta(days=1)
+    saturday = MONDAY + dt.timedelta(days=5)
+
+    _ingest_weekly_menu(client)
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY)
+    _ingest_meal_log(client, "E2", "맛남", eaten_date=MONDAY)
+    _ingest_meal_log(client, "E3", "맛남", eaten_date=tuesday)
+    _ingest_meal_log(client, "E4", "맛남", eaten_date=tuesday)
+    _ingest_meal_log(client, "E5", "맛남", eaten_date=tuesday)
+    _ingest_meal_log(client, "E6", "맛남", eaten_date=tuesday)
+    _ingest_meal_log(client, "E7", "맛남", eaten_date=saturday)
+
+    for target_date in (MONDAY, tuesday, saturday):
+        aggregate_daily_stats(db_session, target_date)
+
+    db_session.add(DailyWeather(stat_date=MONDAY, had_rain=True, precip_mm=10.0))
+    db_session.add(DailyWeather(stat_date=tuesday, had_rain=False, precip_mm=None))
+    db_session.add(DailyWeather(stat_date=saturday, had_rain=True, precip_mm=5.0))
+    db_session.commit()
+    # 날씨 데이터가 없는 날짜(수요일)도 하나 끼워 넣어 days_missing_weather를 검증한다.
+    wednesday = MONDAY + dt.timedelta(days=2)
+    _ingest_meal_log(client, "E8", "맛남", eaten_date=wednesday)
+    aggregate_daily_stats(db_session, wednesday)
+
+    resp = client.get(
+        "/api/analysis/weather-correlation",
+        params={"period_start": MONDAY.isoformat(), "period_end": saturday.isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["days_missing_weather"] == 1
+
+    buckets = {(b["classification"], b["had_rain"]): b for b in body["buckets"]}
+    weekday_rain = buckets[("평일", True)]
+    assert weekday_rain["day_count"] == 1
+    assert weekday_rain["avg_headcount"] == 2.0
+
+    weekday_dry = buckets[("평일", False)]
+    assert weekday_dry["day_count"] == 1
+    assert weekday_dry["avg_headcount"] == 4.0
+
+    weekend_rain = buckets[("주말+공휴일", True)]
+    assert weekend_rain["day_count"] == 1
+    assert weekend_rain["avg_headcount"] == 1.0
+
+    # 표본 부족 임계값(기본 5일) 미만이라 전부 low_sample=True여야 한다.
+    assert all(b["low_sample"] for b in body["buckets"])
+
+
+def test_weather_correlation_returns_empty_buckets_when_no_weather_data(client, db_session):
+    from app.services.aggregation import aggregate_daily_stats
+
+    _ingest_weekly_menu(client)
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY)
+    aggregate_daily_stats(db_session, MONDAY)
+
+    resp = client.get(
+        "/api/analysis/weather-correlation",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["buckets"] == []
+    assert body["days_missing_weather"] == 1

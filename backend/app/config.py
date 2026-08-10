@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     meal_period_start: str = "11:20:00"
     meal_period_end: str = "13:00:00"
 
+    # PRD 7.1 확장(2026-08): 기상청 ASOS 종관기상관측 일자료(data.go.kr) — 과거
+    # 강수-식수 상관관계 검증용. 사내망이 공인 인터넷(data.go.kr)에 못 닿을 수
+    # 있어(2026-08 확인) 비워두면 관련 기능이 조용히 비활성화되고, CSV 수동
+    # 임포트(/ingest/weather-csv)로 대체할 수 있다.
+    kma_weather_base_url: str = "https://apis.data.go.kr/1360000/AsosDalyInfoService"
+    kma_weather_api_key: str = ""
+    kma_weather_station_id: str = "119"  # 수원 — 배포 전 실제 관측소 목록과 대조 확인 필요
+    # PRD 7.1: 날씨-식수 상관관계 버킷의 표본 일수가 이 값 미만이면 참고용으로 흐리게 표시
+    weather_correlation_low_sample_days: int = 5
+
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 
     # PRD 9.4: 프론트엔드 빌드 결과(dist/)를 이 백엔드가 정적 파일로 함께 서빙할 때

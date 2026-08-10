@@ -3430,6 +3430,147 @@ function MenuRepertoireSection() {
 }
 
 
+const WEATHER_BAR_COLOR: Record<"비 안 온 날" | "비 온 날", string> = {
+  "비 안 온 날": "var(--series-1)",
+  "비 온 날": "var(--series-2)",
+};
+
+/**
+ * PRD 7.1(2026-08): 강수 여부 × 평일/주말+공휴일/패밀리데이 조합별 과거 실측
+ * 평균 식수. 담당자 가설("비 오면 외부 식사가 막혀 오히려 식수가 늘 수 있다")을
+ * "금주 예상 식수" 카드의 v0 감(날씨 배수 0.9, 반대 가정)과 별개로 실데이터로
+ * 검증하기 위한 참고용 화면 — 여기 결과가 그 배수를 자동으로 바꾸지 않는다.
+ *
+ * 분류를 섞은 전체 평균은 절대 안 보여준다. 평일과 주말+공휴일은 기저 식수
+ * 자체가 크게 달라(주말은 원래 인원이 훨씬 적음), 섞으면 우연한 상관으로
+ * 왜곡될 수 있다는 게 이번 요청의 핵심 포인트다.
+ */
+export function WeatherCorrelationSection() {
+  const [periodStart, setPeriodStart] = useState(PERIOD_START);
+  const [periodEnd, setPeriodEnd] = useState(PERIOD_END);
+  const chartTheme = useChartTheme();
+
+  const query = useQuery({
+    queryKey: ["weather-correlation", periodStart, periodEnd],
+    queryFn: () => api.weatherCorrelation({ period_start: periodStart, period_end: periodEnd }),
+  });
+
+  const buckets = query.data?.buckets ?? [];
+  const daysMissingWeather = query.data?.days_missing_weather ?? 0;
+  const classifications = Array.from(new Set(buckets.map((b) => b.classification)));
+
+  const barSeries = (["비 안 온 날", "비 온 날"] as const).map((label) => ({
+    name: label,
+    type: "bar" as const,
+    itemStyle: { color: resolveColor(WEATHER_BAR_COLOR[label]) },
+    data: classifications.map((cls) => {
+      const bucket = buckets.find((b) => b.classification === cls && b.had_rain === (label === "비 온 날"));
+      return bucket?.avg_headcount ?? null;
+    }),
+  }));
+
+  const chartOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 56, right: 24, top: 44, bottom: 40 },
+    legend: { top: 0, textStyle: { color: chartTheme.text } },
+    tooltip: { trigger: "axis" as const, axisPointer: { type: "shadow" as const } },
+    xAxis: {
+      type: "category" as const,
+      data: classifications,
+      axisLabel: { color: chartTheme.text },
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+    },
+    yAxis: {
+      type: "value" as const,
+      name: "평균 식수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: barSeries,
+  };
+
+  return (
+    <Card title="비 오는 날 식수 — 과거 실측 상관관계">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        위 "금주 예상 식수" 카드의 날씨 배수는 실측 근거 없는 가정치입니다. 여기는 기상청 ASOS
+        일자료(과거 실측 강수)와 그 날짜의 실제 식수를 대조한 참고용 화면입니다 — 이 결과가 위 예측
+        배수를 자동으로 바꾸지는 않습니다.
+      </p>
+      <div className="mb-3 flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          시작일
+          <input
+            type="date"
+            className="rounded-md border px-3 py-2 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={periodStart}
+            max={periodEnd}
+            onChange={(e) => setPeriodStart(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          종료일
+          <input
+            type="date"
+            className="rounded-md border px-3 py-2 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={periodEnd}
+            min={periodStart}
+            onChange={(e) => setPeriodEnd(e.target.value)}
+          />
+        </label>
+      </div>
+
+      {query.isLoading && <LoadingState />}
+      {query.isError && <ErrorState error={query.error} />}
+
+      {query.data && buckets.length === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          날씨 데이터가 없습니다. 기상청 연동(KMA_WEATHER_* 환경변수)을 설정하거나 CSV로
+          가져오세요(scripts/import_weather_csv.py).
+        </p>
+      )}
+
+      {buckets.length > 0 && (
+        <>
+          {daysMissingWeather > 0 && (
+            <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+              이 기간 중 {daysMissingWeather}일은 날씨 데이터가 없어 집계에서 제외했습니다.
+            </p>
+          )}
+          <ReactECharts option={chartOption} style={{ height: 280 }} />
+          <div className="mt-4">
+            <Table
+              columns={[
+                { key: "classification", label: "분류" },
+                { key: "had_rain", label: "강수여부" },
+                { key: "day_count", label: "일수(N)", align: "right" },
+                { key: "avg_headcount", label: "평균 식수", align: "right" },
+              ]}
+              rows={buckets.map((b) => ({
+                key: `${b.classification}-${b.had_rain}`,
+                classification: b.classification,
+                had_rain: b.had_rain ? "비" : "맑음",
+                day_count: b.low_sample ? (
+                  <span style={{ color: "var(--ink-muted)" }}>{b.day_count}일 (표본 적음)</span>
+                ) : (
+                  `${b.day_count}일`
+                ),
+                avg_headcount: b.avg_headcount != null ? `${b.avg_headcount}명` : "-",
+              }))}
+              rowKey={(r) => r.key as string}
+            />
+          </div>
+          <p className="mt-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+            상관관계이며 인과관계가 아닙니다. 강수는 계절·요일과도 얽혀 있어 이 표만으로 결론
+            내리지 마세요.
+          </p>
+        </>
+      )}
+    </Card>
+  );
+}
+
 // ---- 2026-08 화면 재편으로 생긴 최상위 화면 3개 ----
 // 기존 "분석" 탭(서브탭 5개)을 해체하고, 담당자 협의에서 정한 5개 축
 // (현황 / 메뉴 편성·운영 / 만족도·VoE / Agent 채팅 / 관리)에 맞춰 재배치했다.

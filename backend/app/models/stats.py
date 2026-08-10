@@ -44,6 +44,27 @@ class DailyCornerStats(Base):
     is_holiday: Mapped[bool] = mapped_column(default=False)
 
 
+class DailyWeather(Base):
+    """PRD 7.1 daily_weather. 기상청 ASOS 일자료(과거 강수-식수 상관관계 검증용).
+
+    날씨는 코너/구분/끼니와 무관한 날짜 단위 사실이라, daily_corner_stats처럼
+    코너별로 중복 저장하지 않고 holiday_calendar와 같이 날짜 하나만 키로 잡는다
+    (2026-08) — 같은 날 수십 개 코너 행마다 같은 값을 복제하면 정정 시 N개 행을
+    다 고쳐야 하는 문제가 생긴다.
+    """
+
+    __tablename__ = "daily_weather"
+
+    stat_date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    precip_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    had_rain: Mapped[bool] = mapped_column(Boolean, default=False)
+    avg_temp_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # "kma_api" | "csv_import" — 사내망이 data.go.kr에 못 닿는 배포는 전량
+    # csv_import로 채워질 수 있어 화면/문서에서 출처를 밝히기 위해 남긴다.
+    source: Mapped[str] = mapped_column(String(16), default="kma_api")
+    fetched_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
+
+
 class DailyDivisionStats(Base):
     """PRD 4.2 daily_division_stats. 본사/계열사/기타 구분 일자별 식수."""
 

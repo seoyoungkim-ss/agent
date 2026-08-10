@@ -43,6 +43,23 @@ class MealLogIngestRequest(BaseModel):
     rows: list[MealLogRowIn]
 
 
+class WeatherRowIn(BaseModel):
+    stat_date: dt.date
+    precip_mm: float | None = None
+    avg_temp_c: float | None = None
+
+
+class WeatherCsvIngestRequest(BaseModel):
+    # 사내망이 data.go.kr에 못 닿는 배포를 위한 대체 경로(PRD 7.1, 2026-08) —
+    # scripts/import_weather_csv.py가 CSV를 읽어 이 형태로 올린다.
+    rows: list[WeatherRowIn]
+
+
+class WeatherIngestResult(BaseModel):
+    received: int
+    upserted: int
+
+
 class IngestResult(BaseModel):
     received: int
     inserted: int

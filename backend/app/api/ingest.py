@@ -5,9 +5,12 @@ from app.api.deps import require_ingest_token
 from app.db import get_db
 from app.models.enums import MenuRole, MenuRoleSource
 from app.models.logs import MealLog, WeeklyMenuPlan
+from app.models.stats import DailyWeather
 from app.schemas.ingest import (
     IngestResult,
     MealLogIngestRequest,
+    WeatherCsvIngestRequest,
+    WeatherIngestResult,
     WeeklyMenuIngestRequest,
 )
 from app.services.master_data import get_or_create_corner, get_or_create_employee, get_or_create_menu
@@ -188,3 +191,35 @@ def ingest_meal_log(payload: MealLogIngestRequest, db: Session = Depends(get_db)
 
     db.commit()
     return IngestResult(received=len(payload.rows), inserted=inserted, new_menus=new_menus)
+
+
+@router.post("/weather-csv", response_model=WeatherIngestResult)
+def ingest_weather_csv(payload: WeatherCsvIngestRequest, db: Session = Depends(get_db)) -> WeatherIngestResult:
+    """PRD 7.1: 사내망이 data.go.kr에 못 닿는 배포를 위한 CSV 수동 임포트 경로(2026-08).
+
+    scripts/import_weather_csv.py가 인터넷 되는 PC에서 만든 CSV를 이 형태로 올린다.
+    stat_date가 PK라 재업로드 시 갱신(upsert)되고 중복이 쌓이지 않는다.
+    """
+    upserted = 0
+    for row in payload.rows:
+        had_rain = bool(row.precip_mm and row.precip_mm > 0)
+        existing = db.get(DailyWeather, row.stat_date)
+        if existing:
+            existing.precip_mm = row.precip_mm
+            existing.avg_temp_c = row.avg_temp_c
+            existing.had_rain = had_rain
+            existing.source = "csv_import"
+        else:
+            db.add(
+                DailyWeather(
+                    stat_date=row.stat_date,
+                    precip_mm=row.precip_mm,
+                    avg_temp_c=row.avg_temp_c,
+                    had_rain=had_rain,
+                    source="csv_import",
+                )
+            )
+        upserted += 1
+
+    db.commit()
+    return WeatherIngestResult(received=len(payload.rows), upserted=upserted)
