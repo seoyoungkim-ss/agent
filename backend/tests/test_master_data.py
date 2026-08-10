@@ -1,5 +1,6 @@
 from app.models.enums import Division
 from app.services.master_data import (
+    SNAP_SNACK_CORNER_NAME,
     TAKE_OUT_CORNER_NAME,
     get_or_create_corner,
     get_or_create_employee,
@@ -20,6 +21,16 @@ def test_take_out_aliases_merge_into_single_corner(db_session):
     assert s_is_new is False
     assert r.corner_id == m.corner_id == l.corner_id == s.corner_id
     assert r.corner_name == TAKE_OUT_CORNER_NAME
+
+
+def test_snap_snack_aliases_merge_into_single_corner(db_session):
+    a, a_is_new = get_or_create_corner(db_session, "스냅스낵")
+    b, b_is_new = get_or_create_corner(db_session, "스냅스넥")
+
+    assert a_is_new is True
+    assert b_is_new is False
+    assert a.corner_id == b.corner_id
+    assert a.corner_name == SNAP_SNACK_CORNER_NAME
 
 
 def test_unrelated_corner_name_unaffected(db_session):

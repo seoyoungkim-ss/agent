@@ -18,6 +18,22 @@ TAKE_OUT_CORNER_NAME = "Take Out"
 # 코너로 합친다.
 TAKE_OUT_ALIASES = {"Take Out R", "Take Out M", "Take Out L", "선택형 Take out"}
 
+SNAP_SNACK_CORNER_NAME = "스냅스낵"
+# 엑셀마다 "스냅스낵"/"스냅스넥"으로 표기가 갈려 같은 코너가 둘로 나뉘어
+# 집계되던 문제(2026-08 실사용 신고) — 하나로 합친다.
+SNAP_SNACK_ALIASES = {"스냅스낵", "스냅스넥"}
+
+# 코너 별칭 → 대표 이름. 그룹이 늘어도 _normalize_corner_name이 하나의 조회로
+# 처리하도록 여기서 한 번만 평탄화한다.
+_CORNER_ALIAS_MAP: dict[str, str] = {
+    alias: canonical
+    for canonical, aliases in (
+        (TAKE_OUT_CORNER_NAME, TAKE_OUT_ALIASES),
+        (SNAP_SNACK_CORNER_NAME, SNAP_SNACK_ALIASES),
+    )
+    for alias in aliases
+}
+
 # 테이크아웃 특성상(세부 메뉴를 정확히 못 남김) 개별 메뉴 단위 분석에 안 맞는
 # 플레이스홀더성 메뉴명 — 4분면 집계, 메뉴 동반 선택 쌍(코어층 포함) 등 메뉴 단위
 # 통계 전반에서 제외한다(2026-07 실사용 확인: "코너별 분석"의 메뉴 쌍에서도 계속
@@ -47,7 +63,7 @@ def normalize_employee_id(employee_id: str) -> str:
 
 
 def _normalize_corner_name(corner_name: str) -> str:
-    return TAKE_OUT_CORNER_NAME if corner_name in TAKE_OUT_ALIASES else corner_name
+    return _CORNER_ALIAS_MAP.get(corner_name, corner_name)
 
 
 def _normalize_menu_name(menu_name: str) -> str:

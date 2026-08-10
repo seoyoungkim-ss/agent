@@ -4530,3 +4530,52 @@ import)을 배치했다 — "위에서 고른 배수가 실측 근거 없는 가
 - 실 API(data.go.kr) 호출은 이 세션 및 사내망 양쪽에서 라이브 검증이
   불가능했다 — 배포 전 사용자가 실제 키로 `scripts/import_weather_csv.py
   backfill`을 한 번 실행해 소량 대조 확인 필요.
+
+## §65. "스냅스낵"/"스냅스넥" 코너 별칭 병합 (2026-08)
+
+담당자 피드백: "스냅스낵과 스냅스넥은 같은 코너인데 따로 표기되고 있어 엑셀마다
+적힌게 달라서 그러니 두개는 같은걸로 취급해줘"
+
+Take Out R/M/L(§17 부근, `app/services/master_data.py`)과 같은 문제 — 엑셀
+파일마다 같은 코너를 다르게 표기해서 `corner_master`에 별개 행으로 쌓이고
+있었다. 같은 패턴으로 고쳤다:
+
+- `master_data.py`에 `SNAP_SNACK_CORNER_NAME = "스냅스낵"` /
+  `SNAP_SNACK_ALIASES = {"스냅스낵", "스냅스넥"}` 추가.
+- `_normalize_corner_name`을 `TAKE_OUT_ALIASES`/`SNAP_SNACK_ALIASES` 두
+  그룹을 하나의 `_CORNER_ALIAS_MAP` 조회로 처리하도록 일반화했다 — 별칭
+  그룹이 늘어도 if/elif를 안 늘리고 매핑에 항목만 추가하면 된다.
+- `get_or_create_corner`는 **앞으로 들어오는** 취식기록/식단표에만 적용된다.
+  이미 별개 `corner_id`로 갈라져 적재된 과거 데이터를 위해
+  `app/maintenance/merge_snap_snack_corners.py`(신규, `merge_take_out_corners.py`와
+  동일 구조)를 만들었다 — `meal_log`/`weekly_menu_plan`을 대표 코너로
+  재배정하고, 별칭 코너의 `daily_corner_stats`를 지운 뒤 별칭 행 자체를
+  삭제한다. 여러 번 돌려도 안전하다(idempotent).
+
+⚠️ 대표 이름("스냅스낵")을 별칭 집합에도 포함시켜서, Take Out과 달리
+`get_or_create_corner(db, "스냅스낵")`이 새 행을 만들지 않고 이미 있는
+"스냅스낵" 코너를 그대로 대표로 쓴다 — 재배정 대상은 "스냅스넥" 쪽만 된다
+(Take Out은 "Take Out"이라는 대표 이름 자체가 원본 표기에 없어 항상 새 행이
+생겼던 것과 차이).
+
+### 적용 방법 (운영자)
+
+배포 후 실제 DB에 이미 "스냅스낵"/"스냅스넥"이 별개 코너로 쌓여 있다면
+1회 실행 필요:
+
+```
+cd backend && python -m app.maintenance.merge_snap_snack_corners
+```
+
+실행 후 안내 메시지대로 `daily_corner_stats` 재계산(분석 탭 "최근 180일
+배치 집계 재계산" 버튼 또는 `POST /api/analysis/daily-stats/recompute`)이
+필요하다.
+
+### 검증
+
+- `test_master_data.py`: 두 표기가 같은 `corner_id`로 합쳐지는지, 무관한
+  코너명은 영향받지 않는지.
+- `test_maintenance_merge_snap_snack_corners.py`(신규, `test_maintenance_merge_corners.py`와
+  동일 구조): 이미 갈라진 과거 데이터를 흉내내 `meal_log` 재배정 검증,
+  멱등성(두 번 실행해도 안전) 검증.
+- `pytest -q` 전체 496개 통과.
