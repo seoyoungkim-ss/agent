@@ -4718,3 +4718,29 @@ Badge를 헤더에 두고, 그 아래 개별 편성일·판정·직전 이후·�
   "문제 메뉴 N개" 요약이 그룹 기준으로 정확한지 확인.
 - 백엔드 무변경이라 `pytest -q` 재실행은 생략(§66에서 이미 505개 통과
   확인한 상태 그대로).
+
+## §68. `import_weather_csv.py backfill` — DB 접속 없이 CSV만 뽑을 때도 DB를 접속하던 버그 수정 (2026-08)
+
+담당자가 백필 1단계(`backfill --out-csv ...`, DB 접속 불필요하게 설계된
+경로)를 실행했는데 "5432 fatal error"(Postgres 인증 실패)가 났다는 신고.
+
+**원인**: `scripts/import_weather_csv.py::cmd_backfill`이 `--write-db`
+여부와 무관하게 함수 시작 시점에 무조건 `SessionLocal()`로 DB에 접속해
+`daily_corner_stats`에서 백필 시작일을 추정하고 있었다 — `--out-csv`
+전용으로 쓸 때도 이 DB 접속이 걸림돌이 됐다. 담당자의 `docker-compose.yml`은
+`db` 서비스에 호스트 포트 매핑이 없어(사내망 컨테이너 간 통신만 전제),
+서버에서 스크립트를 직접 돌리면 애초에 DB에 정상적으로 못 닿는 구성이었다
+— CSV 전용 경로까지 DB를 요구한 게 설계 결함이었다.
+
+**수정**: `--start-date`(및 `--end-date`) 옵션을 새로 추가해 시작일을
+직접 지정할 수 있게 했다. `--start-date`가 있으면 DB를 아예 안 건드리고,
+`--write-db`를 켰을 때만(그때는 어차피 DB에 upsert해야 하므로) 편의상
+`daily_corner_stats`에서 자동 추정하는 기존 동작을 유지한다. 어느 쪽도
+없이 `--out-csv`만 쓰면 명확한 안내 메시지와 함께 종료한다(자동 추정을
+시도하지 않음).
+
+사용법(DB 접속 전혀 없이 CSV만 뽑기):
+```
+python scripts/import_weather_csv.py backfill --start-date 2026-01-01 --out-csv weather_backfill.csv
+python scripts/import_weather_csv.py csv --backend-url http://localhost:8000 --token $INGEST_API_TOKEN --file weather_backfill.csv
+```

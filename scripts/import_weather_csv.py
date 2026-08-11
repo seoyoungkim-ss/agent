@@ -7,17 +7,21 @@
            읽어 /ingest/weather-csv로 업로드한다. backend 서버와만 통신하면
            되므로 httpx만 있으면 어디서든 돌릴 수 있다(백엔드 앱 의존 없음).
 
-  backfill 이 머신이 data.go.kr과 백엔드 DB 양쪽에 다 닿을 때만 쓴다 —
-           app.services.weather_client.KmaWeatherClient로 실측 일자료를 가져와
-           daily_corner_stats의 최초 날짜부터 어제까지 6개월 단위로 채운다.
-           DB에 못 닿는 배포라면 대신 --out-csv로 CSV를 뽑아 위 csv 경로로
-           올리는 두 단계로 나눠 쓴다.
+  backfill data.go.kr에서 실측 일자료를 가져온다. --start-date를 주면 DB 접속이
+           전혀 필요 없다(2026-08 수정 — 예전엔 --out-csv 전용으로 써도 시작일을
+           daily_corner_stats에서 찾으려고 무조건 DB에 접속했다). --write-db를
+           켜면 daily_weather에 직접 upsert하므로 그때만 DB 접속이 필요하다.
+           DB에 못 닿는 배포라면 --out-csv로 CSV를 뽑아 csv 경로로 올리는
+           두 단계로 나눠 쓴다.
 
 사용 예:
   python scripts/import_weather_csv.py csv --backend-url https://internal.example.com \\
       --token "$INGEST_API_TOKEN" --file weather_2024_2026.csv
 
-  python scripts/import_weather_csv.py backfill --out-csv weather_backfill.csv
+  # DB 접속 없이 CSV만 뽑기 (시작일 직접 지정)
+  python scripts/import_weather_csv.py backfill --start-date 2026-01-01 --out-csv weather_backfill.csv
+
+  # 이 머신이 DB에도 닿을 때 — 시작일을 daily_corner_stats에서 자동 추정 + 바로 반영
   python scripts/import_weather_csv.py backfill --write-db
 """
 
@@ -74,45 +78,65 @@ def cmd_csv(args: argparse.Namespace) -> None:
 
 
 def cmd_backfill(args: argparse.Namespace) -> None:
-    # 백엔드 앱 모듈은 이 서브커맨드에서만 필요하다 — csv 서브커맨드는 httpx만으로 동작한다.
+    # 백엔드 앱 모듈(설정 읽기·API 클라이언트)은 이 서브커맨드에서만 필요하다 —
+    # csv 서브커맨드는 httpx만으로 동작한다. DB 접속은 --write-db를 켰을 때나
+    # --start-date를 안 줘서 daily_corner_stats로 범위를 추정해야 할 때만 연다
+    # (2026-08 버그 수정: 예전엔 --out-csv 전용으로 써도 시작일을 정하려고
+    # 무조건 DB에 접속해서, DB에 못 닿는 배포에서 이 옵션 자체가 못 쓰였다).
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
     from app.config import get_settings
-    from app.db import SessionLocal
-    from app.models.stats import DailyCornerStats, DailyWeather
     from app.services.weather_client import KmaWeatherClient
 
-    db = SessionLocal()
-    try:
-        earliest = db.query(DailyCornerStats.stat_date).order_by(DailyCornerStats.stat_date.asc()).first()
+    client = KmaWeatherClient(get_settings())
+    if not client.is_configured:
+        print("KMA_WEATHER_* 환경변수가 미설정 상태입니다 — backfill을 실행할 수 없습니다.")
+        return
+
+    end = dt.date.fromisoformat(args.end_date) if args.end_date else dt.date.today() - dt.timedelta(days=1)
+
+    if args.start_date:
+        start = dt.date.fromisoformat(args.start_date)
+    elif args.write_db:
+        # DB에 어차피 접속하니(upsert 대상) 편의상 daily_corner_stats 최초 날짜로 추정한다.
+        from app.db import SessionLocal
+        from app.models.stats import DailyCornerStats
+
+        db = SessionLocal()
+        try:
+            earliest = db.query(DailyCornerStats.stat_date).order_by(DailyCornerStats.stat_date.asc()).first()
+        finally:
+            db.close()
         if earliest is None:
-            print("daily_corner_stats에 데이터가 없어 백필 범위를 정할 수 없습니다.")
+            print("daily_corner_stats에 데이터가 없어 백필 범위를 정할 수 없습니다 — --start-date로 직접 지정하세요.")
             return
         start = earliest[0]
-        end = dt.date.today() - dt.timedelta(days=1)
+    else:
+        print("--start-date를 지정하세요 (DB 접속 없이 --out-csv만 쓸 때는 시작일을 자동으로 못 정합니다).")
+        return
 
-        client = KmaWeatherClient(get_settings())
-        if not client.is_configured:
-            print("KMA_WEATHER_* 환경변수가 미설정 상태입니다 — backfill을 실행할 수 없습니다.")
-            return
+    all_records = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(cursor + dt.timedelta(days=_BACKFILL_CHUNK_DAYS - 1), end)
+        records = asyncio.run(client.fetch_daily_range(cursor, chunk_end))
+        all_records.extend(records)
+        print(f"{cursor} ~ {chunk_end}: {len(records)}건 조회")
+        cursor = chunk_end + dt.timedelta(days=1)
 
-        all_records = []
-        cursor = start
-        while cursor <= end:
-            chunk_end = min(cursor + dt.timedelta(days=_BACKFILL_CHUNK_DAYS - 1), end)
-            records = asyncio.run(client.fetch_daily_range(cursor, chunk_end))
-            all_records.extend(records)
-            print(f"{cursor} ~ {chunk_end}: {len(records)}건 조회")
-            cursor = chunk_end + dt.timedelta(days=1)
+    if args.out_csv:
+        with open(args.out_csv, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["stat_date", "precip_mm", "avg_temp_c"])
+            for rec in all_records:
+                writer.writerow([rec.stat_date.isoformat(), rec.precip_mm, rec.avg_temp_c])
+        print(f"{args.out_csv}에 {len(all_records)}건 저장")
 
-        if args.out_csv:
-            with open(args.out_csv, "w", encoding="utf-8", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["stat_date", "precip_mm", "avg_temp_c"])
-                for rec in all_records:
-                    writer.writerow([rec.stat_date.isoformat(), rec.precip_mm, rec.avg_temp_c])
-            print(f"{args.out_csv}에 {len(all_records)}건 저장")
+    if args.write_db:
+        from app.db import SessionLocal
+        from app.models.stats import DailyWeather
 
-        if args.write_db:
+        db = SessionLocal()
+        try:
             for rec in all_records:
                 existing = db.get(DailyWeather, rec.stat_date)
                 if existing:
@@ -132,8 +156,8 @@ def cmd_backfill(args: argparse.Namespace) -> None:
                     )
             db.commit()
             print(f"DB에 {len(all_records)}건 upsert 완료")
-    finally:
-        db.close()
+        finally:
+            db.close()
 
 
 def main() -> None:
@@ -146,9 +170,15 @@ def main() -> None:
     csv_parser.add_argument("--token", default=os.environ.get("INGEST_API_TOKEN", ""), help="INGEST_API_TOKEN")
     csv_parser.set_defaults(func=cmd_csv)
 
-    backfill_parser = sub.add_parser("backfill", help="KMA API로 과거 전체 기간 백필(이 머신이 DB+data.go.kr 둘 다 닿을 때)")
+    backfill_parser = sub.add_parser(
+        "backfill", help="KMA API로 과거 기간 백필 (--out-csv만 쓰면 DB 접속 불필요)"
+    )
     backfill_parser.add_argument("--out-csv", default=None, help="결과를 CSV로도 저장할 경로")
-    backfill_parser.add_argument("--write-db", action="store_true", help="daily_weather에 직접 upsert")
+    backfill_parser.add_argument("--write-db", action="store_true", help="daily_weather에 직접 upsert (DB 접속 필요)")
+    backfill_parser.add_argument(
+        "--start-date", default=None, help="백필 시작일(YYYY-MM-DD). 안 주면 --write-db일 때만 DB에서 추정"
+    )
+    backfill_parser.add_argument("--end-date", default=None, help="백필 종료일(YYYY-MM-DD). 기본값: 어제")
     backfill_parser.set_defaults(func=cmd_backfill)
 
     args = parser.parse_args()
