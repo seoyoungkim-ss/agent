@@ -15,7 +15,13 @@
            두 단계로 나눠 쓴다.
 
 사용 예:
-  python scripts/import_weather_csv.py csv --backend-url https://internal.example.com \\
+  # ⚠️ --backend-url엔 반드시 /api까지 포함해야 한다 — 이 앱의 API는 전부
+  # /api 아래 마운트돼 있고(main.py: api_router = APIRouter(prefix="/api")),
+  # ingestion-tool의 backend_base_url 관례와도 동일하다. /api를 빼먹으면
+  # 404가 나야 정상인데, frontend_dist_dir가 존재하는 배포에서는 SPA
+  # 정적파일 폴백(main.py의 StaticFiles(html=True) 마운트)에 걸려 에러 없이
+  # 조용히 실패할 수 있다(2026-08 실사용 확인) — 반드시 /api 포함.
+  python scripts/import_weather_csv.py csv --backend-url https://internal.example.com/api \\
       --token "$INGEST_API_TOKEN" --file weather_2024_2026.csv
 
   # DB 접속 없이 CSV만 뽑기 (시작일 직접 지정)
