@@ -19,6 +19,15 @@ httpx는 기본으로 certifi 번들만 신뢰하고 OS 신뢰 저장소나 `SSL
 그 파일을 신뢰 목록에 추가로 사용한다 — 검증 자체를 끄는(`verify=False`)
 안전하지 않은 방식 대신 이 방법을 쓴다.
 
+**서비스키 이중 인코딩 대응(2026-08 실사용 확인)**: 공공데이터포털은 같은
+API에 "일반 인증키(Encoding)"와 "일반 인증키(Decoding)" 두 종류를 발급한다.
+Encoding 키는 이미 퍼센트 인코딩된 문자열(`%2F` 등 포함)인데, httpx의
+`params=` 딕셔너리에 그대로 넣으면 httpx가 값을 다시 인코딩해 `%`가 `%25`로
+깨진다(이중 인코딩) — 인증 실패의 흔한 원인이다. 아래에서 서비스키에 이미
+퍼센트 인코딩 패턴이 있으면 URL에 직접 붙여 다시 인코딩되지 않게 하고,
+없으면(Decoding 키) 기존처럼 `params`에 넣어 httpx가 인코딩하게 둔다 —
+사용자가 어느 키를 넣었는지 몰라도 두 경우 다 안전하게 동작한다.
+
 ⚠️ 이 세션은 outbound가 제한돼 있어 data.go.kr 실제 응답을 라이브로 확인하지
 못했다 — 아래 필드명(`tm`/`sumRn`/`avgTa`)과 응답 봉투 구조는 훈련 지식 기반
 추정이며, 배포 전 실제 키로 한 번 대조 확인이 필요하다.
@@ -27,11 +36,14 @@ httpx는 기본으로 certifi 번들만 신뢰하고 OS 신뢰 저장소나 `SSL
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 
 import httpx
 
 from app.config import Settings
+
+_PERCENT_ENCODED_PATTERN = re.compile(r"%[0-9A-Fa-f]{2}")
 
 
 @dataclass(frozen=True)
@@ -79,9 +91,8 @@ class KmaWeatherClient:
         if not self.is_configured:
             return []
 
-        url = f"{self._settings.kma_weather_base_url.rstrip('/')}/getWthrDataList"
+        base_url = f"{self._settings.kma_weather_base_url.rstrip('/')}/getWthrDataList"
         params = {
-            "serviceKey": self._settings.kma_weather_api_key,
             "pageNo": "1",
             "numOfRows": str((end - start).days + 1),
             "dataType": "JSON",
@@ -91,6 +102,14 @@ class KmaWeatherClient:
             "endDt": end.strftime("%Y%m%d"),
             "stnIds": self._settings.kma_weather_station_id,
         }
+        service_key = self._settings.kma_weather_api_key
+        if _PERCENT_ENCODED_PATTERN.search(service_key):
+            # 이미 인코딩된 키 — URL에 직접 붙여 httpx가 다시 인코딩하지 않게 한다.
+            url = f"{base_url}?serviceKey={service_key}"
+        else:
+            # 디코딩 키 — httpx의 자동 인코딩에 맡긴다.
+            url = base_url
+            params = {"serviceKey": service_key, **params}
         # 사내 프록시가 TLS를 가로채는 경우 certifi 기본 신뢰 목록만으론 검증이
         # 안 된다 — kma_weather_ca_bundle이 설정돼 있으면 그 PEM 파일을 추가로
         # 신뢰한다(미설정이면 기본 검증 그대로).

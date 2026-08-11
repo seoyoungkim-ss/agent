@@ -95,6 +95,46 @@ async def test_fetch_daily_range_parses_items_and_treats_blank_sumrn_as_no_rain(
 
 
 @pytest.mark.asyncio
+async def test_fetch_daily_range_does_not_double_encode_already_encoded_service_key(monkeypatch):
+    """공공데이터포털의 "인코딩" 키(퍼센트 인코딩 포함, 예: %2F)를 httpx params에
+    그대로 넣으면 %가 %25로 다시 인코딩돼 인증이 깨진다(2026-08 실사용 확인).
+    이미 인코딩된 키는 URL에 직접 붙여 그대로 전송돼야 한다."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"response": {"body": {"items": {"item": []}}}})
+
+    _patch_async_client(monkeypatch, handler)
+
+    encoded_key = "abc%2Fdef%2Bghi%3D%3D"
+    client = KmaWeatherClient(_configured_settings(kma_weather_api_key=encoded_key))
+    await client.fetch_daily_range(dt.date(2026, 8, 1), dt.date(2026, 8, 1))
+
+    assert f"serviceKey={encoded_key}" in captured["url"]
+    assert "%25" not in captured["url"]  # 이중 인코딩(%가 %25로) 안 됐는지 확인
+
+
+@pytest.mark.asyncio
+async def test_fetch_daily_range_lets_httpx_encode_plain_service_key(monkeypatch):
+    """퍼센트 인코딩 패턴이 없는 "디코딩" 키는 기존처럼 httpx params가 인코딩한다."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"response": {"body": {"items": {"item": []}}}})
+
+    _patch_async_client(monkeypatch, handler)
+
+    client = KmaWeatherClient(_configured_settings(kma_weather_api_key="plainDecodedKey123+/="))
+    await client.fetch_daily_range(dt.date(2026, 8, 1), dt.date(2026, 8, 1))
+
+    # httpx가 +, /, = 등을 표준 인코딩한 결과가 URL에 반영돼야 한다.
+    assert "serviceKey=plainDecodedKey123" in captured["url"]
+    assert "%2B" in captured["url"] or "%2F" in captured["url"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_daily_range_handles_single_item_returned_as_dict(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
