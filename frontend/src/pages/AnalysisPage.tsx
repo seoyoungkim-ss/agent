@@ -17,6 +17,7 @@ import {
   type WeeklyMenuSlot,
 } from "../api/client";
 import {
+  Badge,
   Button,
   Card,
   ErrorState,
@@ -2735,11 +2736,11 @@ function VoeAnalysisTab() {
 /** 메뉴 편성·운영 — "다음 주 식단을 어떻게 짤까"에 답하는 화면. */
 // 메뉴 회전 이력 (2순위, 2026-08) — "이 메뉴 최근에 내보내지 않았나?"에 답한다.
 // 판정 기준은 백엔드(app/services/menu_rotation.py)에 있고 여기선 표시만 한다.
-const ROTATION_FLAG_COLOR: Record<string, string> = {
-  "같은 날 중복": "var(--critical)",
-  "재편성 과다": "var(--critical)",
-  "평소보다 이름": "var(--warning)",
-  오랜만: "var(--accent)",
+const ROTATION_FLAG_TONE: Record<string, "critical" | "warning" | "accent" | "muted"> = {
+  "같은 날 중복": "critical",
+  "재편성 과다": "critical",
+  "평소보다 이름": "warning",
+  오랜만: "accent",
 };
 // 기본값은 "고칠 것만 보기" — 적정/이력 없음까지 다 띄우면 한 주에 수십 줄이라
 // 정작 봐야 할 경고가 묻힌다.
@@ -2769,30 +2770,23 @@ function usePlanPeriod(defaultDays = "90") {
 }
 
 /**
- * 중복 점검 — 축이 둘이다.
- *  왼쪽: 기간 내 같은 메뉴 반복 ("이 메뉴 최근에 또 내보내지 않았나")
- *  오른쪽: 슬롯 내 재료·특성 중복 ("이 한 끼 구성이 겹치지 않나")
- * 주 이동 컨트롤을 하나만 두는 이유: 카드가 따로면 주가 어긋나 "회전 이력은
- * 이번 주, 조합은 지난 주"를 보게 된다(2026-08).
+ * 메뉴 중복 점검 — "이 메뉴 최근에 또 내보내지 않았나"(회전 이력) +
+ * "자주 반복되는 부찬 랭킹". 둘 다 같은 관심사(같은 메뉴가 반복 편성되는
+ * 문제)라 한 카드에 묶는다. "한 끼 구성 겹침" 점검은 관심사가 달라
+ * `MealClashCheckSection`으로 분리했다(2026-08 "너무 복잡하게 나타남" 신고 —
+ * 예전엔 두 축이 grid로 나란히 붙은 한 카드였다).
  */
-function DuplicationCheckSection() {
-  const [selectedMonday, setSelectedMonday] = useState(() => weeklyMondayOf(new Date()));
+function MenuRotationCheckSection() {
   const [warningsOnly, setWarningsOnly] = useState(true);
-  const periodEnd = weeklyAddDays(selectedMonday, 6);
 
-  // 회전 이력(재편성 과다/평소보다 이름 등)을 임의 기간으로 — 담당자: "주차별로
-  // 보지 말고 기간을 설정하면 그 기간동안 재편성과다/평소보다이름 카테고리
-  // 표현해줘". 우측 "한 끼 구성 겹침" 축은 이번 요청 범위 밖이라 그대로 위
-  // 주간 네비게이션(selectedMonday)을 쓴다 — 이 표만 독립된 기간을 쓴다.
   const [rotationStart, setRotationStart] = useState(PERIOD_START);
   const [rotationEnd, setRotationEnd] = useState(PERIOD_END);
   const [showAllRotation, setShowAllRotation] = useState(false);
   const ROTATION_PREVIEW_COUNT = 15;
 
   // 자주 반복되는 부찬 랭킹 — 담당자: "부찬 중복 볼 때 보기가 너무 불편함, 정말
-  // 자주 나오고 돌려막기한 부찬을 보고싶어". 위 주간 회전표는 한 주씩 넘기는
-  // 구조라 "지난 몇 달간 자주 반복됐다"는 그림이 안 나온다 — 그래서 이 서브
-  // 섹션만 독립된 기간(직접 선택 가능)과 코너 필터를 쓴다.
+  // 자주 나오고 돌려막기한 부찬을 보고싶어". 위 회전 이력과 독립된 기간·코너
+  // 필터를 쓴다.
   const [repeatStart, setRepeatStart] = useState(PERIOD_START);
   const [repeatEnd, setRepeatEnd] = useState(PERIOD_END);
   const [repeatCornerId, setRepeatCornerId] = useState<number | null>(null);
@@ -2802,11 +2796,6 @@ function DuplicationCheckSection() {
   const rotation = useQuery({
     queryKey: ["weekly-menu-rotation", rotationStart, rotationEnd],
     queryFn: () => api.weeklyMenuRotation({ period_start: rotationStart, period_end: rotationEnd }),
-  });
-  const clash = useQuery({
-    queryKey: ["weekly-menu-combination-check", selectedMonday],
-    queryFn: () =>
-      api.weeklyMenuCombinationCheck({ period_start: selectedMonday, period_end: periodEnd }),
   });
   const repeatCorners = useQuery({ queryKey: ["corner-list"], queryFn: () => api.cornerList() });
   const repeated = useQuery({
@@ -2823,8 +2812,8 @@ function DuplicationCheckSection() {
     ? repeatedItems
     : repeatedItems.slice(0, REPEATED_PREVIEW_COUNT);
 
-  // 경고는 두 축이다 — 간격(직전 이후 며칠)과 횟수(3개월에 몇 번).
-  // "14일은 넘겼지만 분기에 3번"은 간격만 봐선 안 잡힌다.
+  // 경고는 두 축이다 — 간격(직전 이후 며칠)과 횟수(최근 90일에 몇 번).
+  // "14일은 넘겼지만 최근 90일에 3번"은 간격만 봐선 안 잡힌다.
   const isRotationWarning = (r: MenuRotationRow) =>
     ROTATION_WARNING_FLAGS.has(r.flag) || r.over_frequency;
   const rotationItems = (rotation.data?.items ?? []).filter(
@@ -2842,212 +2831,122 @@ function DuplicationCheckSection() {
   const mainWarnings = (rotation.data?.items ?? []).filter(
     (r) => r.menu_role === "메인" && isRotationWarning(r),
   ).length;
-  const clashSlots = (clash.data?.slots ?? []).filter(
-    (s) => s.ingredient_clashes.length > 0 || s.vector_clashes.length > 0,
-  );
 
   return (
-    <Card title="중복 점검 — 같은 메뉴 반복 · 한 끼 구성 겹침">
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <Button variant="secondary" onClick={() => setSelectedMonday(weeklyAddDays(selectedMonday, -7))}>
-          ◀ 이전 주
-        </Button>
-        <span className="text-[13px] font-medium">
-          {selectedMonday} ~ {periodEnd}
-        </span>
-        <Button variant="secondary" onClick={() => setSelectedMonday(weeklyAddDays(selectedMonday, 7))}>
-          다음 주 ▶
-        </Button>
+    <Card title="메뉴 중복 점검 — 이 메뉴 최근에 또 내보내지 않았나">
+      <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+        직전 편성 이후 며칠 지났는지(간격)와 최근 90일 편성 횟수(허용치 초과 시
+        강조)를 함께 봅니다. 메인 과다 편성이 1순위 문제라 위에 둡니다.
+      </p>
+      <div className="mb-4 flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          시작일
+          <input
+            type="date"
+            className="rounded-md border px-3 py-2 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={rotationStart}
+            max={rotationEnd}
+            onChange={(e) => setRotationStart(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          종료일
+          <input
+            type="date"
+            className="rounded-md border px-3 py-2 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={rotationEnd}
+            min={rotationStart}
+            onChange={(e) => setRotationEnd(e.target.value)}
+          />
+        </label>
         <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
           <input type="checkbox" checked={warningsOnly} onChange={(e) => setWarningsOnly(e.target.checked)} />
           경고만 보기
         </label>
       </div>
-
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* 축 1 — 기간 내 같은 메뉴 반복 */}
-        <div>
-          <p className="mb-1 text-[13px] font-medium">이 메뉴 최근에 또 내보내지 않았나</p>
-          <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-            두 축으로 봅니다 — <strong>간격</strong>(직전 편성 이후
-            {rotation.data ? ` ${rotation.data.min_rotation_gap_days}` : " 14"}일 미만이면 "재편성 과다")과
-            <strong>횟수</strong>(최근 {rotation.data ? rotation.data.rotation_window_days : 90}일에 메인은
-            2회, 부찬은 6회까지 무난). "14일은 넘겼지만 분기에 3번"은 간격만으론 안 잡힙니다.
-            <strong>메인 과다 편성이 1순위 문제</strong>라 위에 따로 놓았습니다. 기간은 직접 고를 수
-            있습니다 — 위 주간 네비게이션과 별개입니다.
-          </p>
-          <div className="mb-3 flex flex-wrap items-end gap-3">
-            <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-              시작일
-              <input
-                type="date"
-                className="rounded-md border px-3 py-2 text-[13px]"
-                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                value={rotationStart}
-                max={rotationEnd}
-                onChange={(e) => setRotationStart(e.target.value)}
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-              종료일
-              <input
-                type="date"
-                className="rounded-md border px-3 py-2 text-[13px]"
-                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                value={rotationEnd}
-                min={rotationStart}
-                onChange={(e) => setRotationEnd(e.target.value)}
-              />
-            </label>
-          </div>
-          {rotation.data && (
-            <p
-              className="mb-2 text-xs"
-              style={{ color: rotationWarnings > 0 ? "var(--critical)" : "var(--ink-muted)" }}
-            >
-              경고 {rotationWarnings}건(메인 {mainWarnings}건) / 편성 {rotation.data.items.length}건
-            </p>
-          )}
-          {rotation.isLoading && <LoadingState />}
-          {rotation.isError && <ErrorState error={rotation.error} />}
-          {rotation.data && rotationItems.length === 0 && (
-            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-              {rotation.data.items.length === 0
-                ? "이 주에 등록된 식단표가 없습니다."
-                : "반복 편성 경고가 없습니다."}
-            </p>
-          )}
-          {(["메인", "부찬·건강가든"] as const).map((group) => {
-            const rows = group === "메인" ? visibleMainRotation : visibleSideRotation;
-            if (rows.length === 0) return null;
-            const isMain = group === "메인";
-            return (
-              <div key={group} className="mb-3">
-                <p
-                  className="mb-1 text-xs font-medium"
-                  style={{ color: isMain ? "var(--critical)" : "var(--ink-secondary)" }}
-                >
-                  {isMain ? "메인메뉴 (1순위)" : "부찬 · 건강가든"}
-                </p>
-                <Table
-                  columns={[
-                    { key: "date", label: "날짜" },
-                    { key: "menu", label: "메뉴" },
-                    { key: "flag", label: "판정" },
-                    { key: "gap", label: "직전 이후", align: "right" },
-                    { key: "interval", label: "평균 주기", align: "right" },
-                    { key: "freq", label: "3개월", align: "right" },
-                  ]}
-                  rows={rows.map((r, i) => ({
-                    key: `${r.plan_date}-${r.corner_id}-${r.menu_id}-${i}`,
-                    date: weekdayLabel(r.plan_date),
-                    menu: `${r.menu_name} (${r.corner_name})`,
-                    flag: (
-                      <span style={{ color: ROTATION_FLAG_COLOR[r.flag] ?? "var(--ink-muted)" }}>
-                        {r.flag}
-                      </span>
-                    ),
-                    gap:
-                      r.gap_days == null
-                        ? "-"
-                        : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`,
-                    interval: r.avg_interval_days == null ? "-" : `${r.avg_interval_days}일`,
-                    freq: (
-                      <span
-                        style={{
-                          color: r.over_frequency
-                            ? isMain
-                              ? "var(--critical)"
-                              : "var(--warning)"
-                            : "var(--ink-muted)",
-                        }}
-                      >
-                        {r.window_count}/{r.window_max}회
-                      </span>
-                    ),
-                  }))}
-                  rowKey={(r) => r.key as string}
-                />
-              </div>
-            );
-          })}
-          {rotationHasMore && (
-            <button
-              className="mb-3 text-xs underline"
-              style={{ color: "var(--accent)" }}
-              onClick={() => setShowAllRotation((v) => !v)}
-            >
-              {showAllRotation ? "접기" : "전체 보기"}
-            </button>
-          )}
+      {rotation.data && (
+        <div className="mb-3">
+          <Badge
+            tone={rotationWarnings > 0 ? "critical" : "muted"}
+            label={`경고 ${rotationWarnings}건(메인 ${mainWarnings}건) / 편성 ${rotation.data.items.length}건`}
+          />
         </div>
-
-        {/* 축 2 — 슬롯 내 재료·특성 중복 */}
-        <div>
-          <p className="mb-1 text-[13px] font-medium">이 한 끼 구성이 겹치지 않나</p>
-          <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-            같은 날·같은 코너·같은 끼니 안에서 메인·부찬·건강가든끼리 재료가 겹치거나(콩나물국밥 +
-            콩나물무침) 특성이 겹치는지(둘 다 매움, 둘 다 탄수화물) 봅니다. 재료 판정은 키워드 사전
-            기반이라 사전에 없는 재료는 못 잡습니다.
-          </p>
-          {clash.data != null && clash.data.untagged_menu_count > 0 && (
-            <p className="mb-2 text-xs" style={{ color: "var(--warning)" }}>
-              {clash.data.untagged_menu_count}개 메뉴는 음식벡터 미태깅이라 특성 중복을 못 봤습니다
-              (관리 탭에서 태깅).
-            </p>
-          )}
-          {clash.isLoading && <LoadingState />}
-          {clash.isError && <ErrorState error={clash.error} />}
-          {clash.data && clashSlots.length === 0 && (
-            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-              {clash.data.slots.length === 0
-                ? "이 주에 등록된 식단표가 없습니다."
-                : "구성 겹침이 발견되지 않았습니다."}
-            </p>
-          )}
-          <div className="space-y-2">
-            {clashSlots.map((s) => (
-              <div
-                key={`${s.plan_date}-${s.corner_id}-${s.meal_type}`}
-                className="rounded-xl border p-3"
-                style={{ borderColor: "var(--border)" }}
-              >
-                <div className="text-[13px] font-medium">
-                  {weekdayLabel(s.plan_date)} · {s.corner_name} ({s.meal_type})
-                </div>
-                <div className="mt-0.5 text-xs" style={{ color: "var(--ink-muted)" }}>
-                  {s.main ?? "메인 미배정"}
-                  {s.sides.length > 0 && ` · 부찬: ${s.sides.join(", ")}`}
-                  {s.health_garden.length > 0 && ` · 건강가든: ${s.health_garden.join(", ")}`}
-                </div>
-                <ul className="mt-2 space-y-1 text-xs">
-                  {s.ingredient_clashes.map((c, i) => (
-                    <li key={`ing-${i}`} style={{ color: "var(--critical)" }}>
-                      재료 중복 — {c.menu_a} ↔ {c.menu_b}: {c.shared.join(", ")}
-                    </li>
-                  ))}
-                  {s.vector_clashes.map((c, i) => (
-                    <li key={`vec-${i}`} style={{ color: "var(--warning)" }}>
-                      {c.label_ko} 중복 — {c.menu_a} ↔ {c.menu_b}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+      )}
+      {rotation.isLoading && <LoadingState />}
+      {rotation.isError && <ErrorState error={rotation.error} />}
+      {rotation.data && rotationItems.length === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          {rotation.data.items.length === 0
+            ? "이 기간에 등록된 식단표가 없습니다."
+            : "반복 편성 경고가 없습니다."}
+        </p>
+      )}
+      {(["메인", "부찬·건강가든"] as const).map((group) => {
+        const rows = group === "메인" ? visibleMainRotation : visibleSideRotation;
+        if (rows.length === 0) return null;
+        const isMain = group === "메인";
+        return (
+          <div key={group} className="mb-3">
+            <div className="mb-1">
+              {isMain ? (
+                <Badge tone="critical" label={<span className="text-xs font-medium">메인메뉴 (1순위)</span>} />
+              ) : (
+                <span className="text-xs font-medium" style={{ color: "var(--ink-secondary)" }}>
+                  부찬 · 건강가든
+                </span>
+              )}
+            </div>
+            <Table
+              columns={[
+                { key: "date", label: "날짜" },
+                { key: "menu", label: "메뉴" },
+                { key: "flag", label: "판정" },
+                { key: "gap", label: "직전 이후", align: "right" },
+                { key: "interval", label: "평균 주기", align: "right" },
+                { key: "freq", label: "최근 90일", align: "right" },
+              ]}
+              rows={rows.map((r, i) => ({
+                key: `${r.plan_date}-${r.corner_id}-${r.menu_id}-${i}`,
+                date: weekdayLabel(r.plan_date),
+                menu: `${r.menu_name} (${r.corner_name})`,
+                flag: <Badge tone={ROTATION_FLAG_TONE[r.flag] ?? "muted"} label={r.flag} />,
+                gap:
+                  r.gap_days == null
+                    ? "-"
+                    : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`,
+                interval: r.avg_interval_days == null ? "-" : `${r.avg_interval_days}일`,
+                freq: r.over_frequency ? (
+                  <Badge tone={isMain ? "critical" : "warning"} label={`${r.window_count}/${r.window_max}회`} />
+                ) : (
+                  <span style={{ color: "var(--ink-muted)" }}>
+                    {r.window_count}/{r.window_max}회
+                  </span>
+                ),
+              }))}
+              rowKey={(r) => r.key as string}
+            />
           </div>
-        </div>
-      </div>
+        );
+      })}
+      {rotationHasMore && (
+        <button
+          className="mb-3 text-xs underline"
+          style={{ color: "var(--accent)" }}
+          onClick={() => setShowAllRotation((v) => !v)}
+        >
+          {showAllRotation ? "접기" : "전체 보기"}
+        </button>
+      )}
 
-      {/* 자주 반복되는 부찬 랭킹 — 코너 열이 있는 5열 표라 좌우 절반 폭에
-          갇히면 코너명이 좁은 칸에서 줄바꿈된다(2026-08 신고). grid 밖,
-          카드 전체 폭을 쓰는 섹션으로 둔다. */}
+      {/* 자주 반복되는 부찬 랭킹 — 카드 전체 폭을 쓰는 서브 섹션(2026-08 §63:
+          코너 열이 좁은 칸에 갇히면 코너명이 줄바꿈되던 문제로 grid 밖에 둠). */}
       <div className="mt-6 border-t pt-6" style={{ borderColor: "var(--border)" }}>
         <p className="mb-1 text-[13px] font-medium">자주 반복되는 부찬 랭킹</p>
         <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-          위 표와 달리 기간을 직접 골라 볼 수 있습니다 — "지난 3개월 동안 이 부찬이 유독 자주
-          돌아갔다" 같은 그림은 한 주씩 넘겨선 안 보이기 때문입니다. 같은 코너 안에서만
-          세고(다른 코너에 같은 반찬이 나온 건 중복이 아님), 건강가든은 공용이라 어느 코너와
-          겹쳐도 셉니다.
+          기간을 직접 골라 볼 수 있습니다. 같은 코너 안에서만 세고(다른 코너에 같은 반찬이
+          나온 건 중복이 아님), 건강가든은 공용이라 어느 코너와 겹쳐도 셉니다.
         </p>
         <div className="mb-3 flex flex-wrap items-end gap-3">
           <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3127,6 +3026,93 @@ function DuplicationCheckSection() {
             )}
           </>
         )}
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * 한 끼 구성 겹침 점검 — "이 한 끼 구성이 겹치지 않나"(슬롯 내 재료·특성
+ * 중복). `MenuRotationCheckSection`과 관심사가 달라 별도 카드로 분리했다
+ * (2026-08 "너무 복잡하게 나타남" 신고). 주간 네비게이션은 이 섹션만 쓰므로
+ * 로컬 상태로 옮겼다.
+ */
+function MealClashCheckSection() {
+  const [selectedMonday, setSelectedMonday] = useState(() => weeklyMondayOf(new Date()));
+  const periodEnd = weeklyAddDays(selectedMonday, 6);
+
+  const clash = useQuery({
+    queryKey: ["weekly-menu-combination-check", selectedMonday],
+    queryFn: () =>
+      api.weeklyMenuCombinationCheck({ period_start: selectedMonday, period_end: periodEnd }),
+  });
+  const clashSlots = (clash.data?.slots ?? []).filter(
+    (s) => s.ingredient_clashes.length > 0 || s.vector_clashes.length > 0,
+  );
+
+  return (
+    <Card title="한 끼 구성 겹침 점검 — 이 한 끼 구성이 겹치지 않나">
+      <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+        같은 날·같은 코너·같은 끼니 안에서 메인·부찬·건강가든끼리 재료가 겹치거나(콩나물국밥 +
+        콩나물무침) 특성이 겹치는지(둘 다 매움, 둘 다 탄수화물) 봅니다.
+      </p>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <Button variant="secondary" onClick={() => setSelectedMonday(weeklyAddDays(selectedMonday, -7))}>
+          ◀ 이전 주
+        </Button>
+        <span className="text-[13px] font-medium">
+          {selectedMonday} ~ {periodEnd}
+        </span>
+        <Button variant="secondary" onClick={() => setSelectedMonday(weeklyAddDays(selectedMonday, 7))}>
+          다음 주 ▶
+        </Button>
+      </div>
+      {clash.data != null && clash.data.untagged_menu_count > 0 && (
+        <div className="mb-3">
+          <Badge
+            tone="warning"
+            label={`${clash.data.untagged_menu_count}개 메뉴는 음식벡터 미태깅이라 특성 중복을 못 봤습니다(관리 탭에서 태깅).`}
+          />
+        </div>
+      )}
+      {clash.isLoading && <LoadingState />}
+      {clash.isError && <ErrorState error={clash.error} />}
+      {clash.data && clashSlots.length === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          {clash.data.slots.length === 0
+            ? "이 주에 등록된 식단표가 없습니다."
+            : "구성 겹침이 발견되지 않았습니다."}
+        </p>
+      )}
+      <div className="space-y-2">
+        {clashSlots.map((s) => (
+          <div
+            key={`${s.plan_date}-${s.corner_id}-${s.meal_type}`}
+            className="rounded-xl border p-3"
+            style={{ borderColor: "var(--border)" }}
+          >
+            <div className="text-[13px] font-medium">
+              {weekdayLabel(s.plan_date)} · {s.corner_name} ({s.meal_type})
+            </div>
+            <div className="mt-0.5 text-xs" style={{ color: "var(--ink-muted)" }}>
+              {s.main ?? "메인 미배정"}
+              {s.sides.length > 0 && ` · 부찬: ${s.sides.join(", ")}`}
+              {s.health_garden.length > 0 && ` · 건강가든: ${s.health_garden.join(", ")}`}
+            </div>
+            <ul className="mt-2 space-y-1">
+              {s.ingredient_clashes.map((c, i) => (
+                <li key={`ing-${i}`}>
+                  <Badge tone="critical" label={`재료 중복 — ${c.menu_a} ↔ ${c.menu_b}: ${c.shared.join(", ")}`} />
+                </li>
+              ))}
+              {s.vector_clashes.map((c, i) => (
+                <li key={`vec-${i}`}>
+                  <Badge tone="warning" label={`${c.label_ko} 중복 — ${c.menu_a} ↔ ${c.menu_b}`} />
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
       </div>
     </Card>
   );
@@ -3583,7 +3569,8 @@ export function MenuPlanningPage() {
   return (
     <div className="space-y-6">
       <WeeklyMenuReviewTab />
-      <DuplicationCheckSection />
+      <MenuRotationCheckSection />
+      <MealClashCheckSection />
       <MenuPlanPerformanceSection />
       <MenuComboSection />
       <MenuRepertoireSection />

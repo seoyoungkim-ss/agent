@@ -101,6 +101,33 @@ export function quadrantColor(label: string | null): string {
   return QUADRANT_COLOR[label ?? ""] ?? "var(--ink-muted)";
 }
 
+const BADGE_TONE_COLOR: Record<string, string> = {
+  critical: "var(--critical)",
+  warning: "var(--warning)",
+  good: "var(--good)",
+  accent: "var(--accent)",
+  muted: "var(--ink-muted)",
+};
+
+// 경고/위험 상태를 표시하는 작은 공용 컴포넌트 — QuadrantBadge와 같은 "색은
+// 점(dot)에만 싣고 글자는 항상 ink" 규칙(§39.12)을 따른다. 옅은 색 텍스트가
+// 주변 회색 설명글에 묻혀 "눈에 안 들어온다"는 신고(2026-08, 중복점검 화면)에
+// 대응 — 색 텍스트를 쓰던 자리를 이걸로 교체하면 자동으로 규칙을 지키게 된다.
+export function Badge({
+  label,
+  tone,
+}: {
+  label: ReactNode;
+  tone: "critical" | "warning" | "good" | "accent" | "muted";
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: BADGE_TONE_COLOR[tone] }} />
+      <span style={{ color: "var(--ink)" }}>{label}</span>
+    </span>
+  );
+}
+
 // ECharts는 Canvas에 그리기 때문에 CSS var()를 해석하지 못한다(값을 대입해도
 // 조용히 무시되고 내부 기본값으로 대체됨) — 그래서 차트 옵션에 넣을 색은 항상
 // 이 함수로 실제 계산된 값을 읽어와야 라이트/다크 모드에 맞게 반영된다.

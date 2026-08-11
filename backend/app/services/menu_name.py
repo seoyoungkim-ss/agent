@@ -18,6 +18,8 @@
 import re
 import unicodedata
 
+from app.services.corner_aliases import ALL_CORNER_NAMES
+
 _PAREN_GROUP_PATTERN = re.compile(r"\s*\(([^()]*)\)")
 _ORIGIN_SEPARATOR = re.compile(r"[:\-–—/]|\s+")
 _ORIGIN_EXPLICIT_TOKENS = {"국내산", "국산", "외국산", "수입산", "원양산"}
@@ -94,12 +96,20 @@ def _entries_are_removable(entries: list[str], *, allow_bare: bool) -> bool:
     (이름 뒤 주석 제거)이 각자 규칙을 따로 들고 있다가 한쪽만 재료-짝 폴백을
     받고 한쪽은 못 받는 사고가 났다(2026-08, "햄마늘종볶음(햄-계육, 돈육:
     국내산)"이 안 떨어짐). 하나로 합쳐 두 함수가 항상 같은 판정을 하게 한다.
+
+    괄호 안이 항목 하나뿐이고 그 값이 **알려진 코너 이름/별칭과 완전히 일치**
+    하면 그것도 지운다(2026-08, "진짬뽕라면(스냅스낵)"/"진짬뽕라면(스냅스넥)"이
+    코너명 표기 차이로 다른 메뉴처럼 갈라지던 문제) — 원산지 휴리스틱과는
+    별개의 화이트리스트 판정이라 "김치찌개(얼큰한맛)"처럼 실제로 다른 메뉴를
+    구분하는 임의의 괄호 설명에는 영향을 주지 않는다.
     """
     if not entries:
         return False
     if all(is_origin_entry(e, allow_bare=allow_bare) for e in entries):
         return True
-    return allow_bare and all(is_ingredient_pair(e) for e in entries)
+    if allow_bare and all(is_ingredient_pair(e) for e in entries):
+        return True
+    return len(entries) == 1 and entries[0].strip() in ALL_CORNER_NAMES
 
 
 def is_origin_annotation_text(text: str) -> bool:

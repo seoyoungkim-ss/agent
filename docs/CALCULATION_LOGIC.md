@@ -4579,3 +4579,92 @@ cd backend && python -m app.maintenance.merge_snap_snack_corners
   동일 구조): 이미 갈라진 과거 데이터를 흉내내 `meal_log` 재배정 검증,
   멱등성(두 번 실행해도 안전) 검증.
 - `pytest -q` 전체 496개 통과.
+
+## §66. 중복점검 화면 분리·색상 개선 + 스냅스낵 메뉴명 병합 버그 수정 (2026-08)
+
+담당자 피드백 두 건.
+
+### A. 중복점검이 너무 복잡함
+
+`DuplicationCheckSection`(회전 이력+부찬 랭킹+한 끼 구성 겹침을 `lg:grid-cols-2`
+로 한 카드에 몰아넣던 구조)을 두 개의 독립 카드로 쪼갰다:
+
+- **`MenuRotationCheckSection`** — "메뉴 중복 점검"(회전 이력 표 + 자주
+  반복되는 부찬 랭킹, 둘 다 "같은 메뉴가 반복 편성되는 문제"라 같이 둔다).
+- **`MealClashCheckSection`** — "한 끼 구성 겹침 점검"(슬롯 내 재료·특성
+  중복). 이전까지 카드 상단 공용 주간 네비게이션을 이 축만 실제로 썼으므로
+  로컬 상태로 옮겼다.
+
+**색 규칙 위반 수정**: 이 섹션만 경고/위험 상태를 텍스트 색(`var(--warning)`/
+`var(--critical)`)으로 표시하고 있었다 — 이 앱의 다른 곳(`StatTile`,
+`QuadrantBadge`, §39.12)은 전부 "색은 점(dot)에만 싣고 글자는 항상 ink"
+규칙을 쓰는데 이 섹션만 안 따르고 있었다. 공용 `Badge` 컴포넌트
+(`components/ui.tsx`, 점+ink 텍스트)를 새로 만들어 판정 flag, 최근 90일
+초과 표시, 경고 N건 요약, 클래시 카드의 재료/특성 중복 항목 전부를 여기로
+교체했다.
+
+**"3개월" 열 명확화**: 실제로는 "최근 90일 편성 횟수(허용치: 메인 2회·부찬
+6회)"인데 헤더가 "3개월"뿐이라 뜻이 안 드러났다 — 헤더를 "최근 90일"로
+바꾸고, 4문장짜리 캡션을 핵심만 남긴 2문장으로 줄였다(글자 과다 지적 대응).
+
+### B. 스냅스낵 코너 병합 후 메뉴명이 여전히 갈라짐
+
+§65에서 코너명 "스냅스낵"/"스냅스넥"을 병합했지만, 원본 데이터의 메뉴명
+자체가 `"진짬뽕라면(스냅스낵)"` / `"진짬뽕라면(스냅스넥)"`처럼 코너명을
+괄호로 끝에 붙인 채 들어와 있어 `menu_master`에 별개 행으로 남아 있었다.
+코너명 정규화(`master_data._normalize_corner_name`)와 메뉴명 정규화
+(`menu_name.strip_origin_annotation`/`match_key`)는 완전히 분리된 경로라
+지난 수정이 이 문제엔 영향을 못 줬다.
+
+**설계**: 코너 별칭 상수(`TAKE_OUT_*`/`SNAP_SNACK_*`)를 의존성 없는 새 모듈
+`app/services/corner_aliases.py`로 옮겼다 — `menu_name.py`는 "백엔드 안의
+유일한 정규화 출처"라 코너 지식을 직접 가지면 안 되는데(순환 임포트 우려),
+두 모듈이 같은 별칭 데이터를 공유해야 하기 때문이다. `master_data.py`는 이
+모듈에서 다시 임포트해 같은 이름으로 재노출(re-export)하므로 기존
+`analysis.py`/`taste_clustering.py`/두 merge 스크립트/테스트의 임포트 구문은
+안 바뀐다.
+
+`menu_name._entries_are_removable`에 조건 하나 추가 — 괄호 안 항목이
+**정확히 하나**이고 그 항목이 `corner_aliases.ALL_CORNER_NAMES`(대표 이름 +
+모든 별칭)와 **완전히 일치**하면 제거 대상으로 인정한다. 원산지 휴리스틱과
+별개의 화이트리스트 판정이라 `"김치찌개(얼큰한맛)"` 같은 기존 케이스(실제로
+다른 메뉴를 구분하는 임의 괄호 설명)에는 영향이 없다.
+
+이 한 곳만 고치면 `match_key()`가 내부적으로 `strip_origin_annotation()`을
+호출하므로 자동으로 효과가 퍼진다. **새 유지보수 스크립트를 안 만들어도
+된다** — 기존 `app/maintenance/rename_menus_with_leftover_annotation.py`가
+같은 `strip_origin_annotation()`을 직접 호출해 "정정 대상"을 찾으므로, 이미
+있는 2단계 파이프라인(rename → merge)이 이 케이스까지 자동으로 잡는다.
+
+같은 판정을 `ingestion-tool/parsing/weekly_menu_parser.py`에도 미러링했다
+(두 패키지가 코드를 공유할 수 없어 복제하는 기존 관례 — 짝 테스트로
+어긋남을 잡는다).
+
+### 기존 데이터 정리 (운영자, 배포 후 1회)
+
+배포 후에도 이미 갈라져 저장된 기존 `"진짬뽕라면(스냅스낵)"`류 행은 자동
+병합되지 않는다(§65와 같은 이유). 이미 있는 2단계 스크립트를 순서대로
+실행:
+
+```
+cd backend
+python -m app.maintenance.rename_menus_with_leftover_annotation --apply
+python -m app.maintenance.merge_duplicate_menus --apply
+```
+
+끝나면 메뉴 성과 재계산 필요 — `merge_duplicate_menus`가 실행 후 안내
+메시지로 알려준다.
+
+### 검증
+
+- `pytest -q` 백엔드 전체 505개 통과(신규: `test_menu_name.py`에 코너 접미어
+  케이스 4건 + match_key 병합 확인 1건, `test_master_data.py` 재노출 확인).
+- `ingestion-tool` 전체 181개 통과(신규: `test_weekly_menu_parser.py`에 대응
+  케이스 4건).
+- `get_or_create_menu(db, "진짬뽕라면(스냅스낵)")`/`(스냅스넥)`이 같은
+  `menu_id`(표시명 "진짬뽕라면")로 귀결되는지 직접 호출로 재확인.
+- `npm run build` 타입체크 통과.
+- `uvicorn`+`vite` 개발 서버로 Playwright 확인 — 두 섹션이 독립 카드로
+  뜨는지, 판정/최근 90일/클래시 목록이 점(dot)+ink 텍스트 조합으로 바뀌어
+  눈에 띄는지(실데이터로 재편성 과다 빨간 점, 클래시 카드 재료 중복 빨간
+  점·특성 중복 주황 점 확인) 스크린샷으로 확인.

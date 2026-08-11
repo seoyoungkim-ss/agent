@@ -47,6 +47,14 @@ _ORIGIN_MARKER_PREFIXES = "*※ \t"
 # 백엔드 menu_name.py와 같은 값이어야 한다 — 짝 테스트가 어긋남을 잡는다.
 _ORIGIN_TOKEN_MAX_LEN = 8
 
+# 메뉴명 끝에 코너명이 괄호로 붙어 들어오는 경우("진짬뽕라면(스냅스낵)" 신고,
+# 2026-08) 제거하기 위한 화이트리스트. 백엔드 app/services/corner_aliases.py의
+# ALL_CORNER_NAMES와 같은 값이어야 한다 — 짝 테스트가 어긋남을 잡는다.
+_ALL_CORNER_NAMES = {
+    "Take Out", "Take Out R", "Take Out M", "Take Out L", "선택형 Take out",
+    "스냅스낵", "스냅스넥",
+}
+
 
 def _looks_like_origin_token(token: str) -> bool:
     """"국내산", "호주산", "브라질산"처럼 원산지 이름으로 보이는 마지막 토큰인가."""
@@ -113,12 +121,19 @@ def _entries_are_removable(entries: list[str], *, allow_bare: bool) -> bool:
     (이름 뒤 주석 제거)이 각자 규칙을 따로 들고 있다가 한쪽만 재료-짝 폴백을
     받고 한쪽은 못 받는 사고가 났다(2026-08, "햄마늘종볶음(햄-계육, 돈육:
     국내산)"이 안 떨어짐). 하나로 합쳐 두 함수가 항상 같은 판정을 하게 한다.
+
+    괄호 안이 항목 하나뿐이고 그 값이 알려진 코너 이름/별칭과 완전히 일치하면
+    그것도 지운다(2026-08, "진짬뽕라면(스냅스낵)" 신고) — 원산지 휴리스틱과
+    별개의 화이트리스트 판정이라 다른 괄호 설명("김치찌개(얼큰한맛)" 등)에는
+    영향 없음.
     """
     if not entries:
         return False
     if all(_is_origin_entry(e, allow_bare=allow_bare) for e in entries):
         return True
-    return allow_bare and all(_is_ingredient_pair(e) for e in entries)
+    if allow_bare and all(_is_ingredient_pair(e) for e in entries):
+        return True
+    return len(entries) == 1 and entries[0].strip() in _ALL_CORNER_NAMES
 
 
 def is_origin_annotation_text(text: str) -> bool:

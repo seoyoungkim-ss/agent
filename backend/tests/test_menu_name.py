@@ -51,6 +51,15 @@ ORIGIN_CASES = [
         False,
         "명란크림파스타&베이컨포테이토피자",
     ),
+    # 2026-08: 코너명이 메뉴명 끝에 괄호로 붙어 들어오는 경우("진짬뽕라면(스냅스낵)"
+    # 신고) — 코너 별칭 정규화(§65)와 별개로 메뉴명 쪽도 정리해야 두 표기가
+    # 같은 메뉴로 매칭된다.
+    ("진짬뽕라면(스냅스낵)", False, "진짬뽕라면"),
+    ("진짬뽕라면(스냅스넥)", False, "진짬뽕라면"),
+    ("불닭볶음면(Take Out R)", False, "불닭볶음면"),
+    # 코너명이 다른 항목과 섞여 있으면(원산지/재료 판정도 아니고 단독도 아님)
+    # 지우지 않는다 — 화이트리스트 판정은 괄호 안이 정확히 코너명 하나일 때만.
+    ("라면(스냅스낵, 매운맛)", False, "라면(스냅스낵, 매운맛)"),
 ]
 
 
@@ -150,6 +159,12 @@ def test_match_key_folds_display_variants_together(variant):
 def test_match_key_keeps_different_menus_apart(a, b):
     """접는 규칙을 넓히다 서로 다른 메뉴가 합쳐지면 통계가 통째로 망가진다."""
     assert match_key(a) != match_key(b)
+
+
+def test_match_key_folds_corner_alias_suffix_variants_together():
+    """실사용 신고: "진짬뽕라면(스냅스낵)"과 "진짬뽕라면(스냅스넥)"이 코너명
+    표기 차이(§65)로 다른 메뉴처럼 갈라져 분석됐다."""
+    assert match_key("진짬뽕라면(스냅스낵)") == match_key("진짬뽕라면(스냅스넥)") == match_key("진짬뽕라면")
 
 
 def test_match_key_is_stable_and_idempotent():
