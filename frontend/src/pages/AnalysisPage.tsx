@@ -2769,6 +2769,66 @@ function usePlanPeriod(defaultDays = "90") {
   };
 }
 
+// 판정 심각도 순위 — 그룹의 "최고 심각도" 판정을 뽑을 때 쓴다. 숫자가 작을수록 심각.
+const ROTATION_FLAG_SEVERITY: Record<string, number> = {
+  "같은 날 중복": 0,
+  "재편성 과다": 1,
+  "평소보다 이름": 2,
+  오랜만: 3,
+  "이력 없음": 4,
+  적정: 5,
+};
+
+interface RotationGroup {
+  key: string;
+  cornerName: string;
+  menuName: string;
+  role: string;
+  occurrences: MenuRotationRow[];
+  hasWarning: boolean;
+  worstFlag: string;
+  worstTone: "critical" | "warning" | "accent" | "muted";
+}
+
+// (코너, 메뉴) 단위로 편성 이력을 묶는다 — "운영 입장에서 알아보기 힘듦" 피드백
+// (2026-08) 대응. 개별 편성일 행이 표 전체(경고종류→날짜 순)에 흩어져 있어
+// 같은 메뉴의 반복 패턴("3/13, 3/23, 4/14, 4/22에 또 나왔다")을 눈으로
+// 대조해야 했다 — 그룹으로 묶어 한 메뉴의 전체 이력을 한 카드에서 보게 한다.
+function buildRotationGroups(items: MenuRotationRow[]): RotationGroup[] {
+  const byKey = new Map<string, MenuRotationRow[]>();
+  for (const r of items) {
+    const key = `${r.corner_id}-${r.menu_id}`;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key)!.push(r);
+  }
+  const groups: RotationGroup[] = [];
+  for (const [key, rows] of byKey) {
+    const occurrences = [...rows].sort((a, b) => a.plan_date.localeCompare(b.plan_date));
+    const worst = [...occurrences].sort(
+      (a, b) => (ROTATION_FLAG_SEVERITY[a.flag] ?? 9) - (ROTATION_FLAG_SEVERITY[b.flag] ?? 9),
+    )[0];
+    const hasWarning = occurrences.some(
+      (r) => ROTATION_WARNING_FLAGS.has(r.flag) || r.over_frequency,
+    );
+    groups.push({
+      key,
+      cornerName: occurrences[0].corner_name,
+      menuName: occurrences[0].menu_name,
+      role: occurrences[0].menu_role,
+      occurrences,
+      hasWarning,
+      worstFlag: worst.flag,
+      worstTone: ROTATION_FLAG_TONE[worst.flag] ?? "muted",
+    });
+  }
+  // 담당자 우선순위: 문제 그룹(경고 있음)이 위로, 그 안에서는 메뉴명 순.
+  groups.sort((a, b) => {
+    if (a.hasWarning !== b.hasWarning) return a.hasWarning ? -1 : 1;
+    return a.menuName.localeCompare(b.menuName);
+  });
+  return groups;
+}
+
 /**
  * 메뉴 중복 점검 — "이 메뉴 최근에 또 내보내지 않았나"(회전 이력) +
  * "자주 반복되는 부찬 랭킹". 둘 다 같은 관심사(같은 메뉴가 반복 편성되는
@@ -2783,6 +2843,10 @@ function MenuRotationCheckSection() {
   const [rotationEnd, setRotationEnd] = useState(PERIOD_END);
   const [showAllRotation, setShowAllRotation] = useState(false);
   const ROTATION_PREVIEW_COUNT = 15;
+  // 한 메뉴가 기간 내내 거의 매일 편성되는 경우(예: 상시 부찬) 그룹 하나의
+  // 이력 표가 수십 행이 될 수 있어, 그룹별로 최근 N건만 먼저 보여준다.
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const OCCURRENCES_PREVIEW_COUNT = 8;
 
   // 자주 반복되는 부찬 랭킹 — 담당자: "부찬 중복 볼 때 보기가 너무 불편함, 정말
   // 자주 나오고 돌려막기한 부찬을 보고싶어". 위 회전 이력과 독립된 기간·코너
@@ -2816,21 +2880,26 @@ function MenuRotationCheckSection() {
   // "14일은 넘겼지만 최근 90일에 3번"은 간격만 봐선 안 잡힌다.
   const isRotationWarning = (r: MenuRotationRow) =>
     ROTATION_WARNING_FLAGS.has(r.flag) || r.over_frequency;
-  const rotationItems = (rotation.data?.items ?? []).filter(
-    (r) => !warningsOnly || isRotationWarning(r),
-  );
-  // 담당자 우선순위: 메인 과다 편성이 1순위, 부찬은 그다음.
-  const mainRotation = rotationItems.filter((r) => r.menu_role === "메인");
-  const sideRotation = rotationItems.filter((r) => r.menu_role !== "메인");
-  // 기간을 넓게 잡으면 행이 많아질 수 있어 §61과 같은 미리보기 안전판을 둔다.
-  const rotationHasMore =
-    mainRotation.length > ROTATION_PREVIEW_COUNT || sideRotation.length > ROTATION_PREVIEW_COUNT;
-  const visibleMainRotation = showAllRotation ? mainRotation : mainRotation.slice(0, ROTATION_PREVIEW_COUNT);
-  const visibleSideRotation = showAllRotation ? sideRotation : sideRotation.slice(0, ROTATION_PREVIEW_COUNT);
-  const rotationWarnings = (rotation.data?.items ?? []).filter(isRotationWarning).length;
-  const mainWarnings = (rotation.data?.items ?? []).filter(
+
+  // 메뉴별로 묶어서 보기(2026-08 "운영 입장에서 알아보기 힘듦" 피드백) — 예전엔
+  // 경고 종류·날짜 순으로만 정렬해 같은 메뉴의 반복 이력이 표 전체에 흩어져
+  // 있었다("이 메뉴가 3/13, 3/23, 4/14, 4/22에 또 나왔다"를 보려면 직접 찾아
+  // 대조해야 했음). (코너, 메뉴) 단위로 모든 편성일을 한 그룹으로 묶고, 그룹
+  // 안에 경고가 하나라도 있으면 그룹 전체를 문제 그룹으로 표시한다.
+  const allRotationItems = rotation.data?.items ?? [];
+  const rotationGroups = buildRotationGroups(allRotationItems);
+  const visibleGroups = warningsOnly ? rotationGroups.filter((g) => g.hasWarning) : rotationGroups;
+  const mainGroups = visibleGroups.filter((g) => g.role === "메인");
+  const sideGroups = visibleGroups.filter((g) => g.role !== "메인");
+  // 기간을 넓게 잡으면 메뉴 수가 많아질 수 있어 §61과 같은 미리보기 안전판을 둔다.
+  const rotationHasMore = mainGroups.length > ROTATION_PREVIEW_COUNT || sideGroups.length > ROTATION_PREVIEW_COUNT;
+  const visibleMainGroups = showAllRotation ? mainGroups : mainGroups.slice(0, ROTATION_PREVIEW_COUNT);
+  const visibleSideGroups = showAllRotation ? sideGroups : sideGroups.slice(0, ROTATION_PREVIEW_COUNT);
+  const rotationWarnings = allRotationItems.filter(isRotationWarning).length;
+  const mainWarnings = allRotationItems.filter(
     (r) => r.menu_role === "메인" && isRotationWarning(r),
   ).length;
+  const warningMenuCount = rotationGroups.filter((g) => g.hasWarning).length;
 
   return (
     <Card title="메뉴 중복 점검 — 이 메뉴 최근에 또 내보내지 않았나">
@@ -2870,26 +2939,26 @@ function MenuRotationCheckSection() {
         <div className="mb-3">
           <Badge
             tone={rotationWarnings > 0 ? "critical" : "muted"}
-            label={`경고 ${rotationWarnings}건(메인 ${mainWarnings}건) / 편성 ${rotation.data.items.length}건`}
+            label={`문제 메뉴 ${warningMenuCount}개(경고 ${rotationWarnings}건, 메인 ${mainWarnings}건) / 편성 ${rotation.data.items.length}건`}
           />
         </div>
       )}
       {rotation.isLoading && <LoadingState />}
       {rotation.isError && <ErrorState error={rotation.error} />}
-      {rotation.data && rotationItems.length === 0 && (
+      {rotation.data && visibleGroups.length === 0 && (
         <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
           {rotation.data.items.length === 0
             ? "이 기간에 등록된 식단표가 없습니다."
             : "반복 편성 경고가 없습니다."}
         </p>
       )}
-      {(["메인", "부찬·건강가든"] as const).map((group) => {
-        const rows = group === "메인" ? visibleMainRotation : visibleSideRotation;
-        if (rows.length === 0) return null;
-        const isMain = group === "메인";
+      {(["메인", "부찬·건강가든"] as const).map((groupLabel) => {
+        const groups = groupLabel === "메인" ? visibleMainGroups : visibleSideGroups;
+        if (groups.length === 0) return null;
+        const isMain = groupLabel === "메인";
         return (
-          <div key={group} className="mb-3">
-            <div className="mb-1">
+          <div key={groupLabel} className="mb-4">
+            <div className="mb-2">
               {isMain ? (
                 <Badge tone="critical" label={<span className="text-xs font-medium">메인메뉴 (1순위)</span>} />
               ) : (
@@ -2898,35 +2967,121 @@ function MenuRotationCheckSection() {
                 </span>
               )}
             </div>
-            <Table
-              columns={[
-                { key: "date", label: "날짜" },
-                { key: "menu", label: "메뉴" },
-                { key: "flag", label: "판정" },
-                { key: "gap", label: "직전 이후", align: "right" },
-                { key: "interval", label: "평균 주기", align: "right" },
-                { key: "freq", label: "최근 90일", align: "right" },
-              ]}
-              rows={rows.map((r, i) => ({
-                key: `${r.plan_date}-${r.corner_id}-${r.menu_id}-${i}`,
-                date: weekdayLabel(r.plan_date),
-                menu: `${r.menu_name} (${r.corner_name})`,
-                flag: <Badge tone={ROTATION_FLAG_TONE[r.flag] ?? "muted"} label={r.flag} />,
-                gap:
-                  r.gap_days == null
-                    ? "-"
-                    : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`,
-                interval: r.avg_interval_days == null ? "-" : `${r.avg_interval_days}일`,
-                freq: r.over_frequency ? (
-                  <Badge tone={isMain ? "critical" : "warning"} label={`${r.window_count}/${r.window_max}회`} />
-                ) : (
-                  <span style={{ color: "var(--ink-muted)" }}>
-                    {r.window_count}/{r.window_max}회
-                  </span>
-                ),
-              }))}
-              rowKey={(r) => r.key as string}
-            />
+            <div className="space-y-3">
+              {groups.map((g) => {
+                // 상시 부찬처럼 기간 내내 거의 매일 편성되는 메뉴는 그룹 하나의
+                // 이력이 수십 행이 될 수 있어, 최근 것부터 일부만 먼저 보여준다.
+                const isExpanded = expandedGroups.has(g.key);
+                const visibleOccurrences = isExpanded
+                  ? g.occurrences
+                  : g.occurrences.slice(-OCCURRENCES_PREVIEW_COUNT);
+                const hiddenCount = g.occurrences.length - visibleOccurrences.length;
+                return (
+                <div key={g.key} className="rounded-xl border p-3" style={{ borderColor: "var(--border)" }}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[13px] font-medium">
+                      {g.menuName} <span style={{ color: "var(--ink-muted)" }}>({g.cornerName})</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+                      <span>{g.occurrences.length}회 편성</span>
+                      {g.hasWarning && <Badge tone={g.worstTone} label={g.worstFlag} />}
+                    </div>
+                  </div>
+                  <div className="mt-2 overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr>
+                          <th
+                            className="whitespace-nowrap py-1 pr-4 text-left font-medium"
+                            style={{ color: "var(--ink-muted)" }}
+                          >
+                            날짜
+                          </th>
+                          <th
+                            className="whitespace-nowrap py-1 pr-4 text-left font-medium"
+                            style={{ color: "var(--ink-muted)" }}
+                          >
+                            판정
+                          </th>
+                          <th
+                            className="whitespace-nowrap py-1 pr-4 text-right font-medium"
+                            style={{ color: "var(--ink-muted)" }}
+                          >
+                            직전 이후
+                          </th>
+                          <th
+                            className="whitespace-nowrap py-1 pr-4 text-right font-medium"
+                            style={{ color: "var(--ink-muted)" }}
+                          >
+                            평균 주기
+                          </th>
+                          <th
+                            className="whitespace-nowrap py-1 text-right font-medium"
+                            style={{ color: "var(--ink-muted)" }}
+                          >
+                            최근 90일
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {hiddenCount > 0 && (
+                          <tr>
+                            <td colSpan={5} className="py-1" style={{ color: "var(--ink-muted)" }}>
+                              최근 {OCCURRENCES_PREVIEW_COUNT}건만 표시 중 (이전 {hiddenCount}건 더 있음)
+                            </td>
+                          </tr>
+                        )}
+                        {visibleOccurrences.map((r, i) => (
+                          <tr key={`${r.plan_date}-${i}`} style={{ borderTop: "1px solid var(--border)" }}>
+                            <td className="whitespace-nowrap py-1 pr-4">{weekdayLabel(r.plan_date)}</td>
+                            <td className="whitespace-nowrap py-1 pr-4">
+                              <Badge tone={ROTATION_FLAG_TONE[r.flag] ?? "muted"} label={r.flag} />
+                            </td>
+                            <td className="whitespace-nowrap py-1 pr-4 text-right">
+                              {r.gap_days == null
+                                ? "-"
+                                : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`}
+                            </td>
+                            <td className="whitespace-nowrap py-1 pr-4 text-right">
+                              {r.avg_interval_days == null ? "-" : `${r.avg_interval_days}일`}
+                            </td>
+                            <td className="whitespace-nowrap py-1 text-right">
+                              {r.over_frequency ? (
+                                <Badge
+                                  tone={isMain ? "critical" : "warning"}
+                                  label={`${r.window_count}/${r.window_max}회`}
+                                />
+                              ) : (
+                                <span style={{ color: "var(--ink-muted)" }}>
+                                  {r.window_count}/{r.window_max}회
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {hiddenCount > 0 && (
+                    <button
+                      className="mt-1 text-xs underline"
+                      style={{ color: "var(--accent)" }}
+                      onClick={() =>
+                        setExpandedGroups((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(g.key)) next.delete(g.key);
+                          else next.add(g.key);
+                          return next;
+                        })
+                      }
+                    >
+                      {isExpanded ? "접기" : `이전 ${hiddenCount}건 더 보기`}
+                    </button>
+                  )}
+                </div>
+                );
+              })}
+            </div>
           </div>
         );
       })}
