@@ -10,6 +10,15 @@
 프록시가 걸려 있다면 오히려 그 프록시를 **타야** 도달할 수 있다 — 그래서
 여기서는 `trust_env`를 기본값(True)으로 둔다.
 
+**TLS 검사 프록시 대응(2026-08 실사용 확인)**: 사내 방화벽을 연 뒤에도
+`unable to get local issuer certificate` 에러가 났다 — 사내 프록시가 아웃바운드
+HTTPS를 가로채(TLS 인터셉션) 자체 인증서로 다시 서명하는 경우 흔한 증상이다.
+httpx는 기본으로 certifi 번들만 신뢰하고 OS 신뢰 저장소나 `SSL_CERT_FILE`
+환경변수를 자동으로 보지 않으므로, OS에 사내 루트 인증서가 설치돼 있어도
+그걸 안 쓴다. `kma_weather_ca_bundle`에 사내 루트 인증서(PEM) 경로를 지정하면
+그 파일을 신뢰 목록에 추가로 사용한다 — 검증 자체를 끄는(`verify=False`)
+안전하지 않은 방식 대신 이 방법을 쓴다.
+
 ⚠️ 이 세션은 outbound가 제한돼 있어 data.go.kr 실제 응답을 라이브로 확인하지
 못했다 — 아래 필드명(`tm`/`sumRn`/`avgTa`)과 응답 봉투 구조는 훈련 지식 기반
 추정이며, 배포 전 실제 키로 한 번 대조 확인이 필요하다.
@@ -82,7 +91,11 @@ class KmaWeatherClient:
             "endDt": end.strftime("%Y%m%d"),
             "stnIds": self._settings.kma_weather_station_id,
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # 사내 프록시가 TLS를 가로채는 경우 certifi 기본 신뢰 목록만으론 검증이
+        # 안 된다 — kma_weather_ca_bundle이 설정돼 있으면 그 PEM 파일을 추가로
+        # 신뢰한다(미설정이면 기본 검증 그대로).
+        verify = self._settings.kma_weather_ca_bundle or True
+        async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             data = resp.json()

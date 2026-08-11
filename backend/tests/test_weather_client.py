@@ -131,3 +131,36 @@ async def test_fetch_daily_range_does_not_force_trust_env_false(monkeypatch):
     await client.fetch_daily_range(dt.date(2026, 8, 1), dt.date(2026, 8, 1))
 
     assert captured_kwargs.get("trust_env") is not False
+
+
+@pytest.mark.asyncio
+async def test_fetch_daily_range_uses_default_verify_when_ca_bundle_not_set(monkeypatch):
+    captured_kwargs: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"response": {"body": {"items": {"item": []}}}})
+
+    _patch_async_client(monkeypatch, handler, captured_kwargs)
+
+    client = KmaWeatherClient(_configured_settings())
+    await client.fetch_daily_range(dt.date(2026, 8, 1), dt.date(2026, 8, 1))
+
+    assert captured_kwargs.get("verify") is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_daily_range_passes_ca_bundle_path_to_verify(monkeypatch):
+    """사내 프록시가 TLS를 가로채는 경우("unable to get local issuer certificate"
+    실사용 확인, 2026-08) kma_weather_ca_bundle을 설정하면 그 경로를 httpx의
+    verify로 넘겨 사내 루트 인증서를 추가로 신뢰해야 한다."""
+    captured_kwargs: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"response": {"body": {"items": {"item": []}}}})
+
+    _patch_async_client(monkeypatch, handler, captured_kwargs)
+
+    client = KmaWeatherClient(_configured_settings(kma_weather_ca_bundle="/etc/ssl/certs/corp-ca.pem"))
+    await client.fetch_daily_range(dt.date(2026, 8, 1), dt.date(2026, 8, 1))
+
+    assert captured_kwargs.get("verify") == "/etc/ssl/certs/corp-ca.pem"

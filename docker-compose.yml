@@ -33,9 +33,17 @@ services:
       KMA_WEATHER_BASE_URL: ${KMA_WEATHER_BASE_URL:-https://apis.data.go.kr/1360000/AsosDalyInfoService}
       KMA_WEATHER_API_KEY: ${KMA_WEATHER_API_KEY:-}
       KMA_WEATHER_STATION_ID: ${KMA_WEATHER_STATION_ID:-119}
+      # 사내 프록시가 TLS를 가로채는 경우("unable to get local issuer certificate")
+      # 아래 volumes로 사내 루트 인증서를 컨테이너에 넣고 이 경로를 가리키게 한다.
+      KMA_WEATHER_CA_BUNDLE: ${KMA_WEATHER_CA_BUNDLE:-}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-[]}
     ports:
       - "${APP_PORT:-8000}:8000"
+    # KMA_WEATHER_CA_BUNDLE을 쓰려면 .env에 KMA_WEATHER_CA_BUNDLE_HOST_PATH(호스트의
+    # 사내 루트 인증서 PEM 경로)도 채우고 아래 줄의 주석을 해제하세요. 안 쓰면
+    # /dev/null이 매핑되므로(무해) 그대로 둬도 됩니다.
+    # volumes:
+    #   - ${KMA_WEATHER_CA_BUNDLE_HOST_PATH:-/dev/null}:/etc/ssl/certs/kma-weather-ca.pem:ro
 
 volumes:
   cafeteria_db_data:

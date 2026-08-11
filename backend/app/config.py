@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     kma_weather_base_url: str = "https://apis.data.go.kr/1360000/AsosDalyInfoService"
     kma_weather_api_key: str = ""
     kma_weather_station_id: str = "119"  # 수원 — 배포 전 실제 관측소 목록과 대조 확인 필요
+    # 사내 프록시가 아웃바운드 HTTPS를 TLS 인터셉션하는 경우("unable to get local
+    # issuer certificate" 실사용 확인, 2026-08) 사내 루트 인증서(PEM) 경로를 넣으면
+    # 그걸 추가로 신뢰한다. 비워두면 기본 인증서 목록(certifi)만 쓴다.
+    kma_weather_ca_bundle: str = ""
     # PRD 7.1: 날씨-식수 상관관계 버킷의 표본 일수가 이 값 미만이면 참고용으로 흐리게 표시
     weather_correlation_low_sample_days: int = 5
 

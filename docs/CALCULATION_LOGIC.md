@@ -4744,3 +4744,41 @@ Badge를 헤더에 두고, 그 아래 개별 편성일·판정·직전 이후·�
 python scripts/import_weather_csv.py backfill --start-date 2026-01-01 --out-csv weather_backfill.csv
 python scripts/import_weather_csv.py csv --backend-url http://localhost:8000 --token $INGEST_API_TOKEN --file weather_backfill.csv
 ```
+
+## §69. 기상청 API TLS 인증서 오류 대응 — `kma_weather_ca_bundle` (2026-08)
+
+사내 방화벽을 연 뒤 기상청 API 백필 스크립트를 돌렸더니
+`unable to get local issuer certificate` 에러가 났다는 신고. 사내 프록시가
+아웃바운드 HTTPS를 TLS 인터셉션(자체 인증서로 재서명)하는 전형적인 증상이다
+— curl/브라우저는 OS 신뢰 저장소를 봐서 문제없이 통과하는 경우가 많지만,
+httpx는 기본으로 certifi가 번들한 인증서 목록만 신뢰하고 OS 신뢰 저장소나
+`SSL_CERT_FILE` 환경변수를 자동으로 보지 않는다.
+
+**수정**: `KmaWeatherClient`가 `settings.kma_weather_ca_bundle`(PEM 파일
+경로)이 설정돼 있으면 그 경로를 `httpx.AsyncClient(verify=...)`로 넘겨
+사내 루트 인증서를 추가로 신뢰하게 했다. 미설정 시 기본 동작(`verify=True`,
+certifi 목록)은 그대로다. **`verify=False`로 검증 자체를 끄는 방식은
+쓰지 않는다** — 안전하지 않고, 이 프로젝트의 다른 곳에서도 그런 패턴을
+쓴 적이 없다.
+
+- `config.py`에 `kma_weather_ca_bundle: str = ""` 추가.
+- `.env.example`에 `KMA_WEATHER_CA_BUNDLE=` 추가.
+- `docker-compose.yml`에 환경변수 전달 + (선택) 사내 인증서를 컨테이너에
+  마운트하는 `volumes` 예시(기본은 `/dev/null` 매핑이라 안 쓰면 무해).
+
+### 적용 방법 (운영자)
+
+1. 사내 IT/보안팀에서 사내 프록시 루트 인증서(PEM)를 받는다.
+2. Docker 없이 직접 실행하는 경우: `.env`에
+   `KMA_WEATHER_CA_BUNDLE=/path/to/corp-ca.pem` 추가.
+3. Docker Compose로 배포하는 경우: 인증서 파일을 서버에 두고,
+   `docker-compose.yml`의 주석 처리된 `volumes` 줄을 해제 + `.env`에
+   `KMA_WEATHER_CA_BUNDLE_HOST_PATH=/path/to/corp-ca.pem`과
+   `KMA_WEATHER_CA_BUNDLE=/etc/ssl/certs/kma-weather-ca.pem`을 설정한다.
+
+### 검증
+
+- `test_weather_client.py`에 2개 추가: `kma_weather_ca_bundle` 미설정 시
+  `verify=True`(기본 동작 유지), 설정 시 그 경로가 그대로 `verify`로
+  전달되는지.
+- `pytest -q` 전체 507개 통과.
