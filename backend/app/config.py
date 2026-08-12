@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     # PRD 7.1: 날씨-식수 상관관계 버킷의 표본 일수가 이 값 미만이면 참고용으로 흐리게 표시
     weather_correlation_low_sample_days: int = 5
 
+    # PRD 7.1 확장(2026-08, §71): 메인메뉴×날씨유형(폭설/폭염/한파) 분류 임계값.
+    # 기상청 특보 기준을 참고한 기본값이나, 실사용 전 담당자 확인 필요(관측소
+    # ID·ASOS 필드명과 같은 톤의 캐비아트 — weather_client.py 참고).
+    heavy_snow_threshold_cm: float = 5.0
+    heatwave_temp_c: float = 33.0
+    coldwave_temp_c: float = -12.0
+
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 
     # PRD 9.4: 프론트엔드 빌드 결과(dist/)를 이 백엔드가 정적 파일로 함께 서빙할 때

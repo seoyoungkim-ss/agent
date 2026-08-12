@@ -13,6 +13,7 @@ import {
   type MenuRotationRow,
   type PredictedNumbersRow,
   type TrendDirection,
+  type WeatherEvent,
   type WeeklyMenuPlanItem,
   type WeeklyMenuSlot,
 } from "../api/client";
@@ -1959,6 +1960,23 @@ function PredictedImpactPanel({ planId }: { planId: number }) {
               <> · 예상 대기시간: 약 {query.data.prediction.expected_wait_minutes}분</>
             )}
           </div>
+          {query.data.weather_reference.length > 0 && (
+            <div>
+              과거 날씨 참고:{" "}
+              {query.data.weather_reference.map((r, i) => (
+                <span key={r.event}>
+                  {i > 0 && " · "}
+                  {r.event} {r.avg_headcount}명({r.day_count}일)
+                  {r.event !== "평상시" &&
+                    (r.diff_vs_normal == null ? (
+                      <span style={{ color: "var(--ink-muted)" }}> 표본 부족</span>
+                    ) : (
+                      <> {r.diff_vs_normal > 0 ? "+" : ""}{r.diff_vs_normal}</>
+                    ))}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="rounded p-2" style={{ background: "var(--surface)", color: "var(--ink-secondary)" }}>
             {query.data.summary_comment}
           </div>
@@ -3586,15 +3604,27 @@ const WEATHER_BAR_COLOR: Record<"비 안 온 날" | "비 온 날", string> = {
  * 자체가 크게 달라(주말은 원래 인원이 훨씬 적음), 섞으면 우연한 상관으로
  * 왜곡될 수 있다는 게 이번 요청의 핵심 포인트다.
  */
+// §71: 메인메뉴 × 날씨유형 랭킹 탭 — 담당자 요청 예시 그대로("비오면 김치찌개…
+// 폭설이면… 폭염이면 메밀소바…") 네 유형을 눌러가며 훑어보는 멘탈모델.
+const MENU_WEATHER_EVENT_TABS: WeatherEvent[] = ["비", "폭설", "폭염", "한파"];
+
 export function WeatherCorrelationSection() {
   const [periodStart, setPeriodStart] = useState(PERIOD_START);
   const [periodEnd, setPeriodEnd] = useState(PERIOD_END);
+  const [selectedEvent, setSelectedEvent] = useState<WeatherEvent>("비");
   const chartTheme = useChartTheme();
 
   const query = useQuery({
     queryKey: ["weather-correlation", periodStart, periodEnd],
     queryFn: () => api.weatherCorrelation({ period_start: periodStart, period_end: periodEnd }),
   });
+
+  const menuRankingQuery = useQuery({
+    queryKey: ["menu-weather-event-ranking", periodStart, periodEnd, selectedEvent],
+    queryFn: () =>
+      api.menuWeatherEventRanking({ period_start: periodStart, period_end: periodEnd, event: selectedEvent }),
+  });
+  const menuRankingRows = menuRankingQuery.data?.rows ?? [];
 
   const buckets = query.data?.buckets ?? [];
   const daysMissingWeather = query.data?.days_missing_weather ?? 0;
@@ -3708,6 +3738,70 @@ export function WeatherCorrelationSection() {
           </p>
         </>
       )}
+
+      <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+        <h3 className="text-[14px] font-semibold">메인메뉴 × 날씨유형 인기 랭킹</h3>
+        <p className="mb-3 mt-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          부찬은 대상이 아닙니다 — 메인메뉴가 그 날씨유형의 날, 평상시 대비 식수가 얼마나 달랐는지
+          랭킹입니다. 주간 메인메뉴를 짤 때 참고용으로만 쓰세요.
+        </p>
+        <div className="mb-3 flex flex-wrap gap-2">
+          {MENU_WEATHER_EVENT_TABS.map((eventOption) => (
+            <button
+              key={eventOption}
+              onClick={() => setSelectedEvent(eventOption)}
+              className="rounded-full border px-3 py-1.5 text-[13px] transition-colors"
+              style={{
+                borderColor: selectedEvent === eventOption ? "var(--accent)" : "var(--border)",
+                background: selectedEvent === eventOption ? "var(--surface-2)" : "var(--surface)",
+                fontWeight: selectedEvent === eventOption ? 600 : 400,
+              }}
+            >
+              {eventOption}
+            </button>
+          ))}
+        </div>
+
+        {menuRankingQuery.isLoading && <LoadingState />}
+        {menuRankingQuery.isError && <ErrorState error={menuRankingQuery.error} />}
+
+        {menuRankingQuery.data && menuRankingRows.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이 기간에 "{selectedEvent}" 유형인 날이 없거나, 그 날 취식 기록이 없습니다.
+          </p>
+        )}
+
+        {menuRankingRows.length > 0 && (
+          <Table
+            columns={[
+              { key: "menu_name", label: "메뉴명" },
+              { key: "event_avg_headcount", label: `${selectedEvent} 평균`, align: "right" },
+              { key: "diff", label: "평상시 대비", align: "right" },
+              { key: "event_days", label: "표본(일)", align: "right" },
+            ]}
+            rows={menuRankingRows.map((r) => ({
+              key: String(r.menu_id),
+              menu_name: r.low_sample ? (
+                <span style={{ color: "var(--ink-muted)" }}>{r.menu_name ?? "이름 없음"}</span>
+              ) : (
+                r.menu_name ?? "이름 없음"
+              ),
+              event_avg_headcount: `${r.event_avg_headcount}명`,
+              diff:
+                r.diff_vs_normal == null ? (
+                  <Badge label="표본 부족" tone="muted" />
+                ) : (
+                  <Badge
+                    label={`${r.diff_vs_normal > 0 ? "+" : ""}${r.diff_vs_normal}명`}
+                    tone={Math.abs(r.diff_vs_normal) >= 3 ? (r.diff_vs_normal > 0 ? "good" : "critical") : "muted"}
+                  />
+                ),
+              event_days: `${r.event_days}일`,
+            }))}
+            rowKey={(r) => r.key as string}
+          />
+        )}
+      </div>
     </Card>
   );
 }

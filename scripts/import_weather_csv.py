@@ -3,9 +3,11 @@
 사내망이 data.go.kr(공인 인터넷)에 못 닿을 수 있어(2026-08 확인), 이 스크립트는
 두 가지 경로를 제공한다:
 
-  csv      인터넷 되는 PC에서 만든 CSV(stat_date,precip_mm,avg_temp_c 헤더)를
-           읽어 /ingest/weather-csv로 업로드한다. backend 서버와만 통신하면
-           되므로 httpx만 있으면 어디서든 돌릴 수 있다(백엔드 앱 의존 없음).
+  csv      인터넷 되는 PC에서 만든 CSV(stat_date,precip_mm,avg_temp_c,snow_cm,
+           max_temp_c,min_temp_c 헤더 — 뒤 3개는 §71 폭설/폭염/한파 분류용,
+           없으면 빈 칸으로 둬도 됨)를 읽어 /ingest/weather-csv로 업로드한다.
+           backend 서버와만 통신하면 되므로 httpx만 있으면 어디서든 돌릴 수
+           있다(백엔드 앱 의존 없음).
 
   backfill data.go.kr에서 실측 일자료를 가져온다. --start-date를 주면 DB 접속이
            전혀 필요 없다(2026-08 수정 — 예전엔 --out-csv 전용으로 써도 시작일을
@@ -56,6 +58,11 @@ def _read_csv_rows(path: Path) -> list[dict]:
                     "stat_date": row["stat_date"],
                     "precip_mm": float(row["precip_mm"]) if row.get("precip_mm") else None,
                     "avg_temp_c": float(row["avg_temp_c"]) if row.get("avg_temp_c") else None,
+                    # §71: 폭설/폭염/한파 분류용 — 구버전 CSV(이 3개 컬럼 없음)도
+                    # row.get()이 None을 주므로 그대로 하위호환된다.
+                    "snow_cm": float(row["snow_cm"]) if row.get("snow_cm") else None,
+                    "max_temp_c": float(row["max_temp_c"]) if row.get("max_temp_c") else None,
+                    "min_temp_c": float(row["min_temp_c"]) if row.get("min_temp_c") else None,
                 }
             )
     return rows
@@ -132,9 +139,18 @@ def cmd_backfill(args: argparse.Namespace) -> None:
     if args.out_csv:
         with open(args.out_csv, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["stat_date", "precip_mm", "avg_temp_c"])
+            writer.writerow(["stat_date", "precip_mm", "avg_temp_c", "snow_cm", "max_temp_c", "min_temp_c"])
             for rec in all_records:
-                writer.writerow([rec.stat_date.isoformat(), rec.precip_mm, rec.avg_temp_c])
+                writer.writerow(
+                    [
+                        rec.stat_date.isoformat(),
+                        rec.precip_mm,
+                        rec.avg_temp_c,
+                        rec.snow_cm,
+                        rec.max_temp_c,
+                        rec.min_temp_c,
+                    ]
+                )
         print(f"{args.out_csv}에 {len(all_records)}건 저장")
 
     if args.write_db:
@@ -149,6 +165,9 @@ def cmd_backfill(args: argparse.Namespace) -> None:
                     existing.precip_mm = rec.precip_mm
                     existing.avg_temp_c = rec.avg_temp_c
                     existing.had_rain = rec.had_rain
+                    existing.snow_cm = rec.snow_cm
+                    existing.max_temp_c = rec.max_temp_c
+                    existing.min_temp_c = rec.min_temp_c
                     existing.source = "kma_api"
                 else:
                     db.add(
@@ -157,6 +176,9 @@ def cmd_backfill(args: argparse.Namespace) -> None:
                             precip_mm=rec.precip_mm,
                             avg_temp_c=rec.avg_temp_c,
                             had_rain=rec.had_rain,
+                            snow_cm=rec.snow_cm,
+                            max_temp_c=rec.max_temp_c,
+                            min_temp_c=rec.min_temp_c,
                             source="kma_api",
                         )
                     )
@@ -171,7 +193,9 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     csv_parser = sub.add_parser("csv", help="로컬 CSV를 /ingest/weather-csv로 업로드")
-    csv_parser.add_argument("--file", required=True, help="stat_date,precip_mm,avg_temp_c 헤더의 CSV 경로")
+    csv_parser.add_argument(
+        "--file", required=True, help="stat_date,precip_mm,avg_temp_c[,snow_cm,max_temp_c,min_temp_c] 헤더의 CSV 경로"
+    )
     csv_parser.add_argument("--backend-url", required=True, help="예: https://internal.example.com")
     csv_parser.add_argument("--token", default=os.environ.get("INGEST_API_TOKEN", ""), help="INGEST_API_TOKEN")
     csv_parser.set_defaults(func=cmd_csv)

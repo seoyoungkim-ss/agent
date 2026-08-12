@@ -59,6 +59,13 @@ class DailyWeather(Base):
     precip_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
     had_rain: Mapped[bool] = mapped_column(Boolean, default=False)
     avg_temp_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # PRD 7.1 확장(2026-08): 메뉴×날씨유형(폭설/폭염/한파) 랭킹(§71)에 필요해
+    # 추가 — ASOS 일자료 응답에 이미 같이 들어있는 필드라 API를 새로 안 붙여도
+    # 된다. 기존에 저장된 행들은 이 필드가 NULL이라 재백필 전까진 "비" 분류만
+    # 가능하다(운영 안내는 docs/CALCULATION_LOGIC.md §71 참고).
+    snow_cm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_temp_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_temp_c: Mapped[float | None] = mapped_column(Float, nullable=True)
     # "kma_api" | "csv_import" — 사내망이 data.go.kr에 못 닿는 배포는 전량
     # csv_import로 채워질 수 있어 화면/문서에서 출처를 밝히기 위해 남긴다.
     source: Mapped[str] = mapped_column(String(16), default="kma_api")

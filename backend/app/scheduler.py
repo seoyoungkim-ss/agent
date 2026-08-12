@@ -69,6 +69,9 @@ def _fetch_weather_step(db, target_date: dt.date) -> None:
             existing.precip_mm = rec.precip_mm
             existing.avg_temp_c = rec.avg_temp_c
             existing.had_rain = rec.had_rain
+            existing.snow_cm = rec.snow_cm
+            existing.max_temp_c = rec.max_temp_c
+            existing.min_temp_c = rec.min_temp_c
             existing.source = "kma_api"
         else:
             db.add(
@@ -77,6 +80,9 @@ def _fetch_weather_step(db, target_date: dt.date) -> None:
                     precip_mm=rec.precip_mm,
                     avg_temp_c=rec.avg_temp_c,
                     had_rain=rec.had_rain,
+                    snow_cm=rec.snow_cm,
+                    max_temp_c=rec.max_temp_c,
+                    min_temp_c=rec.min_temp_c,
                     source="kma_api",
                 )
             )

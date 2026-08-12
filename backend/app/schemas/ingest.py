@@ -47,6 +47,10 @@ class WeatherRowIn(BaseModel):
     stat_date: dt.date
     precip_mm: float | None = None
     avg_temp_c: float | None = None
+    # §71: 메뉴×날씨유형(폭설/폭염/한파) 랭킹용 — CSV에 없으면 None(하위호환).
+    snow_cm: float | None = None
+    max_temp_c: float | None = None
+    min_temp_c: float | None = None
 
 
 class WeatherCsvIngestRequest(BaseModel):

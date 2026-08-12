@@ -51,6 +51,14 @@ class DailyWeatherRecord:
     stat_date: dt.date
     precip_mm: float | None
     avg_temp_c: float | None
+    # PRD 7.1 확장(2026-08, §71): 메뉴×날씨유형(폭설/폭염/한파) 랭킹에 필요 —
+    # ASOS 일자료 응답에 이미 같이 오는 필드(dsnw/maxTa/minTa)라 새 API 호출
+    # 없이 파싱만 추가한다. 이 세션은 실제 응답을 라이브로 확인 못 해 필드명이
+    # 훈련 지식 기반 추정이라는 기존 캐비아트(모듈 docstring)가 이 세 필드에도
+    # 그대로 적용된다 — 배포 전 실제 키로 한 번 대조 확인 필요.
+    snow_cm: float | None
+    max_temp_c: float | None
+    min_temp_c: float | None
 
     @property
     def had_rain(self) -> bool:
@@ -72,6 +80,9 @@ def _parse_item(item: dict) -> DailyWeatherRecord:
         stat_date=dt.date.fromisoformat(item["tm"]),
         precip_mm=_parse_float(item.get("sumRn")),
         avg_temp_c=_parse_float(item.get("avgTa")),
+        snow_cm=_parse_float(item.get("dsnw")),
+        max_temp_c=_parse_float(item.get("maxTa")),
+        min_temp_c=_parse_float(item.get("minTa")),
     )
 
 

@@ -4805,4 +4805,144 @@ Decoding 키로 간주해 기존처럼 `params`에 넣어 httpx가 인코딩하�
 - `test_weather_client.py`에 2개 추가: 인코딩된 키(`%2F` 등 포함)를 넣으면
   URL에 그대로 붙어 `%25`로 깨지지 않는지, 인코딩 안 된 키는 기존처럼
   httpx가 정상적으로 인코딩하는지.
+
+## §71. 메인메뉴 × 날씨유형(비/폭설/폭염/한파) 인기 랭킹 (2026-08)
+
+날씨 데이터가 정상적으로 채워지기 시작한 뒤(§68~70), 담당자가
+`GET /analysis/weather-correlation` 화면을 보고 추가 요청:
+
+> "비오는건 부찬까진 신경 안 써도 되고 메인메뉴 기준으로. 예를 들면
+> 비오면 김치찌개가 평소보다 많이 찾았다던지, 폭설이면 어떻고, 폭염이면
+> 메밀소바 인기고 이런 식."
+
+`weather_correlation`은 `daily_corner_stats`를 코너·메뉴 무관하게 전부
+더한 **하루 총 식수** 하나만 보여준다 — 개별 메뉴가 날씨유형별로 어떻게
+달랐는지는 안 보인다. 이번 기능은 그 아래 단계, **메인메뉴 하나하나가
+비/폭설/폭염/한파의 날 평상시 대비 얼마나 달랐는지**를 보여주고, 주간
+메인메뉴를 편성할 때 참고 자료로 쓰게 한다.
+
+⚠️ 이번에도 원칙은 동일: **참고용 정보 제공까지만**이다. 이 결과가
+`simulation.py`의 `_WEATHER_MULTIPLIER`(v0 감)나 주간 식단표 예측치
+(`weekly_menu_prediction.py`)를 자동으로 바꾸지 않는다.
+
+### 부찬은 왜 신경 안 써도 되는가
+
+`meal_log.menu_id`는 이미 그 사람이 실제로 고른 **메인메뉴** 그 자체다 —
+부찬은 1인당 개별 기록이 안 남는다(`menu_plan_performance`와 동일 전제,
+§49 이후 계속 확인되는 사실). 그래서 `weekly_menu_plan.menu_role`을
+조인해 "이게 메인인지" 따질 필요 없이, `meal_log`만으로 바로 메뉴별
+집계가 된다.
+
+### 날씨 데이터 확장 — 폭설/폭염/한파 분류에 필요한 필드
+
+기존 `daily_weather`엔 `precip_mm`/`had_rain`/`avg_temp_c`만 있어 "비"는
+이미 되지만, 폭설(적설량 필요)과 폭염/한파(일 최고/최저기온 필요 — 평균
+기온으론 기상청 특보 기준과 안 맞음)는 못 만든다. ASOS 일자료 API
+(`getWthrDataList`)는 같은 응답에 `dsnw`(일 신적설)/`maxTa`/`minTa`도
+같이 내려주는 필드라 **API를 새로 붙이지 않고 파싱 필드만 추가**했다:
+
+- `DailyWeatherRecord`/`DailyWeather`에 `snow_cm`/`max_temp_c`/`min_temp_c`
+  추가(`weather_client.py`, `models/stats.py`, 마이그레이션
+  `cc1556243b8c`).
+- `/ingest/weather-csv`, `scripts/import_weather_csv.py`의 CSV 스키마에도
+  같은 3개 컬럼 추가(없으면 하위호환으로 `None`).
+
+⚠️ 이 세 필드도 기존 `precip_mm`/`avg_temp_c`와 같은 캐비아트가 적용된다
+— 필드명이 훈련 지식 기반 추정이라 배포 전 실제 응답과 대조 확인 필요.
+
+**기존 데이터 재백필 필요**: 이미 저장된 `daily_weather` 행은 이 세
+필드가 `NULL`이라 폭설/폭염/한파 분류가 안 된다(비/평상시 구분만 가능).
+배포 후 `scripts/import_weather_csv.py backfill --write-db`(또는 CSV
+경로)를 한 번 더 돌려 기존 기간을 재백필해야 한다 — upsert 로직이라
+같은 날짜를 다시 불러오면 기존 행이 새 필드까지 갱신된다.
+
+### 날씨유형 분류 — `weather_event.py`
+
+`WeatherEvent`: 평상시/비/폭설/폭염/한파, 상호 배타적. 순수 함수
+`classify_weather_event(precip_mm, snow_cm, max_temp_c, min_temp_c, settings)`가
+우선순위 **폭설 → 폭염 → 한파 → 비 → 평상시**로 하루를 분류한다(폭설은
+저온 강수라 한파 조건과 겹칠 수 있어 더 구체적인 신호를 먼저 봄).
+임계값은 `config.py`에 새로 추가한 `heavy_snow_threshold_cm`(5.0)/
+`heatwave_temp_c`(33.0)/`coldwave_temp_c`(-12.0) — 기상청 특보 기준을
+참고한 기본값이나, **실사용 전 담당자 확인 필요**(관측소 ID·ASOS
+필드명과 같은 톤의 캐비아트).
+
+### 메뉴×날씨유형 집계 — `analysis.py`
+
+기존 `weather_correlation`은 건드리지 않는다(이미 검증된 카드, 회귀
+리스크 최소화) — 별도 함수/엔드포인트로 신설:
+
+- `_headcount_by_date_by_menu_bulk`: `meal_log`를 `(menu_id, 날짜)`로
+  한 번의 group-by-count 쿼리로 묶어 메뉴별 일자별 식수를 만든다
+  (`_corner_id_by_menu_from_meal_log`의 group-by-count 패턴 재사용,
+  플레이스홀더 메뉴 제외).
+- `_menu_weather_event_summary`: 메뉴 하나의 날짜별 식수를 날씨유형별로
+  묶어 평상시 평균 대비 `diff_vs_normal`을 계산. 그 유형 자체가 표본
+  부족이거나 비교 기준(평상시)이 표본 부족이면 `diff_vs_normal: null`
+  + `low_sample: true`(표본 부족 기준은 기존 `weather_correlation_low_sample_days`
+  재사용, 새 설정값 없음).
+- `GET /analysis/menu-performance/weather-event-ranking?period_start=&period_end=&event=비|폭설|폭염|한파[&meal_type=]`:
+  요청받은 유형 하나에 대해 전체 메뉴를 `|diff_vs_normal|` 내림차순으로
+  랭킹(표본 부족 행은 숨기지 않고 뒤에 붙임 — 이 레포의 기존 관례). 4개
+  유형을 한 응답에 다 넣지 않는 이유: 매번 전체 메뉴×4유형을 계산하면
+  무거워서, 프론트가 탭을 눌러 유형을 바꿀 때만 그만큼 계산한다.
+
+### 슬롯 상세 참고 — `predicted-impact` 확장
+
+`/weekly-menu/{plan_id}/predicted-impact`(주간 식단표에서 "예측 보기"
+누를 때만 호출되는 단건 엔드포인트) 응답에 `weather_reference` 필드
+추가 — 그 슬롯 메인메뉴 하나의 날씨유형별(겪은 유형만) 평상시 대비
+참고치. `compute_predicted_numbers`와 같은 이력 윈도우
+(`_HISTORY_WINDOW_DAYS`, 그 슬롯 직전 180일)를 본다.
+
+일괄 조회용 `/weekly-menu/predicted-impact-summary`(기간 전체 슬롯을
+한 번에)엔 **넣지 않는다** — 슬롯 수만큼 쿼리가 늘어나는 걸 막기 위해
+LLM 코멘트를 단건 전용으로 뺀 것과 같은 이유.
+
+### 프론트
+
+- `WeatherCorrelationSection`("비 오는 날 식수" 카드, 현황 탭)의 기존
+  코너 합산 막대그래프 아래에 "메인메뉴 × 날씨유형 인기 랭킹" 블록
+  추가 — 비/폭설/폭염/한파 탭 + 탭별 랭킹 표(메뉴명/그 유형 평균/평상시
+  대비/표본). `Badge`(§66 dot+ink 컴포넌트)로 `|diff|`가 3명 이상이면
+  강조(양수=초록/`good`, 음수=빨강/`critical`), 표본 부족은 회색/`muted`.
+- `PredictedImpactPanel`(슬롯 상세)에 "과거 날씨 참고" 한 줄 추가 —
+  그 메인메뉴가 겪은 유형별 평균·표본·평상시 대비를 나열, 표본 부족은
+  흐리게.
+
+### 검증
+
+- `test_weather_event.py`(신규): `classify_weather_event` 경계값 8개
+  케이스(폭설/폭염/한파/비/평상시, 우선순위 겹침, 결측 필드) 전부 통과.
+- `test_api_ingest_and_analysis.py`에 6개 추가: 랭킹 엔드포인트가 비
+  오는 날 유독 식수가 높은 메뉴를 상위에·올바른 부호로 올리는지, 표본
+  부족 플래그, 잘못된 `event` 파라미터 400, `predicted-impact`의
+  `weather_reference`가 이력 있을 때 채워지고 없을 때 빈 리스트로
+  조용히 빠지는지. `pytest -q` 전체 522개 통과.
+- `npm run build` 타입체크 통과.
+- `uvicorn`+`vite` 개발 서버 기동 후 Playwright로 실제 브라우저에서
+  확인: (1) "현황" 탭의 새 랭킹 표에서 비/맑음 각 5일씩(6명 vs 2명)
+  시딩한 메뉴가 "비 6명 · 평상시 대비 +4명 · 표본 5일"로 정확히
+  렌더링됨, (2) "메뉴 편성·운영" 탭의 슬롯 상세("예측 보기")에서 "과거
+  날씨 참고: 비 6명(5일) +4 · 평상시 2명(5일)" 한 줄이 정확히 렌더링됨.
+  콘솔 에러 없음.
+
+### 검증 중 발견한 별개 이슈 (이번 라운드 범위 밖, 수정 안 함)
+
+Playwright로 확인하던 중, **§71과 무관한 기존 버그**를 하나 발견했다 —
+`/ingest/weekly-menu`로 이미 메인메뉴가 있는 슬롯(날짜·코너·끼니)에
+`menu_role: "메인"`인 행을 또 넣으면, 기존 메인 행이 자동으로 부찬으로
+강등되지 않는다(수동 변경 엔드포인트 `set_menu_role`만 그렇게 동작함).
+그 결과 한 슬롯에 `menu_role=메인`인 행이 2개 이상 남을 수 있고, 그
+슬롯의 "진짜 메인"이 무엇인지는 조회 기간에 따라 달라진다 — 예를 들어
+그 날짜 하루만 조회하면 A가 메인으로 나오는데, 그 날짜를 포함하는 주
+전체를 조회하면 B가 메인으로 나오는 식(`weekly_menu_review.py`의 슬롯
+그루핑이 정렬 기준 없이 첫/마지막 매치를 쓰는 것으로 추정 — 근본 원인은
+미확인). §71 기능(메뉴×날씨유형 집계, 슬롯 상세 참고)은 이 버그의
+영향을 받지 않는다 — `weather-event-ranking`은 `meal_log.menu_id`만
+쓰고, `predicted-impact`의 `weather_reference`는 `plan_id`로 행을 직접
+조회해 그루핑 로직을 거치지 않기 때문이다. 다만 이 버그 자체는 실제
+운영 데이터에서도 "정정된 식단표를 재업로드했는데 어떤 게 메인인지
+화면마다 다르게 보인다"는 형태로 나타날 수 있어, 별도 라운드로 다뤄야
+한다.
 - `pytest -q` 전체 509개 통과.

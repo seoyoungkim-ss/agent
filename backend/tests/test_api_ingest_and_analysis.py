@@ -3736,3 +3736,133 @@ def test_weather_correlation_returns_empty_buckets_when_no_weather_data(client, 
     body = resp.json()
     assert body["buckets"] == []
     assert body["days_missing_weather"] == 1
+
+
+def _seed_menu_rain_vs_normal(client, db_session, menu_name: str, start_date: dt.date, employee_prefix: str) -> None:
+    """§71: 비오는 날 5일(6명씩) vs 평상시 5일(2명씩) 같은 메뉴로 채운다 —
+    weather-event-ranking/predicted-impact weather_reference 테스트 공용 시딩."""
+    from app.models.stats import DailyWeather
+
+    rain_days = [start_date + dt.timedelta(days=i) for i in range(5)]
+    normal_days = [start_date + dt.timedelta(days=i) for i in range(5, 10)]
+    emp_n = 0
+    for d in rain_days:
+        db_session.add(
+            DailyWeather(
+                stat_date=d, had_rain=True, precip_mm=8.0, snow_cm=0.0, max_temp_c=24.0, min_temp_c=18.0
+            )
+        )
+        for _ in range(6):
+            _ingest_meal_log(client, f"{employee_prefix}{emp_n}", "맛남", eaten_date=d, menu_name=menu_name)
+            emp_n += 1
+    for d in normal_days:
+        db_session.add(
+            DailyWeather(
+                stat_date=d, had_rain=False, precip_mm=0.0, snow_cm=0.0, max_temp_c=24.0, min_temp_c=18.0
+            )
+        )
+        for _ in range(2):
+            _ingest_meal_log(client, f"{employee_prefix}{emp_n}", "맛남", eaten_date=d, menu_name=menu_name)
+            emp_n += 1
+    db_session.commit()
+
+
+def test_menu_weather_event_ranking_surfaces_high_diff_menu(client, db_session):
+    """비 오는 날 유독 잘 나가는 메뉴가 랭킹에 뜨고 diff 부호/값이 맞는지 확인
+    (담당자 요청 예시 그대로: "비오면 김치찌개가 평소보다 많이 찾았다")."""
+    _seed_menu_rain_vs_normal(client, db_session, "김치찌개", MONDAY, "E")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/weather-event-ranking",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=9)).isoformat(),
+            "event": "비",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["event"] == "비"
+    row = next(r for r in body["rows"] if r["menu_name"] == "김치찌개")
+    assert row["low_sample"] is False
+    assert row["event_days"] == 5
+    assert row["event_avg_headcount"] == 6.0
+    assert row["diff_vs_normal"] == 4.0  # 비 오는 날 6명 - 평상시 2명
+    assert body["rows"][0]["menu_name"] == "김치찌개"  # |diff| 내림차순 1위
+
+
+def test_menu_weather_event_ranking_flags_low_sample(client, db_session):
+    from app.models.stats import DailyWeather
+
+    rain_day = MONDAY
+    db_session.add(
+        DailyWeather(
+            stat_date=rain_day, had_rain=True, precip_mm=5.0, snow_cm=0.0, max_temp_c=24.0, min_temp_c=18.0
+        )
+    )
+    db_session.commit()
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=rain_day, menu_name="우동")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/weather-event-ranking",
+        params={"period_start": rain_day.isoformat(), "period_end": rain_day.isoformat(), "event": "비"},
+    )
+    assert resp.status_code == 200, resp.text
+    row = next(r for r in resp.json()["rows"] if r["menu_name"] == "우동")
+    assert row["low_sample"] is True
+    assert row["diff_vs_normal"] is None
+
+
+def test_menu_weather_event_ranking_rejects_invalid_event(client):
+    resp = client.get(
+        "/api/analysis/menu-performance/weather-event-ranking",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "event": "이상한값"},
+    )
+    assert resp.status_code == 400
+
+
+def test_predicted_impact_includes_weather_reference_when_history_exists(client, db_session):
+    plan_date = MONDAY + dt.timedelta(days=30)
+    _seed_menu_rain_vs_normal(client, db_session, "김치찌개", MONDAY, "W")
+
+    rows = [
+        {
+            "plan_date": plan_date.isoformat(),
+            "meal_type": "중식",
+            "corner_name": "한식",
+            "menu_name": "김치찌개",
+            "menu_role": "메인",
+            "source_row_raw": "김치찌개",
+        }
+    ]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu",
+        params={"period_start": plan_date.isoformat(), "period_end": plan_date.isoformat()},
+    )
+    main_plan_id = next(s for s in resp.json() if s["corner_name"] == "한식")["main"]["plan_id"]
+
+    resp = client.get(f"/api/analysis/weekly-menu/{main_plan_id}/predicted-impact")
+    assert resp.status_code == 200, resp.text
+    weather_reference = {r["event"]: r for r in resp.json()["weather_reference"]}
+    assert weather_reference["비"]["diff_vs_normal"] == 4.0
+    assert weather_reference["비"]["low_sample"] is False
+
+
+def test_predicted_impact_weather_reference_empty_without_history(client):
+    """이 슬롯 이전 이력이 전혀 없으면(날씨든 식수든) 에러 없이 빈 리스트로
+    조용히 빠진다 — 미설정 시 기능 비활성화 관례(weather_client.py와 동일)."""
+    _ingest_weekly_menu(client)  # 제육볶음(메인), 한식, MONDAY — 이전 이력 없음
+    for i in range(3):
+        _ingest_meal_log(client, f"P{i}", "맛남", menu_name="제육볶음")
+
+    resp = client.get(
+        "/api/analysis/weekly-menu", params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()}
+    )
+    main_plan_id = next(s for s in resp.json() if s["corner_name"] == "한식")["main"]["plan_id"]
+
+    resp = client.get(f"/api/analysis/weekly-menu/{main_plan_id}/predicted-impact")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["weather_reference"] == []

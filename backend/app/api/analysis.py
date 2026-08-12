@@ -78,7 +78,11 @@ from app.services.menu_combination import (
 from app.services.menu_throughput import build_corner_daily_throughput, compute_menu_throughput_summary
 from app.services.taste_clustering import compute_taste_clusters
 from app.services.taste_profile import compute_employee_taste_profiles
-from app.services.weekly_menu_prediction import compute_predicted_impact, compute_predicted_numbers_for_period
+from app.services.weekly_menu_prediction import (
+    _HISTORY_WINDOW_DAYS,
+    compute_predicted_impact,
+    compute_predicted_numbers_for_period,
+)
 from app.services.menu_clash import find_ingredient_clashes, find_vector_clashes
 from app.services.menu_plan_analytics import (
     classify_planning_action,
@@ -105,6 +109,7 @@ from app.services.weekly_menu_review import (
     set_menu_role,
 )
 from app.services.weekly_menu_role_llm import reclassify_weekly_menu_roles
+from app.services.weather_event import WeatherEvent, classify_weather_event
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -370,6 +375,219 @@ def weather_correlation(
         "buckets": results,
         "days_missing_weather": days_missing_weather,
     }
+
+
+def _weather_event_by_date(
+    db: Session, period_start: dt.date, period_end: dt.date
+) -> dict[dt.date, WeatherEvent]:
+    """§71: 기간 내 날짜별 날씨유형(평상시/비/폭설/폭염/한파) 맵. weather_correlation의
+    DailyWeather 전체 로드 패턴과 동일 — 다만 (classification, had_rain) 대신
+    classify_weather_event로 다섯 유형 중 하나를 매긴다."""
+    settings = get_settings()
+    weather_rows = (
+        db.query(DailyWeather).filter(DailyWeather.stat_date.between(period_start, period_end)).all()
+    )
+    return {
+        w.stat_date: classify_weather_event(
+            precip_mm=w.precip_mm,
+            snow_cm=w.snow_cm,
+            max_temp_c=w.max_temp_c,
+            min_temp_c=w.min_temp_c,
+            settings=settings,
+        )
+        for w in weather_rows
+    }
+
+
+def _headcount_by_date_by_menu_bulk(
+    db: Session,
+    period_start: dt.date,
+    period_end: dt.date,
+    meal_type: MealType | None = None,
+) -> dict[int, dict[dt.date, int]]:
+    """§71: meal_log 전체를 (menu_id, 날짜) 한 번의 group by로 묶어 메뉴별
+    일자별 식수를 만든다 — `_corner_id_by_menu_from_meal_log`의 group-by-count
+    패턴과 동일 스타일. meal_log.menu_id는 1인당 실제로 고른 메인메뉴 그
+    자체라(부찬은 개인별로 기록되지 않음, menu_plan_performance와 동일 전제)
+    weekly_menu_plan.menu_role을 조인할 필요가 없다.
+    """
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    date_col = func.date(MealLog.eaten_at).label("stat_date")
+
+    excluded_menu_ids = {
+        menu_id
+        for (menu_id,) in db.query(MenuMaster.menu_id).filter(
+            MenuMaster.menu_name.in_(PLACEHOLDER_MENU_NAMES)
+        )
+    }
+    query = db.query(MealLog.menu_id, date_col, func.count().label("cnt")).filter(
+        MealLog.menu_id.isnot(None),
+        MealLog.eaten_at >= period_start_dt,
+        MealLog.eaten_at < period_end_exclusive,
+    )
+    if meal_type is not None:
+        query = query.filter(MealLog.meal_type == meal_type)
+    if excluded_menu_ids:
+        query = query.filter(MealLog.menu_id.notin_(excluded_menu_ids))
+
+    result: dict[int, dict[dt.date, int]] = {}
+    for menu_id, stat_date, cnt in query.group_by(MealLog.menu_id, date_col).all():
+        # func.date()는 백엔드에 따라 date 또는 문자열을 준다 — headcount_trend와 동일 처리.
+        if isinstance(stat_date, str):
+            stat_date = dt.date.fromisoformat(stat_date)
+        result.setdefault(menu_id, {})[stat_date] = cnt
+    return result
+
+
+def _headcount_by_date_for_menu(
+    db: Session, menu_id: int, period_start: dt.date, period_end: dt.date
+) -> dict[dt.date, int]:
+    """§71: 메뉴 하나의 일자별 식수 — predicted-impact 슬롯 상세(단건)용.
+    전체 메뉴를 훑는 `_headcount_by_date_by_menu_bulk`보다 가벼운 단건 버전."""
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    date_col = func.date(MealLog.eaten_at).label("stat_date")
+    rows = (
+        db.query(date_col, func.count().label("cnt"))
+        .filter(
+            MealLog.menu_id == menu_id,
+            MealLog.eaten_at >= period_start_dt,
+            MealLog.eaten_at < period_end_exclusive,
+        )
+        .group_by(date_col)
+        .all()
+    )
+    result: dict[dt.date, int] = {}
+    for stat_date, cnt in rows:
+        if isinstance(stat_date, str):
+            stat_date = dt.date.fromisoformat(stat_date)
+        result[stat_date] = cnt
+    return result
+
+
+def _menu_weather_event_summary(
+    headcount_by_date: dict[dt.date, int],
+    event_by_date: dict[dt.date, WeatherEvent],
+    low_sample_days: int,
+) -> list[dict]:
+    """§71: 메뉴 하나의 날짜별 식수를 날씨유형별로 묶어 평상시(NORMAL) 평균 대비
+    차이를 계산한다. 그 메뉴가 실제로 겪은 유형만 반환(전혀 없었던 유형은 생략).
+
+    표본이 부족하면(그 유형 자체가 low_sample_days 미만이거나, 비교 기준인
+    평상시 표본이 부족하면) `diff_vs_normal`을 None으로 비워 화면에서 흐리게
+    처리하게 한다 — weather_correlation의 low_sample 관례와 동일.
+    """
+    by_event: dict[WeatherEvent, list[int]] = {}
+    for target_date, headcount in headcount_by_date.items():
+        event = event_by_date.get(target_date)
+        if event is None:
+            continue
+        by_event.setdefault(event, []).append(headcount)
+
+    normal_counts = by_event.get(WeatherEvent.NORMAL, [])
+    normal_avg = statistics.fmean(normal_counts) if normal_counts else None
+    normal_low_sample = len(normal_counts) < low_sample_days
+
+    summaries = []
+    for event, counts in by_event.items():
+        day_count = len(counts)
+        avg_headcount = statistics.fmean(counts)
+        low_sample = day_count < low_sample_days
+        if event == WeatherEvent.NORMAL or normal_avg is None or low_sample or normal_low_sample:
+            diff_vs_normal = None
+        else:
+            diff_vs_normal = round(avg_headcount - normal_avg, 1)
+        summaries.append(
+            {
+                "event": event.value,
+                "avg_headcount": round(avg_headcount, 1),
+                "day_count": day_count,
+                "diff_vs_normal": diff_vs_normal,
+                "low_sample": low_sample or (event != WeatherEvent.NORMAL and normal_low_sample),
+            }
+        )
+    return summaries
+
+
+def _menu_weather_reference(db: Session, menu_id: int, plan_date: dt.date) -> list[dict]:
+    """§71: 주간 식단표 슬롯 상세("예측 보기")에서 그 메인메뉴 하나의 날씨유형별
+    참고치. `compute_predicted_numbers`의 과거 성적 조회와 같은 기간(그 슬롯
+    직전 `_HISTORY_WINDOW_DAYS`일)을 본다. `daily_weather`가 비어있거나 이
+    메뉴의 취식 기록이 그 기간에 없으면 빈 리스트로 조용히 빠진다(미설정 시
+    기능 비활성화 관례, weather_client.py와 동일)."""
+    settings = get_settings()
+    period_end = plan_date - dt.timedelta(days=1)
+    period_start = period_end - dt.timedelta(days=_HISTORY_WINDOW_DAYS)
+    headcount_by_date = _headcount_by_date_for_menu(db, menu_id, period_start, period_end)
+    if not headcount_by_date:
+        return []
+    event_by_date = _weather_event_by_date(db, period_start, period_end)
+    if not event_by_date:
+        return []
+    return _menu_weather_event_summary(
+        headcount_by_date, event_by_date, settings.weather_correlation_low_sample_days
+    )
+
+
+@router.get("/menu-performance/weather-event-ranking")
+def menu_weather_event_ranking(
+    period_start: dt.date,
+    period_end: dt.date,
+    event: str = Query(..., description="비 | 폭설 | 폭염 | 한파"),
+    meal_type: MealType | None = None,
+    db: Session = Depends(get_db),
+):
+    """PRD 7.1 확장(2026-08, §71): 메인메뉴가 지정한 날씨유형(비/폭설/폭염/한파)의
+    날, 평상시 대비 식수가 얼마나 달랐는지 메뉴별 랭킹.
+
+    담당자 요청 그대로 "부찬까진 신경 안 써도 되고 메인메뉴 기준" — meal_log.menu_id는
+    1인당 실제로 고른 메인메뉴 그 자체라(부찬은 개인별 기록이 안 남음)
+    weekly_menu_plan.menu_role을 조인할 필요 없이 meal_log만으로 집계한다.
+
+    weather_correlation과 같은 원칙: 참고용 정보 제공까지만이며, 이 결과가
+    시뮬레이션의 `_WEATHER_MULTIPLIER`나 주간 식단표 예측치를 자동으로
+    바꾸지 않는다.
+    """
+    try:
+        target_event = WeatherEvent(event)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="event는 비/폭설/폭염/한파 중 하나여야 합니다")
+
+    settings = get_settings()
+    event_by_date = _weather_event_by_date(db, period_start, period_end)
+    headcount_by_menu = _headcount_by_date_by_menu_bulk(db, period_start, period_end, meal_type)
+    menu_names = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
+
+    rows = []
+    for menu_id, headcount_by_date in headcount_by_menu.items():
+        summaries = _menu_weather_event_summary(
+            headcount_by_date, event_by_date, settings.weather_correlation_low_sample_days
+        )
+        match = next((s for s in summaries if s["event"] == target_event.value), None)
+        if match is None:
+            continue
+        rows.append(
+            {
+                "menu_id": menu_id,
+                "menu_name": menu_names.get(menu_id),
+                "event_avg_headcount": match["avg_headcount"],
+                "event_days": match["day_count"],
+                "diff_vs_normal": match["diff_vs_normal"],
+                "low_sample": match["diff_vs_normal"] is None,
+            }
+        )
+
+    # 차이를 계산할 수 있는 행을 |diff| 내림차순으로 먼저, 표본 부족 행은 뒤에 붙인다
+    # (숨기지 않는다 — weather_correlation의 low_sample 배지와 동일 관례).
+    ranked = sorted(
+        rows,
+        key=lambda r: (
+            r["diff_vs_normal"] is None,
+            -abs(r["diff_vs_normal"]) if r["diff_vs_normal"] is not None else 0,
+        ),
+    )
+    return {"event": target_event.value, "rows": ranked}
 
 
 def _load_corner_stats(
@@ -1605,7 +1823,10 @@ async def weekly_menu_predicted_impact(plan_id: int, db: Session = Depends(get_d
     result = await compute_predicted_impact(db, client, plan_id)
     if result is None:
         raise HTTPException(status_code=404, detail="메인메뉴로 지정된 주간 식단표 항목을 찾을 수 없습니다")
-    return _serialize_predicted_numbers(result)
+    serialized = _serialize_predicted_numbers(result)
+    # §71: 부찬은 대상 아님 — result["menu_id"]는 이 슬롯의 메인메뉴 그 자체.
+    serialized["weather_reference"] = _menu_weather_reference(db, result["menu_id"], result["plan_date"])
+    return serialized
 
 
 @router.get("/weekly-menu/predicted-impact-summary")

@@ -231,6 +231,33 @@ export interface WeatherCorrelationResponse {
   days_missing_weather: number;
 }
 
+// §71: 메인메뉴 × 날씨유형(비/폭설/폭염/한파) 인기 랭킹. 부찬은 대상이 아니다.
+export type WeatherEvent = "비" | "폭설" | "폭염" | "한파";
+
+export interface MenuWeatherEventRow {
+  menu_id: number;
+  menu_name: string | null;
+  event_avg_headcount: number;
+  event_days: number;
+  diff_vs_normal: number | null;
+  low_sample: boolean;
+}
+
+export interface MenuWeatherEventRankingResponse {
+  event: WeatherEvent;
+  rows: MenuWeatherEventRow[];
+}
+
+// predicted-impact의 weather_reference — 슬롯 상세에서 그 메인메뉴 하나의
+// 평상시 대비 날씨유형별(평상시 포함, 겪은 유형만) 참고치.
+export interface MenuWeatherReferenceRow {
+  event: "평상시" | WeatherEvent;
+  avg_headcount: number;
+  day_count: number;
+  diff_vs_normal: number | null;
+  low_sample: boolean;
+}
+
 export interface TasteProfile {
   employee_id: string;
   profile_vector: number[];
@@ -559,6 +586,9 @@ export type PredictedNumbersRow = PredictedNumbers;
 
 export interface PredictedImpactResponse extends PredictedNumbers {
   summary_comment: string;
+  // §71: 이 슬롯 메인메뉴의 날씨유형별 참고치 — predicted-impact-summary(대량
+  // 조회)엔 없다(쿼리 비용 때문에 단건 전용, LLM 코멘트와 같은 이유).
+  weather_reference: MenuWeatherReferenceRow[];
 }
 
 export interface WhatIfCornerResult {
@@ -682,6 +712,16 @@ export const api = {
   // 검증하기 위한 참고용 화면. 배수를 자동으로 바꾸지 않는다.
   weatherCorrelation: (params: { period_start: string; period_end: string }) =>
     request<WeatherCorrelationResponse>(`/analysis/weather-correlation${qs(params)}`),
+
+  // §71: 메인메뉴가 지정한 날씨유형(비/폭설/폭염/한파)의 날 평상시 대비 식수가
+  // 얼마나 달랐는지 랭킹. 부찬은 대상이 아니다 — 이 결과가 시뮬레이션 배수나
+  // 주간 식단표 예측치를 자동으로 바꾸지 않는다(weatherCorrelation과 동일 원칙).
+  menuWeatherEventRanking: (params: {
+    period_start: string;
+    period_end: string;
+    event: WeatherEvent;
+    meal_type?: MealType;
+  }) => request<MenuWeatherEventRankingResponse>(`/analysis/menu-performance/weather-event-ranking${qs(params)}`),
 
   recomputeDailyStats: (params: { period_start: string; period_end: string }) =>
     request<{ days_processed: number }>(`/analysis/daily-stats/recompute${qs(params)}`, {

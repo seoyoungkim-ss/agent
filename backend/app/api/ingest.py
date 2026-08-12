@@ -208,6 +208,9 @@ def ingest_weather_csv(payload: WeatherCsvIngestRequest, db: Session = Depends(g
             existing.precip_mm = row.precip_mm
             existing.avg_temp_c = row.avg_temp_c
             existing.had_rain = had_rain
+            existing.snow_cm = row.snow_cm
+            existing.max_temp_c = row.max_temp_c
+            existing.min_temp_c = row.min_temp_c
             existing.source = "csv_import"
         else:
             db.add(
@@ -216,6 +219,9 @@ def ingest_weather_csv(payload: WeatherCsvIngestRequest, db: Session = Depends(g
                     precip_mm=row.precip_mm,
                     avg_temp_c=row.avg_temp_c,
                     had_rain=had_rain,
+                    snow_cm=row.snow_cm,
+                    max_temp_c=row.max_temp_c,
+                    min_temp_c=row.min_temp_c,
                     source="csv_import",
                 )
             )
