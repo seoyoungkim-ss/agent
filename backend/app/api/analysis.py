@@ -53,6 +53,7 @@ from app.services.holidays import (
     family_day_dates_in_range,
     get_holiday_service,
 )
+from app.services.llm_analysis import refresh_llm_analyses
 from app.services.llm_client import InternalLLMClient
 from app.services.master_data import (
     MICAM_HALL_CORNER_NAME,
@@ -1330,6 +1331,19 @@ def recompute_menu_performance(
     return {"updated_menus": updated}
 
 
+@router.post("/llm-analyses/recompute")
+async def recompute_llm_analyses(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """§78: 메뉴 하이라이트 LLM 원인 설명 + 편성 notice를 수동으로 다시 계산한다.
+
+    평소엔 새벽 배치(scheduler.py::run_daily_batch, 02:00)가 채우지만, 로컬
+    개발 환경처럼 스케줄러가 계속 떠 있지 않으면 캐시가 계속 비어 있어
+    화면에 설명이 안 뜬다(2026-08 실사용 신고 — "메뉴하이라이트llm에 분석이
+    아무것도 없어") — daily-stats/recompute·menu-performance/recompute와
+    같은 취지의 수동 트리거.
+    """
+    return await refresh_llm_analyses(db, period_start=period_start, period_end=period_end)
+
+
 @router.get("/menu-performance/{menu_id}/decline-diagnosis")
 def menu_decline_diagnosis(
     menu_id: int,
@@ -1746,11 +1760,13 @@ def weekly_menu_plan_rule_check(
     period_end: dt.date,
     db: Session = Depends(get_db),
 ):
-    """§77(2026-08): 담당자가 준 4개 기준으로 그 주 편성을 검증해 경고한다.
+    """§77~§78(2026-08): 담당자가 준 4개 기준으로 그 주 편성을 검증해 경고한다.
 
     ①해장 메뉴 최소 1개, ②면류(라면 포함) 4개 초과 금지, ③매운(빨간국물)
     4개 초과 금지는 `menu_plan_rules.py`의 순수 함수가 판정한다(메인/부찬/
-    건강가든 역할 무관 — 물리적으로 그 주에 뭐가 나갔는지 보는 것이라서).
+    건강가든 역할 무관 — 물리적으로 그 날 뭐가 나갔는지 보는 것이라서).
+    §78부터 이 세 규칙은 한 주 합산이 아니라 **요일별(하루 기준, 주중만)**로
+    판정한다 — 응답의 hangover/noodle/spicy_red_broth는 날짜별 결과 리스트다.
 
     ④최근 식수 200식 이하 메뉴는 재편성 금지는 여기서 직접 처리한다 — MAIN
     역할만(부찬은 취식 기록에 없어 식수를 알 수 없다), 예외 코너
@@ -1763,6 +1779,7 @@ def weekly_menu_plan_rule_check(
             WeeklyMenuPlan.menu_id,
             WeeklyMenuPlan.menu_role,
             WeeklyMenuPlan.plan_date,
+            WeeklyMenuPlan.corner_id,
             MenuMaster.menu_name,
             CornerMaster.corner_name,
         )
@@ -1773,8 +1790,8 @@ def weekly_menu_plan_rule_check(
     )
 
     slots = [
-        MenuPlanSlotItem(menu_name=menu_name, corner_name=corner_name, plan_date=plan_date)
-        for _menu_id, _menu_role, plan_date, menu_name, corner_name in plan_rows
+        MenuPlanSlotItem(menu_name=menu_name, corner_id=corner_id, corner_name=corner_name, plan_date=plan_date)
+        for _menu_id, _menu_role, plan_date, corner_id, menu_name, corner_name in plan_rows
         if menu_name not in PLACEHOLDER_MENU_NAMES
     ]
     hangover = check_hangover_rule(slots)
@@ -1783,7 +1800,7 @@ def weekly_menu_plan_rule_check(
 
     main_candidates = {
         (menu_id, menu_name, corner_name)
-        for menu_id, menu_role, _plan_date, menu_name, corner_name in plan_rows
+        for menu_id, menu_role, _plan_date, _corner_id, menu_name, corner_name in plan_rows
         if menu_role == MenuRole.MAIN
         and menu_name not in PLACEHOLDER_MENU_NAMES
         and corner_name not in LOW_HEADCOUNT_EXEMPT_CORNER_NAMES
@@ -1805,15 +1822,32 @@ def weekly_menu_plan_rule_check(
             )
     low_headcount_violations.sort(key=lambda v: v["recent_avg_headcount"])
 
-    def _rule_payload(result):
-        return {"ok": result.ok, "count": result.count, "limit": result.limit, "matches": result.matches}
+    def _daily_rule_payload(results):
+        return [
+            {
+                "plan_date": r.plan_date.isoformat(),
+                "ok": r.ok,
+                "count": r.count,
+                "limit": r.limit,
+                "matches": [
+                    {
+                        "menu_name": m.menu_name,
+                        "corner_id": m.corner_id,
+                        "corner_name": m.corner_name,
+                        "plan_date": m.plan_date.isoformat(),
+                    }
+                    for m in r.matches
+                ],
+            }
+            for r in results
+        ]
 
     return {
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
-        "hangover": _rule_payload(hangover),
-        "noodle": _rule_payload(noodle),
-        "spicy_red_broth": _rule_payload(spicy_red_broth),
+        "hangover": _daily_rule_payload(hangover),
+        "noodle": _daily_rule_payload(noodle),
+        "spicy_red_broth": _daily_rule_payload(spicy_red_broth),
         "low_headcount_reuse": {
             "ok": len(low_headcount_violations) == 0,
             "violations": low_headcount_violations,

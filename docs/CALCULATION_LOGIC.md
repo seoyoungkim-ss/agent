@@ -5314,3 +5314,72 @@ MAIN 역할만(부찬은 취식 기록이 없어 식수를 알 수 없다), 예�
 - `uvicorn`+`vite` 개발 서버로 Playwright 확인: 현황 탭엔 날씨 카드가
   없고 메뉴 편성·운영 탭 맨 아래에 있음, 주간 식단표 관리 화면 상단에
   규칙검증 패널이 4개 배지와 함께 뜸. 콘솔 에러 없음.
+
+## §78. 규칙검증 요일별(주중)로 재설계 + 격자 하이라이트 연동 + LLM 캐시 수동 재계산 (2026-08)
+
+§77에서 배포한 "주간 편성 규칙 검증" 패널을 보고 담당자가 지적했다:
+"각각 주간식단표에서 표기할 때 요일별로 봐야해 하루 기준임 (주중만
+보면되고) 하루에 면류 4개 초과 금지 이런 식이야" — 해장/면류/매운(빨간
+국물) 세 규칙 모두 §77에선 **한 주 전체 합산**으로 판정했는데(예: "이번
+주에 라면 5번 나왔다"), 실제로는 **그날 하루** 기준이어야 했다("그날
+면류가 4개를 넘게 편성됐는지"). 토/일은 대상에서 뺀다. 추가로 "클릭하면
+어떤 요일의 코너의 메뉴인지 하이라이트 되기"도 요청했다.
+
+### 요일별(주중만) 재설계
+
+`menu_plan_rules.py`의 `MenuPlanSlotItem`에 `corner_id`를 추가하고(격자
+셀 키 join용), 기존 "기간 전체 1건" 결과 대신 요일별 리스트를 도입했다
+— `check_hangover_rule`/`check_noodle_rule`/`check_spicy_red_broth_rule`
+셋이 공유하는 내부 헬퍼 `_check_daily`가 슬롯을 `plan_date.weekday() < 5`
+로 걸러 날짜별로 묶고, 그 날짜 하루의 매치 개수만으로 판정한다. "해장
+최소 1개"도 하루 기준으로 재해석했다 — 슬롯이 아예 없는 날(식단표 미등록)
+은 결과에서 빠진다(데이터 누락과 "편성했는데 기준 미달"은 다른 문제).
+매치도 문자열 라벨 대신 `MenuPlanRuleMatch`(menu_name/corner_id/
+corner_name/plan_date) 구조체로 바꿔 프론트가 그대로 격자 셀 키를 만들 수
+있게 했다. `analysis.py`의 `weekly_menu_plan_rule_check`는 `corner_id`도
+같이 select하고, 응답의 `hangover`/`noodle`/`spicy_red_broth`가 날짜별
+결과 배열이 되도록 직렬화를 바꿨다(`low_headcount_reuse`는 요일 개념이
+아니라 메뉴 단위라 그대로 둠).
+
+### 격자 하이라이트 연동
+
+`WeeklyMenuReviewTab`엔 이미 셀 클릭→하이라이트 메커니즘
+(`selectSlot`/`selectedSlotKey`, 셀 키 `${plan_date}_${corner_id}`)이
+있었다 — 규칙검증 패널의 위반 매치를 클릭 가능한 칩으로 바꿔
+`onClick={() => selectSlot(`${m.plan_date}_${m.corner_id}`)}`만 걸면
+새 state 없이 그대로 재사용된다. 패널은 규칙마다 "월~금" 5칸 배지(그날
+결과가 없으면 "-")를 보여주고, 위반인 날의 매치들을 그 아래 칩으로
+나열한다.
+
+### LLM 캐시 수동 재계산
+
+같이 확인한 "현황에서 메뉴하이라이트llm에 분석이 아무것도 없어"는
+버그가 아니었다 — `refresh_llm_analyses`가 새벽 2시 스케줄러
+(`scheduler.py::run_daily_batch`)에서만 돌고 앱 시작 시점엔 안 돌기
+때문에, 스케줄러가 계속 떠 있지 않은 로컬/개발 환경은 캐시가 계속
+비어 있는 게 정상이다(`_trend_cause`가 캐시 없으면 `{}`를 줘서 화면이
+그 줄을 조용히 안 그림). 다만 `daily-stats/recompute`·
+`menu-performance/recompute`처럼 수동으로 당장 채울 수 있는 엔드포인트가
+이 기능만 없다는 게 실제 공백이었다 — `POST /analysis/llm-analyses/recompute`
+를 추가해 `refresh_llm_analyses`를 수동 트리거할 수 있게 했다
+(`extract_ingredients_with_llm`/`tag_menus_with_llm`과 같은 `async def`
++ 인증 없음 패턴).
+
+### 검증
+
+- `test_menu_plan_rules.py`: 요일별 시맨틱으로 전면 재작성 — 같은 날
+  5개(위반) vs 5일에 걸쳐 하루 1개씩(매일 통과) 구분, 주중만(토/일 슬롯
+  제외), match에 corner_id/plan_date가 정확히 담기는지 확인.
+- `test_api_ingest_and_analysis.py`: 배열 응답에 맞게 기존 테스트 갱신 +
+  같은 5개를 하루에 몰아넣기/5일에 나눠 넣기 대조 테스트, 토요일 제외
+  테스트, 신규 `POST /llm-analyses/recompute` 엔드투엔드 테스트(LLM
+  미설정 상태에서 호출 → 폴백 요약이 캐시에 저장되고
+  `GET /dashboard/menu-highlights` 응답에 `cause`가 채워짐을 확인).
+- `pytest -q` 전체 560개 통과(556 + 신규 4개).
+- `npm run build` 타입체크 통과.
+- `uvicorn`+`vite` 개발 서버로 Playwright 확인: 월요일에 면류 5개를
+  몰아넣은 주를 실제로 시딩해 규칙검증 패널이 "면류 (하루 최대 4개) ●
+  월 5개 ● 화 0개..."로 뜨고 월요일이 critical 배지로 표시됨, 매치 칩
+  "냉면(한식2, 08-10)"을 클릭하니 격자표에서 그 셀이 실제로 하이라이트
+  됨(기존 선택 스타일 그대로), `POST /llm-analyses/recompute` 호출이
+  `menu_trend` 카운트를 반환함을 확인. 콘솔 에러 없음.

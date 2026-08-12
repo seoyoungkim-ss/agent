@@ -496,13 +496,23 @@ export interface CombinationCheckResponse {
   untagged_menu_count: number;
 }
 
-// §77: 주간 식단표 규칙 검증 — 해장/면류/매운(빨간국물)은 한도(limit)와 실제
-// 편성 건수(count), 최근 식수 200식 이하 재편성은 위반 메뉴 목록으로 온다.
-export interface MenuPlanRuleCheckResult {
+// §77~§78: 주간 식단표 규칙 검증 — 해장/면류/매운(빨간국물)은 §78부터 한 주
+// 합산이 아니라 요일별(하루 기준, 주중만) 판정이라 날짜별 결과 배열로 온다.
+// 최근 식수 200식 이하 재편성(low_headcount_reuse)은 요일 개념이 아니라
+// 메뉴 단위라 그대로 위반 목록 하나.
+export interface MenuPlanRuleMatch {
+  menu_name: string;
+  corner_id: number;
+  corner_name: string;
+  plan_date: string;
+}
+
+export interface DailyMenuPlanRuleResult {
+  plan_date: string;
   ok: boolean;
   count: number;
   limit: number | null;
-  matches: string[];
+  matches: MenuPlanRuleMatch[];
 }
 
 export interface LowHeadcountViolation {
@@ -514,9 +524,9 @@ export interface LowHeadcountViolation {
 export interface WeeklyMenuPlanRuleCheckResponse {
   period_start: string;
   period_end: string;
-  hangover: MenuPlanRuleCheckResult;
-  noodle: MenuPlanRuleCheckResult;
-  spicy_red_broth: MenuPlanRuleCheckResult;
+  hangover: DailyMenuPlanRuleResult[];
+  noodle: DailyMenuPlanRuleResult[];
+  spicy_red_broth: DailyMenuPlanRuleResult[];
   low_headcount_reuse: { ok: boolean; violations: LowHeadcountViolation[] };
 }
 
@@ -800,6 +810,14 @@ export const api = {
 
   recomputeMenuPerformance: (params: { period_start: string; period_end: string }) =>
     request<{ updated_menus: number }>(`/analysis/menu-performance/recompute${qs(params)}`, {
+      method: "POST",
+    }),
+
+  // §78: 메뉴 하이라이트 LLM 원인 설명 캐시를 수동으로 채운다 — 평소엔 새벽
+  // 배치(02:00)가 채우지만 로컬 개발 환경처럼 스케줄러가 안 떠 있으면 계속
+  // 비어 있어 화면에 설명이 안 뜬다.
+  recomputeLlmAnalyses: (params: { period_start: string; period_end: string }) =>
+    request<{ menu_trend: number; planning_notice: number }>(`/analysis/llm-analyses/recompute${qs(params)}`, {
       method: "POST",
     }),
 

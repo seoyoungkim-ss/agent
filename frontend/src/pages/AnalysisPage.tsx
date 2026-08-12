@@ -6,6 +6,7 @@ import {
   api,
   type Classification,
   type CornerTrendRow,
+  type DailyMenuPlanRuleResult,
   type MealType,
   type MenuFoodVectorRow,
   type MenuPairRow,
@@ -1987,6 +1988,10 @@ function PredictedImpactPanel({ planId }: { planId: number }) {
   );
 }
 
+// §78: 규칙검증 패널이 월~금만 보여줄 때 쓰는 라벨 — weekdayDates는 월~토
+// 6일이라 앞 5개만 슬라이스해서 짝을 맞춘다.
+const WEEKDAY_LABELS_MON_FRI = ["월", "화", "수", "목", "금"];
+
 function WeeklyMenuReviewTab() {
   const chartTheme = useChartTheme();
   const [selectedMonday, setSelectedMonday] = useState(weeklyMondayOf(new Date()));
@@ -2142,6 +2147,47 @@ function WeeklyMenuReviewTab() {
     })),
   };
 
+  // §78: 규칙 위반 매치 클릭 시 아래 격자표의 해당 셀을 하이라이트 — 격자 셀
+  // 키(`${plan_date}_${corner_id}`, selectSlot 토글)를 그대로 재사용한다.
+  function renderDailyRuleRow(label: string, results: DailyMenuPlanRuleResult[]) {
+    const byDate = new Map(results.map((r) => [r.plan_date, r]));
+    const violatingMatches = results.filter((r) => !r.ok).flatMap((r) => r.matches);
+    return (
+      <div className="mb-2">
+        <div className="flex flex-wrap items-center gap-2 text-[13px]">
+          <span className="font-medium">{label}</span>
+          {weekdayDates.slice(0, 5).map((d, i) => {
+            const r = byDate.get(d);
+            if (!r) {
+              return (
+                <span key={d} className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                  {WEEKDAY_LABELS_MON_FRI[i]} -
+                </span>
+              );
+            }
+            return (
+              <Badge key={d} tone={r.ok ? "good" : "critical"} label={`${WEEKDAY_LABELS_MON_FRI[i]} ${r.count}개`} />
+            );
+          })}
+        </div>
+        {violatingMatches.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-2 text-xs">
+            {violatingMatches.map((m, i) => (
+              <button
+                key={i}
+                className="underline"
+                style={{ color: "var(--accent)" }}
+                onClick={() => selectSlot(`${m.plan_date}_${m.corner_id}`)}
+              >
+                {m.menu_name}({m.corner_name}, {m.plan_date.slice(5)})
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <Card title="주간 식단표 관리">
@@ -2173,35 +2219,17 @@ function WeeklyMenuReviewTab() {
 
         {ruleCheckQuery.data && (
           <div className="mb-4 rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
-            <h3 className="mb-2 text-[13px] font-semibold">주간 편성 규칙 검증</h3>
-            <div className="flex flex-wrap gap-x-6 gap-y-1.5 text-[13px]">
-              <Badge
-                tone={ruleCheckQuery.data.hangover.ok ? "good" : "critical"}
-                label={`해장 메뉴 ${ruleCheckQuery.data.hangover.count}개 (최소 1개)`}
-              />
-              <Badge
-                tone={ruleCheckQuery.data.noodle.ok ? "good" : "critical"}
-                label={`면류 ${ruleCheckQuery.data.noodle.count}개 (최대 ${ruleCheckQuery.data.noodle.limit}개)`}
-              />
-              <Badge
-                tone={ruleCheckQuery.data.spicy_red_broth.ok ? "good" : "critical"}
-                label={`매운(빨간국물) ${ruleCheckQuery.data.spicy_red_broth.count}개 (최대 ${ruleCheckQuery.data.spicy_red_broth.limit}개)`}
-              />
+            <h3 className="mb-2 text-[13px] font-semibold">주간 편성 규칙 검증 (주중, 요일별)</h3>
+            {renderDailyRuleRow("해장 메뉴 (하루 최소 1개)", ruleCheckQuery.data.hangover)}
+            {renderDailyRuleRow("면류 (하루 최대 4개)", ruleCheckQuery.data.noodle)}
+            {renderDailyRuleRow("매운(빨간국물) (하루 최대 4개)", ruleCheckQuery.data.spicy_red_broth)}
+            <div className="mt-2 flex items-center gap-2 text-[13px]">
+              <span className="font-medium">최근 저조 식수(200식 이하) 재편성</span>
               <Badge
                 tone={ruleCheckQuery.data.low_headcount_reuse.ok ? "good" : "critical"}
-                label={`최근 저조 식수(200식 이하) 재편성 ${ruleCheckQuery.data.low_headcount_reuse.violations.length}건`}
+                label={`${ruleCheckQuery.data.low_headcount_reuse.violations.length}건`}
               />
             </div>
-            {!ruleCheckQuery.data.noodle.ok && (
-              <p className="mt-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-                면류: {ruleCheckQuery.data.noodle.matches.join(", ")}
-              </p>
-            )}
-            {!ruleCheckQuery.data.spicy_red_broth.ok && (
-              <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                매운(빨간국물): {ruleCheckQuery.data.spicy_red_broth.matches.join(", ")}
-              </p>
-            )}
             {!ruleCheckQuery.data.low_headcount_reuse.ok && (
               <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
                 재편성 권장 안 함:{" "}

@@ -4020,17 +4020,22 @@ def test_menu_season_ranking_rejects_invalid_season(client):
 
 
 # ---------------------------------------------------------------------------
-# §77: 주간 식단표 규칙 검증 — 담당자가 준 4개 기준(해장/면류/매운빨간국물/
+# §77~§78: 주간 식단표 규칙 검증 — 담당자가 준 4개 기준(해장/면류/매운빨간국물/
 # 최근 저조 식수 재편성 금지)이 API 레벨에서 정확히 판정되는지 확인한다.
+# §78부터 해장/면류/매운빨간국물은 요일별(하루 기준, 주중만) 응답이라
+# hangover/noodle/spicy_red_broth는 날짜별 결과 배열이다.
 # ---------------------------------------------------------------------------
 
 
-def test_weekly_menu_plan_rule_check_flags_noodle_overage_and_missing_hangover(client):
+def _daily_result_for(results: list[dict], plan_date: dt.date) -> dict:
+    return next(r for r in results if r["plan_date"] == plan_date.isoformat())
+
+
+def test_weekly_menu_plan_rule_check_flags_noodle_overage_on_a_single_day(client):
+    """5개를 월요일 하루에 몰아넣으면 그날이 위반돼야 한다 — 하루 기준 판정의
+    핵심 케이스."""
     noodle_menus = ["라면", "우동", "짜장면", "짬뽕", "냉면"]
-    rows = [
-        _plan_row(MONDAY + dt.timedelta(days=i % 5), name, "메인")
-        for i, name in enumerate(noodle_menus)
-    ]
+    rows = [_plan_row(MONDAY, name, "메인") for name in noodle_menus]
     resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
     assert resp.status_code == 200, resp.text
 
@@ -4040,12 +4045,34 @@ def test_weekly_menu_plan_rule_check_flags_noodle_overage_and_missing_hangover(c
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["hangover"]["ok"] is False
-    assert body["hangover"]["count"] == 0
-    assert body["noodle"]["ok"] is False
-    assert body["noodle"]["count"] == 5
-    assert body["noodle"]["limit"] == 4
-    assert body["spicy_red_broth"]["ok"] is True
+    monday_hangover = _daily_result_for(body["hangover"], MONDAY)
+    monday_noodle = _daily_result_for(body["noodle"], MONDAY)
+    monday_spicy = _daily_result_for(body["spicy_red_broth"], MONDAY)
+    assert monday_hangover["ok"] is False
+    assert monday_hangover["count"] == 0
+    assert monday_noodle["ok"] is False
+    assert monday_noodle["count"] == 5
+    assert monday_noodle["limit"] == 4
+    assert len(monday_noodle["matches"]) == 5
+    assert monday_spicy["ok"] is True
+
+
+def test_weekly_menu_plan_rule_check_noodle_spread_across_days_all_pass(client):
+    """같은 5개를 월~금 하루 1개씩 나눠 편성하면 매일 통과해야 한다 — §77(주
+    전체 합산)에서 §78(하루 기준)로 바뀐 걸 직접 보여주는 회귀 방지 테스트."""
+    noodle_menus = ["라면", "우동", "짜장면", "짬뽕", "냉면"]
+    rows = [_plan_row(MONDAY + dt.timedelta(days=i), name, "메인") for i, name in enumerate(noodle_menus)]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/plan-rule-check",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=4)).isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["noodle"]) == 5
+    assert all(r["ok"] is True and r["count"] == 1 for r in body["noodle"])
 
 
 def test_weekly_menu_plan_rule_check_passes_with_hangover_and_low_noodle_count(client):
@@ -4059,10 +4086,27 @@ def test_weekly_menu_plan_rule_check_passes_with_hangover_and_low_noodle_count(c
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["hangover"]["ok"] is True
-    assert body["noodle"]["ok"] is True
-    assert body["spicy_red_broth"]["ok"] is True
+    assert _daily_result_for(body["hangover"], MONDAY)["ok"] is True
+    assert _daily_result_for(body["noodle"], MONDAY)["ok"] is True
+    assert _daily_result_for(body["spicy_red_broth"], MONDAY)["ok"] is True
     assert body["low_headcount_reuse"]["ok"] is True
+
+
+def test_weekly_menu_plan_rule_check_excludes_saturday_from_daily_rules(client):
+    """주중만 본다 — 토요일에 면류를 몰아넣어도 규칙 위반 목록에 안 잡혀야 한다."""
+    saturday = MONDAY + dt.timedelta(days=5)
+    noodle_menus = ["라면", "우동", "짜장면", "짬뽕", "냉면"]
+    rows = [_plan_row(saturday, name, "메인") for name in noodle_menus]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/plan-rule-check",
+        params={"period_start": MONDAY.isoformat(), "period_end": saturday.isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert all(r["plan_date"] != saturday.isoformat() for r in body["noodle"])
 
 
 def test_weekly_menu_plan_rule_check_flags_low_headcount_reuse_except_exempt_corners(client):
@@ -4095,3 +4139,32 @@ def test_weekly_menu_plan_rule_check_flags_low_headcount_reuse_except_exempt_cor
     names = {v["menu_name"] for v in body["low_headcount_reuse"]["violations"]}
     assert "고기전골" in names
     assert "미캠전골" not in names
+
+
+def test_recompute_llm_analyses_populates_menu_highlight_cause(client):
+    """§78: "현황에서 메뉴하이라이트llm에 분석이 아무것도 없어" — 로컬처럼
+    새벽 배치 스케줄러가 안 떠 있어도 이 엔드포인트로 캐시를 수동으로 채우면
+    메뉴 하이라이트 응답에 cause가 채워져야 한다. 테스트 환경은 LLM 미설정
+    이라 폴백 문구("...미설정...")가 캐시된다."""
+    today = dt.date.today()
+    recent_monday = today - dt.timedelta(days=today.weekday())
+    prior_monday = recent_monday - dt.timedelta(days=7)
+
+    for i in range(2):
+        _ingest_meal_log(client, f"R{i}", "맛남", eaten_date=recent_monday, menu_name="회복원산지찌개")
+    for i in range(2):
+        _ingest_meal_log(client, f"P{i}", "개선", eaten_date=prior_monday, menu_name="회복원산지찌개")
+
+    resp = client.post(
+        "/api/analysis/llm-analyses/recompute",
+        params={"period_start": today.isoformat(), "period_end": today.isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["menu_trend"] >= 1
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    assert resp.status_code == 200, resp.text
+    entries = [*resp.json()["rising"], *resp.json()["falling"]]
+    target = next(e for e in entries if e["menu_name"] == "회복원산지찌개")
+    assert "cause" in target
+    assert "미설정" in target["cause"]
