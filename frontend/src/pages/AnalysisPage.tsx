@@ -12,6 +12,7 @@ import {
   type MenuPerformanceRow,
   type MenuRotationRow,
   type PredictedNumbersRow,
+  type Season,
   type TrendDirection,
   type WeatherEvent,
   type WeeklyMenuPlanItem,
@@ -3607,11 +3608,15 @@ const WEATHER_BAR_COLOR: Record<"비 안 온 날" | "비 온 날", string> = {
 // §71: 메인메뉴 × 날씨유형 랭킹 탭 — 담당자 요청 예시 그대로("비오면 김치찌개…
 // 폭설이면… 폭염이면 메밀소바…") 네 유형을 눌러가며 훑어보는 멘탈모델.
 const MENU_WEATHER_EVENT_TABS: WeatherEvent[] = ["비", "폭설", "폭염", "한파"];
+// §72: 메인메뉴 × 계절 랭킹 탭 — "냉면은 여름에, 팥죽은 겨울에" 같은 계절
+// 음식 패턴을 훑어보는 멘탈모델. 날씨유형과 별개 블록(비교 기준이 다름).
+const MENU_SEASON_TABS: Season[] = ["봄", "여름", "가을", "겨울"];
 
 export function WeatherCorrelationSection() {
   const [periodStart, setPeriodStart] = useState(PERIOD_START);
   const [periodEnd, setPeriodEnd] = useState(PERIOD_END);
   const [selectedEvent, setSelectedEvent] = useState<WeatherEvent>("비");
+  const [selectedSeason, setSelectedSeason] = useState<Season>("여름");
   const chartTheme = useChartTheme();
 
   const query = useQuery({
@@ -3625,6 +3630,14 @@ export function WeatherCorrelationSection() {
       api.menuWeatherEventRanking({ period_start: periodStart, period_end: periodEnd, event: selectedEvent }),
   });
   const menuRankingRows = menuRankingQuery.data?.rows ?? [];
+  const extendedFieldsMissing = menuRankingQuery.data?.extended_fields_missing ?? false;
+
+  const menuSeasonQuery = useQuery({
+    queryKey: ["menu-season-ranking", periodStart, periodEnd, selectedSeason],
+    queryFn: () =>
+      api.menuSeasonRanking({ period_start: periodStart, period_end: periodEnd, season: selectedSeason }),
+  });
+  const menuSeasonRows = menuSeasonQuery.data?.rows ?? [];
 
   const buckets = query.data?.buckets ?? [];
   const daysMissingWeather = query.data?.days_missing_weather ?? 0;
@@ -3767,7 +3780,14 @@ export function WeatherCorrelationSection() {
 
         {menuRankingQuery.data && menuRankingRows.length === 0 && (
           <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            이 기간에 "{selectedEvent}" 유형인 날이 없거나, 그 날 취식 기록이 없습니다.
+            {extendedFieldsMissing && selectedEvent !== "비" ? (
+              <>
+                적설량·기온 데이터가 아직 없습니다. <code>scripts/import_weather_csv.py backfill
+                --write-db</code>로 날씨 데이터를 다시 백필해야 폭설/폭염/한파 분류가 가능합니다.
+              </>
+            ) : (
+              `이 기간에 "${selectedEvent}" 유형인 날이 없거나, 그 날 취식 기록이 없습니다.`
+            )}
           </p>
         )}
 
@@ -3797,6 +3817,71 @@ export function WeatherCorrelationSection() {
                   />
                 ),
               event_days: `${r.event_days}일`,
+            }))}
+            rowKey={(r) => r.key as string}
+          />
+        )}
+      </div>
+
+      <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+        <h3 className="text-[14px] font-semibold">메인메뉴 × 계절 인기 랭킹</h3>
+        <p className="mb-3 mt-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          부찬은 대상이 아닙니다 — 메인메뉴가 그 계절에 전체 기간 평균 대비 식수가 얼마나 달랐는지
+          랭킹입니다("냉면은 여름에, 팥죽은 겨울에" 같은 패턴 참고용). 여러 해의 같은 계절을 합쳐
+          봅니다.
+        </p>
+        <div className="mb-3 flex flex-wrap gap-2">
+          {MENU_SEASON_TABS.map((seasonOption) => (
+            <button
+              key={seasonOption}
+              onClick={() => setSelectedSeason(seasonOption)}
+              className="rounded-full border px-3 py-1.5 text-[13px] transition-colors"
+              style={{
+                borderColor: selectedSeason === seasonOption ? "var(--accent)" : "var(--border)",
+                background: selectedSeason === seasonOption ? "var(--surface-2)" : "var(--surface)",
+                fontWeight: selectedSeason === seasonOption ? 600 : 400,
+              }}
+            >
+              {seasonOption}
+            </button>
+          ))}
+        </div>
+
+        {menuSeasonQuery.isLoading && <LoadingState />}
+        {menuSeasonQuery.isError && <ErrorState error={menuSeasonQuery.error} />}
+
+        {menuSeasonQuery.data && menuSeasonRows.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이 기간에 "{selectedSeason}"에 해당하는 취식 기록이 없습니다.
+          </p>
+        )}
+
+        {menuSeasonRows.length > 0 && (
+          <Table
+            columns={[
+              { key: "menu_name", label: "메뉴명" },
+              { key: "season_avg_headcount", label: `${selectedSeason} 평균`, align: "right" },
+              { key: "diff", label: "전체 평균 대비", align: "right" },
+              { key: "season_days", label: "표본(일)", align: "right" },
+            ]}
+            rows={menuSeasonRows.map((r) => ({
+              key: String(r.menu_id),
+              menu_name: r.low_sample ? (
+                <span style={{ color: "var(--ink-muted)" }}>{r.menu_name ?? "이름 없음"}</span>
+              ) : (
+                r.menu_name ?? "이름 없음"
+              ),
+              season_avg_headcount: `${r.season_avg_headcount}명`,
+              diff:
+                r.diff_vs_overall == null ? (
+                  <Badge label="표본 부족" tone="muted" />
+                ) : (
+                  <Badge
+                    label={`${r.diff_vs_overall > 0 ? "+" : ""}${r.diff_vs_overall}명`}
+                    tone={Math.abs(r.diff_vs_overall) >= 3 ? (r.diff_vs_overall > 0 ? "good" : "critical") : "muted"}
+                  />
+                ),
+              season_days: `${r.season_days}일`,
             }))}
             rowKey={(r) => r.key as string}
           />

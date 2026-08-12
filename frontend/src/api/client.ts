@@ -246,6 +246,10 @@ export interface MenuWeatherEventRow {
 export interface MenuWeatherEventRankingResponse {
   event: WeatherEvent;
   rows: MenuWeatherEventRow[];
+  // §72: 그 기간 daily_weather에 snow_cm/max_temp_c/min_temp_c가 단 하나도
+  // 없으면 true — "그런 날이 없어서"가 아니라 "재백필이 안 돼서" 폭설/폭염/
+  // 한파가 안 나온다는 뜻이라 화면에서 구분해서 안내해야 한다.
+  extended_fields_missing: boolean;
 }
 
 // predicted-impact의 weather_reference — 슬롯 상세에서 그 메인메뉴 하나의
@@ -256,6 +260,26 @@ export interface MenuWeatherReferenceRow {
   day_count: number;
   diff_vs_normal: number | null;
   low_sample: boolean;
+}
+
+// §72: 메인메뉴 × 계절(봄/여름/가을/겨울) 인기 랭킹 — "냉면은 여름에,
+// 팥죽은 겨울에" 같은 계절 음식 패턴 참고용. 비교 기준이 날씨유형과 다르다
+// (평상시 대비가 아니라 전체 기간 평균 대비 — 계절엔 "평상시" 같은 기본
+// 그룹이 없어서).
+export type Season = "봄" | "여름" | "가을" | "겨울";
+
+export interface MenuSeasonRow {
+  menu_id: number;
+  menu_name: string | null;
+  season_avg_headcount: number;
+  season_days: number;
+  diff_vs_overall: number | null;
+  low_sample: boolean;
+}
+
+export interface MenuSeasonRankingResponse {
+  season: Season;
+  rows: MenuSeasonRow[];
 }
 
 export interface TasteProfile {
@@ -722,6 +746,16 @@ export const api = {
     event: WeatherEvent;
     meal_type?: MealType;
   }) => request<MenuWeatherEventRankingResponse>(`/analysis/menu-performance/weather-event-ranking${qs(params)}`),
+
+  // §72: 메인메뉴가 그 계절에 전체 기간 평균 대비 식수가 얼마나 달랐는지
+  // 랭킹. weatherEventRanking과 같은 원칙(참고용, 부찬 무관) — 비교 기준만
+  // 다르다(평상시 대비 대신 전체 기간 평균 대비).
+  menuSeasonRanking: (params: {
+    period_start: string;
+    period_end: string;
+    season: Season;
+    meal_type?: MealType;
+  }) => request<MenuSeasonRankingResponse>(`/analysis/menu-performance/season-ranking${qs(params)}`),
 
   recomputeDailyStats: (params: { period_start: string; period_end: string }) =>
     request<{ days_processed: number }>(`/analysis/daily-stats/recompute${qs(params)}`, {

@@ -3866,3 +3866,100 @@ def test_predicted_impact_weather_reference_empty_without_history(client):
     resp = client.get(f"/api/analysis/weekly-menu/{main_plan_id}/predicted-impact")
     assert resp.status_code == 200, resp.text
     assert resp.json()["weather_reference"] == []
+
+
+def test_weather_event_ranking_flags_extended_fields_missing(client, db_session):
+    """§72: snow_cm/max_temp_c/min_temp_c가 전부 NULL인(§71 배포 전에 이미
+    백필된) daily_weather만 있으면, "그런 날이 없어서"와 구분해 화면이 재백필
+    필요를 알 수 있도록 extended_fields_missing이 True여야 한다."""
+    from app.models.stats import DailyWeather
+
+    db_session.add(
+        DailyWeather(stat_date=MONDAY, had_rain=True, precip_mm=8.0, snow_cm=None, max_temp_c=None, min_temp_c=None)
+    )
+    db_session.commit()
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY, menu_name="김치찌개")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/weather-event-ranking",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "event": "폭설"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rows"] == []
+    assert body["extended_fields_missing"] is True
+
+
+def test_weather_event_ranking_extended_fields_missing_false_once_backfilled(client, db_session):
+    """확장 필드가 하나라도 채워진 날이 있으면(재백필 완료) False여야 한다."""
+    from app.models.stats import DailyWeather
+
+    db_session.add(
+        DailyWeather(stat_date=MONDAY, had_rain=True, precip_mm=8.0, snow_cm=0.0, max_temp_c=24.0, min_temp_c=18.0)
+    )
+    db_session.commit()
+
+    resp = client.get(
+        "/api/analysis/menu-performance/weather-event-ranking",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "event": "폭설"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["extended_fields_missing"] is False
+
+
+def _seed_menu_summer_vs_fall(client, menu_name: str, employee_prefix: str) -> None:
+    """§72: 여름(7월) 5일(6명씩) vs 가을(10월) 5일(2명씩) 같은 메뉴로 채운다 —
+    season-ranking 테스트 공용 시딩."""
+    summer_days = [dt.date(2026, 7, 1) + dt.timedelta(days=i) for i in range(5)]
+    fall_days = [dt.date(2026, 10, 1) + dt.timedelta(days=i) for i in range(5)]
+    emp_n = 0
+    for d in summer_days:
+        for _ in range(6):
+            _ingest_meal_log(client, f"{employee_prefix}{emp_n}", "맛남", eaten_date=d, menu_name=menu_name)
+            emp_n += 1
+    for d in fall_days:
+        for _ in range(2):
+            _ingest_meal_log(client, f"{employee_prefix}{emp_n}", "맛남", eaten_date=d, menu_name=menu_name)
+            emp_n += 1
+
+
+def test_menu_season_ranking_surfaces_summer_favorite(client):
+    """담당자 요청 예시("냉면은 여름에") 그대로 — 여름에 유독 잘 나가는 메뉴가
+    상위에, diff_vs_overall 부호/값이 맞는지 확인."""
+    _seed_menu_summer_vs_fall(client, "냉면", "S")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/season-ranking",
+        params={"period_start": "2026-07-01", "period_end": "2026-10-05", "season": "여름"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["season"] == "여름"
+    row = next(r for r in body["rows"] if r["menu_name"] == "냉면")
+    assert row["low_sample"] is False
+    assert row["season_days"] == 5
+    assert row["season_avg_headcount"] == 6.0
+    # 전체 평균 4.0(여름 6명×5일 + 가을 2명×5일) 대비 여름은 +2.0
+    assert row["diff_vs_overall"] == 2.0
+    assert body["rows"][0]["menu_name"] == "냉면"
+
+
+def test_menu_season_ranking_flags_low_sample(client):
+    _ingest_meal_log(client, "F1", "맛남", eaten_date=dt.date(2026, 10, 1), menu_name="어묵탕")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/season-ranking",
+        params={"period_start": "2026-10-01", "period_end": "2026-10-01", "season": "가을"},
+    )
+    assert resp.status_code == 200, resp.text
+    row = next(r for r in resp.json()["rows"] if r["menu_name"] == "어묵탕")
+    assert row["low_sample"] is True
+    assert row["diff_vs_overall"] is None
+
+
+def test_menu_season_ranking_rejects_invalid_season(client):
+    resp = client.get(
+        "/api/analysis/menu-performance/season-ranking",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "season": "장마"},
+    )
+    assert resp.status_code == 400

@@ -4946,3 +4946,105 @@ Playwright로 확인하던 중, **§71과 무관한 기존 버그**를 하나 �
 화면마다 다르게 보인다"는 형태로 나타날 수 있어, 별도 라운드로 다뤄야
 한다.
 - `pytest -q` 전체 509개 통과.
+
+## §72. 날씨유형 재백필 안내 + 메인메뉴 × 계절 인기 랭킹 (2026-08)
+
+§71 배포 직후 담당자 피드백:
+
+> "비 정보만 들어있음 폭설 폭염 한파 데이터도 추가해줘 계절로 묶은것도"
+
+두 가지가 섞여 있었다.
+
+### "비 정보만 들어있음" — 버그가 아니라 재백필 안내 부재
+
+`classify_weather_event`(§71, `weather_event.py`)는 `snow_cm`/
+`max_temp_c`/`min_temp_c`가 전부 `NULL`인 날은 그 세 분기가 전부
+`is not None` 가드에 걸려 스킵되고 항상 "비" 또는 "평상시"로만 분류
+된다. §71 배포 전에 이미 쌓여 있던 기존 `daily_weather` 행은 이
+컬럼들이 구조적으로 `NULL`이므로 — **재백필
+(`scripts/import_weather_csv.py backfill --write-db`) 전에는 폭설/
+폭염/한파가 절대 나오지 않는다.** 이건 §71 문서에 이미 "기존 데이터
+재백필 필요"로 적혀 있었지만, 화면이 이걸 스스로 알려주지 않고 그냥
+"이 기간에 이 유형인 날이 없습니다"라고만 떠서, 마치 그 날씨가 애초에
+없었던 것처럼 보여 혼동을 줬다.
+
+고친 부분은 코드가 아니라 **화면이 원인을 구분해서 알려주는 것**뿐이다
+— 재백필 자체는 여전히 운영자가 실행해야 한다.
+
+`_weather_event_by_date`(`analysis.py`)가 기간 내 `DailyWeather` 행을
+로드하는 김에, 그 기간에 `snow_cm`/`max_temp_c`/`min_temp_c`가 하나도
+채워지지 않았는지를 같이 계산해 `extended_fields_missing: bool`로
+반환한다(행 자체가 하나도 없으면 — 즉 그 기간에 날씨 데이터 자체가
+없으면 — `False`다: "데이터가 없다"와 "재백필이 안 됐다"는 서로 다른
+안내라 구분해야 한다). `GET /analysis/menu-performance/weather-event-
+ranking` 응답에 이 필드가 추가됐다.
+
+프론트(`WeatherCorrelationSection`)는 날씨유형 랭킹이 비어 있고
+(`rows.length === 0`) `extended_fields_missing`이 참이고 선택된 탭이
+"비"가 아닐 때만, 기존 "이 기간에 유형인 날이 없거나…" 문구 대신
+"적설량·기온 데이터가 아직 없습니다. `scripts/import_weather_csv.py
+backfill --write-db`로 날씨 데이터를 다시 백필해야 폭설/폭염/한파
+분류가 가능합니다."로 안내한다. "비" 탭은 애초에 `precip_mm`만 있으면
+분류되므로 이 안내와 무관하다.
+
+### 계절별 메인메뉴 랭킹 — 신규 `backend/app/services/season.py`
+
+`Season` enum(`SPRING="봄"`, `SUMMER="여름"`, `FALL="가을"`,
+`WINTER="겨울"`) + 순수 함수 `classify_season(date) -> Season` — 기상학적
+계절 관례(3~5월 봄, 6~8월 여름, 9~11월 가을, 12·1·2월 겨울)로 월만
+보고 분류한다. 연도는 무관하다 — 여러 해의 같은 계절을 다 하나로
+합쳐서 본다("여러 해의 여름을 합쳐 봄"). 날씨 임계값(폭염 33도 등)과
+달리 계절 월 구간은 실측 캘리브레이션이 필요 없는 고정 관례라 새 config
+값을 만들지 않았다.
+
+`diff_vs_overall`이 §71의 `diff_vs_normal`과 기준이 다른 이유: 날씨유형은
+"평상시"라는 자연스러운 기본 그룹이 있다(비 오는 날이 아닌 날이 다수) —
+그래서 평상시 대비로 비교한다. 계절은 그런 기본 그룹이 없다 — 모든
+날짜가 정확히 하나의 계절에 속한다. 대신 **그 메뉴의 전체 기간 평균
+대비 그 계절 평균**을 쓴다 — `menu_throughput.py::
+compute_menu_throughput_summary`가 이미 쓰는 "overall_avg 대비 하위
+그룹 평균" 패턴을 그대로 재사용한 것이다.
+
+신규 함수 `_menu_season_summary(headcount_by_date, low_sample_days)`가
+전체 날짜 평균(`overall_avg`)을 먼저 구하고, `classify_season`으로
+날짜를 계절별로 묶어 계절별 평균·표본수·`diff_vs_overall`(계절평균 -
+전체평균)을 계산한다. 표본 부족 기준은 §71과 같은
+`weather_correlation_low_sample_days`를 재사용한다. 데이터 로딩은
+§71의 `_headcount_by_date_by_menu_bulk`를 그대로 재사용한다 — 계절은
+날짜에서 바로 계산되므로 `daily_weather` 조회가 필요 없다.
+
+신규 엔드포인트 `GET /analysis/menu-performance/season-ranking?
+period_start=&period_end=&season=봄|여름|가을|겨울[&meal_type=]` —
+§71의 `weather-event-ranking`과 같은 모양으로, 요청받은 계절 하나만
+계산해 `|diff_vs_overall|` 내림차순으로 정렬하고 표본 부족 행은 뒤에
+붙인다.
+
+### 프론트
+
+`client.ts`에 `Season` 타입, `MenuSeasonRow`/`MenuSeasonRankingResponse`
+타입, `menuSeasonRanking(...)` 함수 추가. `WeatherCorrelationSection`의
+"메인메뉴 × 날씨유형 인기 랭킹" 블록 아래에 같은 모양의 "메인메뉴 ×
+계절 인기 랭킹" 블록을 추가했다 — 봄/여름/가을/겨울 탭, 표(메뉴명/그
+계절 평균/전체 평균 대비/표본), `Badge`로 `|diff| >= 3`이면 강조(§71과
+같은 기준). "냉면은 여름에, 팥죽은 겨울에" 같은 패턴을 보라는 안내
+문구와 "여러 해의 같은 계절을 합쳐 봅니다"라는 캐비아트를 덧붙였다.
+
+### 검증
+
+- `test_season.py`(신규, 9개): `classify_season` 월 경계값(2/28, 3/1,
+  5/31, 6/1, 8/31, 9/1, 11/30, 12/1) 전부 + 연도 무관 확인(2025년·2027년
+  1월 둘 다 겨울).
+- `test_api_ingest_and_analysis.py`에 6개 추가: `extended_fields_missing`이
+  `snow_cm`/`max_temp_c`/`min_temp_c` 전부 `NULL`일 때 참, 하나라도
+  채워지면 거짓임을 확인. 여름·가을 헤드카운트를 다르게 시딩한 메뉴가
+  계절 랭킹 상위에 올바른 부호(`diff_vs_overall`)로 올라오는지, 표본
+  부족 플래그, 잘못된 `season` 파라미터 400 확인. `pytest -q` 전체
+  536개 통과.
+- `npm run build` 타입체크 통과.
+- `uvicorn`+`vite` 개발 서버 기동 후 Playwright로 실제 브라우저에서
+  확인: (1) `daily_weather`에 `snow_cm`/`max_temp_c`/`min_temp_c`가
+  전부 `NULL`인 행만 있는 기간에서 "폭설" 탭을 누르면 재백필 안내
+  문구가 정확히 렌더링됨, (2) 여름 5일(6명) vs 가을 5일(2명)로 시딩한
+  냉면이 "메인메뉴 × 계절 인기 랭킹"의 "여름" 탭에서 "여름 평균 6명 ·
+  전체 평균 대비 +2명 · 표본 5일"로 1위에 정확히 렌더링됨. 콘솔 에러
+  없음.

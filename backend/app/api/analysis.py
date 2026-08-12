@@ -109,6 +109,7 @@ from app.services.weekly_menu_review import (
     set_menu_role,
 )
 from app.services.weekly_menu_role_llm import reclassify_weekly_menu_roles
+from app.services.season import Season, classify_season
 from app.services.weather_event import WeatherEvent, classify_weather_event
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -379,15 +380,25 @@ def weather_correlation(
 
 def _weather_event_by_date(
     db: Session, period_start: dt.date, period_end: dt.date
-) -> dict[dt.date, WeatherEvent]:
+) -> tuple[dict[dt.date, WeatherEvent], bool]:
     """§71: 기간 내 날짜별 날씨유형(평상시/비/폭설/폭염/한파) 맵. weather_correlation의
     DailyWeather 전체 로드 패턴과 동일 — 다만 (classification, had_rain) 대신
-    classify_weather_event로 다섯 유형 중 하나를 매긴다."""
+    classify_weather_event로 다섯 유형 중 하나를 매긴다.
+
+    §72: 두 번째 반환값 `extended_fields_missing`은 그 기간의 daily_weather
+    행에 snow_cm/max_temp_c/min_temp_c가 단 하나도 채워져 있지 않은지 여부다.
+    §71 배포 전에 이미 백필된 행은 이 세 필드가 전부 NULL이라 폭설/폭염/한파가
+    구조적으로 절대 안 나오는데(classify_weather_event 참고), 그걸 "그런 날이
+    없어서"와 구분해 화면에 안내하기 위해 필요하다(§72).
+    """
     settings = get_settings()
     weather_rows = (
         db.query(DailyWeather).filter(DailyWeather.stat_date.between(period_start, period_end)).all()
     )
-    return {
+    extended_fields_missing = bool(weather_rows) and all(
+        w.snow_cm is None and w.max_temp_c is None and w.min_temp_c is None for w in weather_rows
+    )
+    event_by_date = {
         w.stat_date: classify_weather_event(
             precip_mm=w.precip_mm,
             snow_cm=w.snow_cm,
@@ -397,6 +408,7 @@ def _weather_event_by_date(
         )
         for w in weather_rows
     }
+    return event_by_date, extended_fields_missing
 
 
 def _headcount_by_date_by_menu_bulk(
@@ -522,7 +534,7 @@ def _menu_weather_reference(db: Session, menu_id: int, plan_date: dt.date) -> li
     headcount_by_date = _headcount_by_date_for_menu(db, menu_id, period_start, period_end)
     if not headcount_by_date:
         return []
-    event_by_date = _weather_event_by_date(db, period_start, period_end)
+    event_by_date, _extended_missing = _weather_event_by_date(db, period_start, period_end)
     if not event_by_date:
         return []
     return _menu_weather_event_summary(
@@ -555,7 +567,7 @@ def menu_weather_event_ranking(
         raise HTTPException(status_code=400, detail="event는 비/폭설/폭염/한파 중 하나여야 합니다")
 
     settings = get_settings()
-    event_by_date = _weather_event_by_date(db, period_start, period_end)
+    event_by_date, extended_fields_missing = _weather_event_by_date(db, period_start, period_end)
     headcount_by_menu = _headcount_by_date_by_menu_bulk(db, period_start, period_end, meal_type)
     menu_names = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
 
@@ -587,7 +599,95 @@ def menu_weather_event_ranking(
             -abs(r["diff_vs_normal"]) if r["diff_vs_normal"] is not None else 0,
         ),
     )
-    return {"event": target_event.value, "rows": ranked}
+    return {"event": target_event.value, "rows": ranked, "extended_fields_missing": extended_fields_missing}
+
+
+def _menu_season_summary(headcount_by_date: dict[dt.date, int], low_sample_days: int) -> list[dict]:
+    """§72: 메뉴 하나의 날짜별 식수를 계절별로 묶어 "전체 기간 평균 대비 그
+    계절 평균" 차이를 계산한다. 날씨유형과 달리 계절엔 "평상시" 같은
+    기본/비교 그룹이 없다 — 대신 그 메뉴의 전체 기간 평균(overall_avg)을
+    기준으로 삼는다(menu_throughput.py::compute_menu_throughput_summary의
+    overall_avg 패턴과 동일한 아이디어: 하위 그룹 평균 vs 전체 평균).
+    """
+    all_counts = list(headcount_by_date.values())
+    overall_avg = statistics.fmean(all_counts) if all_counts else None
+    overall_low_sample = len(all_counts) < low_sample_days
+
+    by_season: dict[Season, list[int]] = {}
+    for target_date, headcount in headcount_by_date.items():
+        season = classify_season(target_date)
+        by_season.setdefault(season, []).append(headcount)
+
+    summaries = []
+    for season, counts in by_season.items():
+        day_count = len(counts)
+        avg_headcount = statistics.fmean(counts)
+        low_sample = day_count < low_sample_days
+        if overall_avg is None or low_sample or overall_low_sample:
+            diff_vs_overall = None
+        else:
+            diff_vs_overall = round(avg_headcount - overall_avg, 1)
+        summaries.append(
+            {
+                "season": season.value,
+                "avg_headcount": round(avg_headcount, 1),
+                "day_count": day_count,
+                "diff_vs_overall": diff_vs_overall,
+                "low_sample": low_sample or overall_low_sample,
+            }
+        )
+    return summaries
+
+
+@router.get("/menu-performance/season-ranking")
+def menu_season_ranking(
+    period_start: dt.date,
+    period_end: dt.date,
+    season: str = Query(..., description="봄 | 여름 | 가을 | 겨울"),
+    meal_type: MealType | None = None,
+    db: Session = Depends(get_db),
+):
+    """PRD 7.1 확장(2026-08, §72): 메인메뉴가 그 계절에 전체 기간 평균 대비
+    식수가 얼마나 달랐는지 랭킹 — "냉면은 여름에, 팥죽은 겨울에" 같은 계절
+    음식 패턴 참고용. weather-event-ranking과 동일 원칙(참고용 정보 제공까지만,
+    부찬 무관 — meal_log.menu_id가 이미 메인메뉴 그 자체) + 동일 응답 모양이나,
+    비교 기준만 다르다(평상시 대비 대신 전체 기간 평균 대비 — 계절엔 "평상시"
+    같은 기본 그룹이 없어서).
+    """
+    try:
+        target_season = Season(season)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="season은 봄/여름/가을/겨울 중 하나여야 합니다")
+
+    settings = get_settings()
+    headcount_by_menu = _headcount_by_date_by_menu_bulk(db, period_start, period_end, meal_type)
+    menu_names = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
+
+    rows = []
+    for menu_id, headcount_by_date in headcount_by_menu.items():
+        summaries = _menu_season_summary(headcount_by_date, settings.weather_correlation_low_sample_days)
+        match = next((s for s in summaries if s["season"] == target_season.value), None)
+        if match is None:
+            continue
+        rows.append(
+            {
+                "menu_id": menu_id,
+                "menu_name": menu_names.get(menu_id),
+                "season_avg_headcount": match["avg_headcount"],
+                "season_days": match["day_count"],
+                "diff_vs_overall": match["diff_vs_overall"],
+                "low_sample": match["diff_vs_overall"] is None,
+            }
+        )
+
+    ranked = sorted(
+        rows,
+        key=lambda r: (
+            r["diff_vs_overall"] is None,
+            -abs(r["diff_vs_overall"]) if r["diff_vs_overall"] is not None else 0,
+        ),
+    )
+    return {"season": target_season.value, "rows": ranked}
 
 
 def _load_corner_stats(
