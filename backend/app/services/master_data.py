@@ -9,6 +9,7 @@ from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.services.company_classification import classify_division
 from app.services.corner_aliases import (
     CORNER_ALIAS_MAP as _CORNER_ALIAS_MAP,
+    MICAM_HALL_CORNER_NAME,
     SNAP_SNACK_ALIASES,
     SNAP_SNACK_CORNER_NAME,
     TAKE_OUT_ALIASES,

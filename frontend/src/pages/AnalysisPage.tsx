@@ -3645,8 +3645,16 @@ export function WeatherCorrelationSection() {
 
   const menuRankingQuery = useQuery({
     queryKey: ["menu-weather-event-ranking", periodStart, periodEnd, selectedEvent],
+    // §76: 담당자 요청으로 중식 고정 — 조/중/석식을 합쳐 보면 기저 식수 규모가
+    // 달라 날씨유형 간 비교가 흐려진다는 문제의식(§75 timeline과 동일)과 같은
+    // 맥락. 계절 랭킹(menuSeasonQuery)은 이번 요청 대상이 아니라 그대로 둔다.
     queryFn: () =>
-      api.menuWeatherEventRanking({ period_start: periodStart, period_end: periodEnd, event: selectedEvent }),
+      api.menuWeatherEventRanking({
+        period_start: periodStart,
+        period_end: periodEnd,
+        event: selectedEvent,
+        meal_type: "중식",
+      }),
   });
   const menuRankingRows = menuRankingQuery.data?.rows ?? [];
   const extendedFieldsMissing = menuRankingQuery.data?.extended_fields_missing ?? false;
@@ -3797,7 +3805,7 @@ export function WeatherCorrelationSection() {
       )}
 
       <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
-        <h3 className="text-[14px] font-semibold">메인메뉴 × 날씨유형 인기 랭킹</h3>
+        <h3 className="text-[14px] font-semibold">메인메뉴 × 날씨유형 인기 랭킹 (중식 기준)</h3>
         <p className="mb-3 mt-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
           부찬은 대상이 아닙니다 — 메인메뉴가 그 날씨유형의 날, 평상시 대비 식수가 얼마나 달랐는지
           랭킹입니다. 주간 메인메뉴를 짤 때 참고용으로만 쓰세요.

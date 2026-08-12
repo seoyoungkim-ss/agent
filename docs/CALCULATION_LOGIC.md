@@ -5162,3 +5162,47 @@ top-N + `showAll` 상태 + 버튼 idiom을 그대로 재사용한 신규 헬퍼
   강수량과 일치하게 렌더링됨, (3) 날씨유형 랭킹은 기본 접힌 상태(표본
   부족으로 top5 상승만 있던 케이스), 계절 랭킹은 "전체 23개 보기" 클릭
   시 전체가 펼쳐지고 "접기" 버튼으로 바뀜을 확인. 콘솔 에러 없음.
+
+## §76. 날씨유형 랭킹 중식 고정 + 미캠회관(전골) 코너 제외 (2026-08)
+
+§75로 배포된 "메인메뉴 × 날씨유형 인기 랭킹"을 보고 담당자가 두 가지를
+요청했다: "중식 기준으로 봐줘"(조/중/석식을 합쳐 집계하던 것), "미캠회관
+코너도 제외해줘". AskUserQuestion으로 확인한 결과, 미캠회관(전골) 제외는
+날씨유형·계절 랭킹 둘 다에 적용하고(타임라인 차트의 전체 식수는 코너
+단위가 아니라 대상 밖), 중식 고정은 조/중/석식 선택 버튼을 새로 만들지
+않고 쿼리 자체를 중식으로 고정하는 쪽으로 정했다(계절 랭킹은 이번 요청
+대상이 아니라 그대로 전체 식사시간 합산 유지).
+
+**미캠회관(전골) 제외**: `menu_weather_event_ranking`(§71)과
+`menu_season_ranking`(§72)은 이미 같은 헬퍼
+`_headcount_by_date_by_menu_bulk`를 공유해 메뉴별 일자별 식수를 만든다.
+이 헬퍼 한 곳에 코너 제외를 추가하면 두 랭킹에 자동으로 같이 적용된다 —
+랭킹 엔드포인트 코드는 그대로 두고, 이미 있던 `excluded_menu_ids`
+(`PLACEHOLDER_MENU_NAMES`) 필터와 같은 스타일로 `MealLog.corner_id`
+기준 `excluded_corner_ids` 필터를 하나 더 추가했다. 상수
+`MICAM_HALL_CORNER_NAME = "미캠회관(전골)"`은 `TAKE_OUT_CORNER_NAME`과
+같은 자리(`corner_aliases.py` → `master_data.py` 재노출 → `analysis.py`
+import)에 뒀다. 프론트의 `SHARE_EXCLUDED_CORNER_NAMES`(점유율 차트 전용
+제외 목록)는 별개로 그대로 둔다 — 우연히 같은 코너를 가리키지만 하나는
+프론트 차트용, 하나는 백엔드 집계용이라 억지로 공유 모듈을 만들 필요는
+없다. 슬롯 상세("예측 보기")의 `_menu_weather_reference`가 쓰는 단건
+버전 `_headcount_by_date_for_menu`는 이번 요청(랭킹 표 두 개) 범위
+밖이라 손대지 않았다.
+
+**중식 고정**: 백엔드는 이미 `meal_type` 쿼리 파라미터를 지원하고
+있었으므로(§71), 프론트 `WeatherCorrelationSection`의 `menuRankingQuery`
+호출에 `meal_type: "중식"`을 고정으로 추가했다. §75에서 "이게 뭘 보여주는
+건지 모르겠다" 피드백을 받은 전례가 있어, 소제목에도 "(중식 기준)"을
+명시해 범위를 화면에서 바로 알 수 있게 했다.
+
+### 검증
+
+- `test_api_ingest_and_analysis.py`: 신규 테스트 2개 —
+  `test_menu_weather_event_ranking_excludes_micam_hall_corner`(미캠회관
+  메뉴가 날씨유형 랭킹에서 빠지고 다른 코너 메뉴는 남는지),
+  `test_menu_season_ranking_excludes_micam_hall_corner`(같은 걸 계절
+  랭킹에서). `pytest -q` 전체 539개 통과.
+- `npm run build` 타입체크 통과.
+- `uvicorn`+`vite` 개발 서버로 Playwright 확인: 소제목이 "메인메뉴 ×
+  날씨유형 인기 랭킹 (중식 기준)"으로 뜨고, 실제 네트워크 요청에
+  `meal_type=중식`이 포함됨을 확인. 콘솔 에러 없음.

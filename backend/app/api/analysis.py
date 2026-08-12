@@ -54,6 +54,7 @@ from app.services.holidays import (
 )
 from app.services.llm_client import InternalLLMClient
 from app.services.master_data import (
+    MICAM_HALL_CORNER_NAME,
     PLACEHOLDER_MENU_NAMES,
     TAKE_OUT_CORNER_NAME,
     find_menu_by_name,
@@ -420,6 +421,10 @@ def _headcount_by_date_by_menu_bulk(
     패턴과 동일 스타일. meal_log.menu_id는 1인당 실제로 고른 메인메뉴 그
     자체라(부찬은 개인별로 기록되지 않음, menu_plan_performance와 동일 전제)
     weekly_menu_plan.menu_role을 조인할 필요가 없다.
+
+    §76: 이 헬퍼가 메인메뉴 × 날씨유형(§71)·계절(§72) 랭킹 두 곳에서 공용으로
+    쓰이므로, 여기서 미캠회관(전골) 코너를 제외하면 담당자 요청("미캠회관 코너도
+    제외해줘")이 두 랭킹 모두에 한 번에 적용된다.
     """
     period_start_dt = dt.datetime.combine(period_start, dt.time())
     period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
@@ -431,6 +436,12 @@ def _headcount_by_date_by_menu_bulk(
             MenuMaster.menu_name.in_(PLACEHOLDER_MENU_NAMES)
         )
     }
+    excluded_corner_ids = {
+        corner_id
+        for (corner_id,) in db.query(CornerMaster.corner_id).filter(
+            CornerMaster.corner_name == MICAM_HALL_CORNER_NAME
+        )
+    }
     query = db.query(MealLog.menu_id, date_col, func.count().label("cnt")).filter(
         MealLog.menu_id.isnot(None),
         MealLog.eaten_at >= period_start_dt,
@@ -440,6 +451,8 @@ def _headcount_by_date_by_menu_bulk(
         query = query.filter(MealLog.meal_type == meal_type)
     if excluded_menu_ids:
         query = query.filter(MealLog.menu_id.notin_(excluded_menu_ids))
+    if excluded_corner_ids:
+        query = query.filter(MealLog.corner_id.notin_(excluded_corner_ids))
 
     result: dict[int, dict[dt.date, int]] = {}
     for menu_id, stat_date, cnt in query.group_by(MealLog.menu_id, date_col).all():

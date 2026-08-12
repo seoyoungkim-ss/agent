@@ -3821,6 +3821,36 @@ def test_menu_weather_event_ranking_rejects_invalid_event(client):
     assert resp.status_code == 400
 
 
+def test_menu_weather_event_ranking_excludes_micam_hall_corner(client, db_session):
+    """§76: 담당자 요청("미캠회관 코너도 제외해줘") — 미캠회관(전골) 코너에서
+    나간 메뉴는 날씨유형 랭킹에서 빠지고, 다른 코너 메뉴는 그대로 남아야 한다."""
+    # 대조군이 이미 비 오는 날 5일치 DailyWeather를 시딩하므로, 미캠회관(전골)
+    # 메뉴도 같은 날짜에 얹어 중복 DailyWeather insert를 피한다.
+    _seed_menu_rain_vs_normal(client, db_session, "김치찌개", MONDAY, "K")
+
+    rain_days = [MONDAY + dt.timedelta(days=i) for i in range(5)]
+    emp_n = 0
+    for d in rain_days:
+        for _ in range(6):
+            _ingest_meal_log(
+                client, f"H{emp_n}", "맛남", eaten_date=d, menu_name="전골", corner_name="미캠회관(전골)"
+            )
+            emp_n += 1
+
+    resp = client.get(
+        "/api/analysis/menu-performance/weather-event-ranking",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=9)).isoformat(),
+            "event": "비",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["rows"]
+    assert all(r["menu_name"] != "전골" for r in rows)
+    assert any(r["menu_name"] == "김치찌개" for r in rows)
+
+
 def test_predicted_impact_includes_weather_reference_when_history_exists(client, db_session):
     plan_date = MONDAY + dt.timedelta(days=30)
     _seed_menu_rain_vs_normal(client, db_session, "김치찌개", MONDAY, "W")
@@ -3942,6 +3972,30 @@ def test_menu_season_ranking_surfaces_summer_favorite(client):
     # 전체 평균 4.0(여름 6명×5일 + 가을 2명×5일) 대비 여름은 +2.0
     assert row["diff_vs_overall"] == 2.0
     assert body["rows"][0]["menu_name"] == "냉면"
+
+
+def test_menu_season_ranking_excludes_micam_hall_corner(client):
+    """§76: 미캠회관(전골) 코너의 메뉴는 계절 랭킹에서도 빠져야 한다 —
+    날씨유형·계절 랭킹이 같은 집계 헬퍼(_headcount_by_date_by_menu_bulk)를
+    공유하므로 한 곳만 고쳐도 둘 다 적용된다."""
+    summer_days = [dt.date(2026, 7, 1) + dt.timedelta(days=i) for i in range(5)]
+    emp_n = 0
+    for d in summer_days:
+        for _ in range(6):
+            _ingest_meal_log(
+                client, f"J{emp_n}", "맛남", eaten_date=d, menu_name="전골", corner_name="미캠회관(전골)"
+            )
+            emp_n += 1
+    _seed_menu_summer_vs_fall(client, "냉면", "N")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/season-ranking",
+        params={"period_start": "2026-07-01", "period_end": "2026-10-05", "season": "여름"},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["rows"]
+    assert all(r["menu_name"] != "전골" for r in rows)
+    assert any(r["menu_name"] == "냉면" for r in rows)
 
 
 def test_menu_season_ranking_flags_low_sample(client):

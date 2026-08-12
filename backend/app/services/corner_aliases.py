@@ -19,6 +19,11 @@ SNAP_SNACK_CORNER_NAME = "스냅스낵"
 # 집계되던 문제(2026-08 실사용 신고) — 하나로 합친다.
 SNAP_SNACK_ALIASES = {"스냅스낵", "스냅스넥"}
 
+# §76(2026-08): 담당자 요청으로 메인메뉴 날씨유형·계절 랭킹 집계에서 제외하는
+# 코너 — 별칭이 따로 없어(항상 "미캠회관(전골)" 한 표기로만 들어옴) 알리아스
+# 그룹 없이 이름만 둔다.
+MICAM_HALL_CORNER_NAME = "미캠회관(전골)"
+
 CORNER_ALIAS_GROUPS = (
     (TAKE_OUT_CORNER_NAME, TAKE_OUT_ALIASES),
     (SNAP_SNACK_CORNER_NAME, SNAP_SNACK_ALIASES),
