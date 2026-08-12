@@ -5206,3 +5206,111 @@ import)에 뒀다. 프론트의 `SHARE_EXCLUDED_CORNER_NAMES`(점유율 차트 �
 - `uvicorn`+`vite` 개발 서버로 Playwright 확인: 소제목이 "메인메뉴 ×
   날씨유형 인기 랭킹 (중식 기준)"으로 뜨고, 실제 네트워크 요청에
   `meal_type=중식`이 포함됨을 확인. 콘솔 에러 없음.
+
+## §77. 날씨 카드 이동 + 하이라이트 LLM 프롬프트 개선 + 주간 식단표 규칙 검증 (2026-08)
+
+담당자 요청 세 가지: (1) "날씨에 따른 식수변화는 메뉴편성운영 탭 내의
+시뮬레이션으로 따로 빼는 게 좋을 듯", (2) "메뉴 하이라이트에서 LLM이
+만족도 하락 원인을 잘 특정 못 한다 — 프롬프트를 고쳐서 퀄리티를 올릴
+수 없냐", (3, 대화 중 추가) 주간 식단표가 4개 기준(해장/면류/매운빨간
+국물/최근 저조 식수 재편성)을 지키는지 자동으로 경고해 달라는 새 기능.
+
+### A. 날씨 카드 이동
+
+`WeatherCorrelationSection`(§75에서 타임라인으로 재설계한 카드)이
+"현황" 탭(`HomePage.tsx`)에 있었는데, 2026-08 개편 때 "시뮬레이션" 탭
+자체가 이미 삭제됐고(§47.2) 그 시절 유일한 기능("사내 행사" 토글)은
+"금주 예상 식수" 카드로 흡수됐던 상태라 "메뉴 편성·운영" 탭엔 시뮬레이션
+관련 섹션이 전혀 없었다. `HomePage.tsx`에서 import·렌더를 제거하고
+`MenuPlanningPage`(`AnalysisPage.tsx`) 맨 끝으로 옮겼다 — 카드 자체
+제목이 이미 있어 별도 "시뮬레이션" 래퍼 헤더는 만들지 않았다(이 탭의
+다른 섹션들도 헤더 없이 Card만 나열하는 방식이라 일관성 유지).
+
+### B. 하이라이트 LLM 프롬프트 — 실제 코멘트 + 부찬 조합 배선
+
+`llm_analysis.py`의 `_build_menu_trend_prompt`는 이미 `prior_sides`/
+`recent_sides`(부찬 조합)와 `competing_menus`(같은 날 다른 코너 인기
+메뉴) 필드를 프롬프트에 넣을 준비가 돼 있었는데, 유일한 호출부
+`refresh_llm_analyses`가 이 필드들을 **한 번도 채운 적이 없었다** —
+실제로 LLM에 넘어가던 사실은 메뉴명·직전/최근 주 점수 2개·날짜 2개·월
+2개뿐이었다. "왜 바뀌었는지"를 판단하기엔 원래 너무 얇은 사실 집합이라,
+LLM의 "특정하기 어렵다" 답변은 오히려 정직한 반응이었던 셈이다.
+
+새 헬퍼 두 개를 추가해 `facts`를 실제로 채웠다:
+- `_recent_comments_for_menu(db, menu_id, week_monday, limit=3)` —
+  `dashboard.py`의 `GET /menu-comments/{menu_name}`과 같은 쿼리 패턴
+  (menu_id + `comment IS NOT NULL`)을 그 주(월~일) 범위로 좁혀 재사용.
+  직전/최근 주 각각 호출해 `prior_comments`/`recent_comments`를 채운다
+  — 점수만으로는 안 보이는 "왜"의 가장 직접적인 근거.
+- `_side_dishes_for_menu_week(db, menu_id, week_monday)` — 그 메뉴가
+  MAIN으로 나온 슬롯(plan_date, corner_id, meal_type)을 찾아 같은
+  슬롯의 SIDE 메뉴명을 모은다 — 이미 프롬프트가 기대하던 `prior_sides`/
+  `recent_sides`를 이제 실제로 채운다.
+
+`_build_menu_trend_prompt`에 코멘트 라인과 "직원 코멘트가 있다면 우선
+근거로 삼으세요" 안내를 추가했다. 거짓을 지어내지 말라는 기존
+가드레일은 그대로 뒀다 — 코멘트가 진짜 없는 메뉴는 여전히 "특정하기
+어렵다"가 정직한 답일 수 있다. `competing_menus`는 구현 비용 대비
+효용이 낮고 위 둘과 정보가 겹쳐 이번 라운드에서는 배선하지 않았다(필드
+자체는 남겨둠). 캐시(`LlmAnalysisCache`)는 스키마 변경이 없어 새벽
+배치가 돌면 최신 `created_at`으로 자연 교체된다.
+
+### C. 주간 식단표 규칙 검증 (신규 기능)
+
+담당자가 준 4개 기준(주중 기준):
+① 해장 메뉴 최소 1개, ② 면류(라면 포함) 4개 초과 편성 금지, ③ 매운
+(빨간국물) 메뉴 4개 초과 편성 금지, ④ 최근 식수 200식 이하 메뉴는
+재편성 금지(스냅스낵/그린미트/미캠회관(전골) 코너는 예외).
+
+`backend/app/services/menu_plan_rules.py`(신규, `weather_event.py`/
+`season.py`와 같은 순수함수 스타일)가 ①~③을 판정한다. "면류"·"해장"은
+food_vector 차원에 없어 새 키워드 목록(`_NOODLE_KEYWORDS`/
+`_HANGOVER_KEYWORDS`)을 만들었고, "매운(빨간국물)"은 새 목록을 또
+만들지 않고 `food_vector_tagging.py`에서 새로 뽑아낸 공개 헬퍼
+`menu_matches_dimension(menu_name, dimension)`으로 spicy ∩ soup_based
+판정을 재사용했다(기존 `tag_food_vector_from_name`도 이 헬퍼를 쓰도록
+리팩터— 로직 중복 제거). ①~③은 물리적으로 "그 주에 뭐가 나갔는지"를
+보는 것이라 메인/부찬/건강가든 역할 무관하게 전부 스캔한다(§132의
+"건강가든은 코너 무관" 원칙과 동일).
+
+④는 `analysis.py`의 새 헬퍼 `_recent_avg_headcount_by_menu`가 처리 —
+MAIN 역할만(부찬은 취식 기록이 없어 식수를 알 수 없다), 예외 코너가
+아닌 메뉴에 대해 이 레포의 관례인 `_HISTORY_WINDOW_DAYS=180` 창으로
+"그 메뉴가 실제로 나간 날짜별 식수 평균"을 계산해 200 이하면 위반으로
+담는다. 이력이 아예 없는 메뉴(진짜 신메뉴)는 판단 근거가 없으니 조용히
+건너뛴다. 예외 코너 3개(스냅스낵/그린미트/미캠회관(전골))는
+`corner_aliases.py`의 새 상수 `LOW_HEADCOUNT_EXEMPT_CORNER_NAMES`로
+한 곳에 묶었다 — §76에서 미캠회관 제외를 다룰 때와 같은 성격의 요청이
+또 나와, 이참에 정리했다.
+
+신규 엔드포인트 `GET /analysis/weekly-menu/plan-rule-check`는
+`weekly-menu/combination-check`와 똑같이 `period_start`/`period_end`를
+받는다 — 프론트 `WeeklyMenuReviewTab`이 이미 같은 파라미터로 그 주
+슬롯을 조회하므로, 화면에 보이는 주와 규칙검증 결과가 항상 일치한다.
+응답은 규칙별 `{ok, count, limit, matches}`(해장/면류/매운빨간국물)와
+`{ok, violations: [...]}`(저조 식수 재편성)이다.
+
+화면은 `WeeklyMenuReviewTab`의 날짜 네비게이터 바로 아래에 "주간 편성
+규칙 검증" 패널을 추가 — 4개 규칙을 `Badge tone="good"/"critical"`
+한 줄씩(기존 `ROTATION_FLAG_TONE` 관례 재사용) 보여주고, 위반이 있으면
+해당 메뉴 목록을 캡션으로 펼친다. 이번 라운드는 키워드 기반 자동 판정
+만 넣고 `MenuMaster`에 수동 오버라이드 컬럼은 추가하지 않았다 — "경고"
+기능이지 완벽한 분류 체계가 필요한 건 아니라서, 오분류가 나오면 키워드
+목록만 조정하면 된다(필요해지면 다음 라운드에서 `new_menu_override`와
+같은 패턴으로 추가).
+
+### 검증
+
+- `backend/tests/test_menu_plan_rules.py`(신규): 키워드 판정 3종 +
+  `check_*_rule` 경계값(정확히 4개=통과, 5개=위반, 해장 0개=위반) 9개
+  유닛 테스트.
+- `test_api_ingest_and_analysis.py`: 신규 엔드포인트 3개 테스트 — 면류
+  초과+해장 없음 위반, 준수하는 주, 저조 식수 재편성이 일반 코너는
+  걸리고 미캠회관(전골)은 빠지는지.
+- `test_llm_analysis.py`: 신규 코멘트/부찬 fact-수집 헬퍼 2개 + 프롬프트
+  반영 여부 5개 테스트.
+- `pytest -q` 전체 556개 통과(539 + 신규 17개).
+- `npm run build` 타입체크 통과.
+- `uvicorn`+`vite` 개발 서버로 Playwright 확인: 현황 탭엔 날씨 카드가
+  없고 메뉴 편성·운영 탭 맨 아래에 있음, 주간 식단표 관리 화면 상단에
+  규칙검증 패널이 4개 배지와 함께 뜸. 콘솔 에러 없음.

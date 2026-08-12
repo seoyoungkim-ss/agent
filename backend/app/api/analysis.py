@@ -39,6 +39,7 @@ from app.services.corner_core_layer import (
     classify_corner_core_layer,
     classify_menu_controlled_corner_preference,
 )
+from app.services.corner_aliases import LOW_HEADCOUNT_EXEMPT_CORNER_NAMES
 from app.services.food_vector import (
     FOOD_VECTOR_DIMENSIONS,
     FOOD_VECTOR_LABELS_KO,
@@ -94,6 +95,12 @@ from app.services.menu_plan_analytics import (
     classify_planning_action,
     compute_repertoire,
     median_or_zero,
+)
+from app.services.menu_plan_rules import (
+    MenuPlanSlotItem,
+    check_hangover_rule,
+    check_noodle_rule,
+    check_spicy_red_broth_rule,
 )
 from app.services.menu_rotation import (
     MIN_ROTATION_GAP_DAYS,
@@ -1702,6 +1709,115 @@ def weekly_menu_combination_check(
         "period_end": period_end.isoformat(),
         "slots": results,
         "untagged_menu_count": len(untagged_all),
+    }
+
+
+def _recent_avg_headcount_by_menu(
+    db: Session, menu_ids: set[int], period_start: dt.date, period_end: dt.date
+) -> dict[int, float]:
+    """§77: 지정된 메뉴들이 최근 실제로 나간 날짜별 식수(meal_log 기준) 평균 —
+    `menu_plan_performance`의 headcount_per_plan과 같은 개념(그 메뉴가 나간
+    날마다 몇 명이 먹었는지 평균)이지만, 특정 메뉴 집합만 필요해 그 엔드포인트
+    전체를 재사용하지 않고 가벼운 쿼리로 직접 계산한다."""
+    if not menu_ids:
+        return {}
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    date_col = func.date(MealLog.eaten_at).label("stat_date")
+    rows = (
+        db.query(MealLog.menu_id, date_col, func.count().label("cnt"))
+        .filter(
+            MealLog.menu_id.in_(menu_ids),
+            MealLog.eaten_at >= period_start_dt,
+            MealLog.eaten_at < period_end_exclusive,
+        )
+        .group_by(MealLog.menu_id, date_col)
+        .all()
+    )
+    by_menu: dict[int, list[int]] = {}
+    for menu_id, _stat_date, cnt in rows:
+        by_menu.setdefault(menu_id, []).append(cnt)
+    return {menu_id: statistics.fmean(counts) for menu_id, counts in by_menu.items()}
+
+
+@router.get("/weekly-menu/plan-rule-check")
+def weekly_menu_plan_rule_check(
+    period_start: dt.date,
+    period_end: dt.date,
+    db: Session = Depends(get_db),
+):
+    """§77(2026-08): 담당자가 준 4개 기준으로 그 주 편성을 검증해 경고한다.
+
+    ①해장 메뉴 최소 1개, ②면류(라면 포함) 4개 초과 금지, ③매운(빨간국물)
+    4개 초과 금지는 `menu_plan_rules.py`의 순수 함수가 판정한다(메인/부찬/
+    건강가든 역할 무관 — 물리적으로 그 주에 뭐가 나갔는지 보는 것이라서).
+
+    ④최근 식수 200식 이하 메뉴는 재편성 금지는 여기서 직접 처리한다 — MAIN
+    역할만(부찬은 취식 기록에 없어 식수를 알 수 없다), 예외 코너
+    (`LOW_HEADCOUNT_EXEMPT_CORNER_NAMES`)는 대상에서 뺀다. 이력이 아예 없는
+    메뉴(진짜 신메뉴)는 판단 근거가 없으니 조용히 건너뛴다(다른 곳의 신메뉴
+    예외 관례와 동일).
+    """
+    plan_rows = (
+        db.query(
+            WeeklyMenuPlan.menu_id,
+            WeeklyMenuPlan.menu_role,
+            WeeklyMenuPlan.plan_date,
+            MenuMaster.menu_name,
+            CornerMaster.corner_name,
+        )
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
+        .filter(WeeklyMenuPlan.plan_date.between(period_start, period_end))
+        .all()
+    )
+
+    slots = [
+        MenuPlanSlotItem(menu_name=menu_name, corner_name=corner_name, plan_date=plan_date)
+        for _menu_id, _menu_role, plan_date, menu_name, corner_name in plan_rows
+        if menu_name not in PLACEHOLDER_MENU_NAMES
+    ]
+    hangover = check_hangover_rule(slots)
+    noodle = check_noodle_rule(slots)
+    spicy_red_broth = check_spicy_red_broth_rule(slots)
+
+    main_candidates = {
+        (menu_id, menu_name, corner_name)
+        for menu_id, menu_role, _plan_date, menu_name, corner_name in plan_rows
+        if menu_role == MenuRole.MAIN
+        and menu_name not in PLACEHOLDER_MENU_NAMES
+        and corner_name not in LOW_HEADCOUNT_EXEMPT_CORNER_NAMES
+    }
+    history_end = period_start - dt.timedelta(days=1)
+    history_start = history_end - dt.timedelta(days=_HISTORY_WINDOW_DAYS)
+    avg_by_menu = _recent_avg_headcount_by_menu(
+        db, {menu_id for menu_id, _menu_name, _corner_name in main_candidates}, history_start, history_end
+    )
+
+    low_headcount_violations = []
+    for menu_id, menu_name, corner_name in main_candidates:
+        avg = avg_by_menu.get(menu_id)
+        if avg is None:
+            continue
+        if avg <= 200:
+            low_headcount_violations.append(
+                {"menu_name": menu_name, "corner_name": corner_name, "recent_avg_headcount": round(avg, 1)}
+            )
+    low_headcount_violations.sort(key=lambda v: v["recent_avg_headcount"])
+
+    def _rule_payload(result):
+        return {"ok": result.ok, "count": result.count, "limit": result.limit, "matches": result.matches}
+
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "hangover": _rule_payload(hangover),
+        "noodle": _rule_payload(noodle),
+        "spicy_red_broth": _rule_payload(spicy_red_broth),
+        "low_headcount_reuse": {
+            "ok": len(low_headcount_violations) == 0,
+            "violations": low_headcount_violations,
+        },
     }
 
 

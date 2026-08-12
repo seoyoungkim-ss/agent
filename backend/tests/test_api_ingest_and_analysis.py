@@ -4017,3 +4017,81 @@ def test_menu_season_ranking_rejects_invalid_season(client):
         params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "season": "장마"},
     )
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# §77: 주간 식단표 규칙 검증 — 담당자가 준 4개 기준(해장/면류/매운빨간국물/
+# 최근 저조 식수 재편성 금지)이 API 레벨에서 정확히 판정되는지 확인한다.
+# ---------------------------------------------------------------------------
+
+
+def test_weekly_menu_plan_rule_check_flags_noodle_overage_and_missing_hangover(client):
+    noodle_menus = ["라면", "우동", "짜장면", "짬뽕", "냉면"]
+    rows = [
+        _plan_row(MONDAY + dt.timedelta(days=i % 5), name, "메인")
+        for i, name in enumerate(noodle_menus)
+    ]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/plan-rule-check",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=4)).isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["hangover"]["ok"] is False
+    assert body["hangover"]["count"] == 0
+    assert body["noodle"]["ok"] is False
+    assert body["noodle"]["count"] == 5
+    assert body["noodle"]["limit"] == 4
+    assert body["spicy_red_broth"]["ok"] is True
+
+
+def test_weekly_menu_plan_rule_check_passes_with_hangover_and_low_noodle_count(client):
+    rows = [_plan_row(MONDAY, "황태해장국", "메인")]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/plan-rule-check",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=4)).isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["hangover"]["ok"] is True
+    assert body["noodle"]["ok"] is True
+    assert body["spicy_red_broth"]["ok"] is True
+    assert body["low_headcount_reuse"]["ok"] is True
+
+
+def test_weekly_menu_plan_rule_check_flags_low_headcount_reuse_except_exempt_corners(client):
+    """최근 저조 식수(200식 이하) 메뉴는 재편성 위반으로 뜨지만, 미캠회관(전골)
+    같은 예외 코너 메뉴는 같은 조건이어도 위반 목록에서 빠져야 한다."""
+    history_end = MONDAY - dt.timedelta(days=1)
+    history_days = [history_end - dt.timedelta(days=i) for i in range(5)]
+
+    for i, d in enumerate(history_days):
+        _ingest_meal_log(client, f"L{i}", "맛남", eaten_date=d, menu_name="고기전골", corner_name="한식")
+    for i, d in enumerate(history_days):
+        _ingest_meal_log(
+            client, f"M{i}", "맛남", eaten_date=d, menu_name="미캠전골", corner_name="미캠회관(전골)"
+        )
+
+    rows = [
+        _plan_row(MONDAY, "고기전골", "메인", corner_name="한식"),
+        _plan_row(MONDAY, "미캠전골", "메인", corner_name="미캠회관(전골)"),
+    ]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/plan-rule-check",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=4)).isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["low_headcount_reuse"]["ok"] is False
+    names = {v["menu_name"] for v in body["low_headcount_reuse"]["violations"]}
+    assert "고기전골" in names
+    assert "미캠전골" not in names

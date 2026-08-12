@@ -496,6 +496,30 @@ export interface CombinationCheckResponse {
   untagged_menu_count: number;
 }
 
+// §77: 주간 식단표 규칙 검증 — 해장/면류/매운(빨간국물)은 한도(limit)와 실제
+// 편성 건수(count), 최근 식수 200식 이하 재편성은 위반 메뉴 목록으로 온다.
+export interface MenuPlanRuleCheckResult {
+  ok: boolean;
+  count: number;
+  limit: number | null;
+  matches: string[];
+}
+
+export interface LowHeadcountViolation {
+  menu_name: string;
+  corner_name: string;
+  recent_avg_headcount: number;
+}
+
+export interface WeeklyMenuPlanRuleCheckResponse {
+  period_start: string;
+  period_end: string;
+  hangover: MenuPlanRuleCheckResult;
+  noodle: MenuPlanRuleCheckResult;
+  spicy_red_broth: MenuPlanRuleCheckResult;
+  low_headcount_reuse: { ok: boolean; violations: LowHeadcountViolation[] };
+}
+
 export interface ComboSpreadEntry {
   sides: (string | null)[];
   avg_satisfaction: number | null;
@@ -812,6 +836,12 @@ export const api = {
 
   weeklyMenuCombinationCheck: (params: { period_start: string; period_end: string }) =>
     request<CombinationCheckResponse>(`/analysis/weekly-menu/combination-check${qs(params)}`),
+
+  // §77: 담당자가 준 4개 기준(해장/면류/매운빨간국물/최근 저조 식수 재편성)으로
+  // 그 주 편성을 검증해 경고한다. combination-check와 같은 period_start/end로
+  // 호출해 화면에 보이는 주와 항상 일치시킨다.
+  weeklyMenuPlanRuleCheck: (params: { period_start: string; period_end: string }) =>
+    request<WeeklyMenuPlanRuleCheckResponse>(`/analysis/weekly-menu/plan-rule-check${qs(params)}`),
 
   menuCombinationSpreadRanking: (params: {
     period_start: string;

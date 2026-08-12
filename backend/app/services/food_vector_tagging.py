@@ -60,20 +60,31 @@ _KEYWORD_RULES: dict[str, tuple[str, ...]] = {
 _SOUP_SUFFIXES = ("국", "탕")
 
 
+def menu_matches_dimension(menu_name: str, dimension: str) -> bool:
+    """단일 메뉴명이 food_vector 차원 키워드(예: spicy/soup_based)에 매칭되는지.
+
+    `tag_food_vector_from_name`의 차원별 판정 로직을 뽑아낸 것 — 벡터 전체가
+    아니라 차원 하나만 필요한 호출부(§77 `menu_plan_rules.py`의 "매운(빨간국물)"
+    = spicy ∩ soup_based 판정)를 위해 분리했다.
+    """
+    menu_name = strip_origin_annotation(menu_name)
+    matched = any(kw in menu_name for kw in _KEYWORD_RULES.get(dimension, ()))
+    if dimension == "soup_based" and not matched:
+        matched = menu_name.endswith(_SOUP_SUFFIXES)
+    return matched
+
+
 def tag_food_vector_from_name(menu_name: str) -> tuple[list[float], bool]:
     """returns (vector, matched_any).
 
     matched_any=False면 어떤 규칙도 안 걸렸다는 뜻 — 호출부는 이 경우 food_vector를
     채우지 말고(NULL 유지) LLM/수동 태깅을 기다려야 한다.
     """
-    # 원산지 주석이 이름에 남아 있어도 태깅을 오염시키지 않도록 먼저 떼어낸다.
-    menu_name = strip_origin_annotation(menu_name)
+    # 원산지 주석 제거는 menu_matches_dimension 안에서 매 차원마다 처리한다.
     vector: list[float] = []
     matched_any = False
     for dim in FOOD_VECTOR_DIMENSIONS:
-        matched = any(kw in menu_name for kw in _KEYWORD_RULES.get(dim, ()))
-        if dim == "soup_based" and not matched:
-            matched = menu_name.endswith(_SOUP_SUFFIXES)
+        matched = menu_matches_dimension(menu_name, dim)
         if matched:
             vector.append(_MATCH_SCORE)
             matched_any = True

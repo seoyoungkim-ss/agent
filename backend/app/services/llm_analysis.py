@@ -23,6 +23,9 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from app.models.enums import MenuRole
+from app.models.logs import MealLog, WeeklyMenuPlan
+from app.models.master import MenuMaster
 from app.models.stats import LlmAnalysisCache
 from app.services.llm_client import InternalLLMClient
 
@@ -82,6 +85,63 @@ def save_analysis(
 # ---------------------------------------------------------------------------
 
 
+def _recent_comments_for_menu(db: Session, menu_id: int, week_monday: dt.date, limit: int = 3) -> list[str]:
+    """§77: 그 메뉴가 나온 주(월~일)의 실제 직원 코멘트 몇 개 — `dashboard.py`의
+    `menu_comments` 엔드포인트와 같은 쿼리 패턴(menu_id + comment IS NOT NULL)을
+    한 주 범위로 좁혀 재사용한다. 점수 변화만으로는 "왜"가 안 보이지만, 실제
+    적힌 불만/칭찬은 LLM이 원인을 특정할 진짜 근거가 된다.
+    """
+    week_start_dt = dt.datetime.combine(week_monday, dt.time())
+    week_end_dt = dt.datetime.combine(week_monday + dt.timedelta(days=7), dt.time())
+    rows = (
+        db.query(MealLog.comment)
+        .filter(
+            MealLog.menu_id == menu_id,
+            MealLog.comment.isnot(None),
+            MealLog.eaten_at >= week_start_dt,
+            MealLog.eaten_at < week_end_dt,
+        )
+        .order_by(MealLog.eaten_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [comment for (comment,) in rows if comment and comment.strip()]
+
+
+def _side_dishes_for_menu_week(db: Session, menu_id: int, week_monday: dt.date) -> str | None:
+    """§77: 이 메뉴가 그 주에 MAIN으로 나온 슬롯(날짜·코너·식사구분)을 찾아,
+    같은 슬롯의 SIDE 메뉴명을 모은다. 한 주에 여러 슬롯이 있어도 첫 슬롯만
+    본다 — 대부분 주 1회 편성이라 충분하고, 여러 슬롯을 다 모으면 프롬프트가
+    장황해진다."""
+    week_end = week_monday + dt.timedelta(days=6)
+    main_slot = (
+        db.query(WeeklyMenuPlan.plan_date, WeeklyMenuPlan.corner_id, WeeklyMenuPlan.meal_type)
+        .filter(
+            WeeklyMenuPlan.menu_id == menu_id,
+            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+            WeeklyMenuPlan.plan_date.between(week_monday, week_end),
+        )
+        .order_by(WeeklyMenuPlan.plan_date)
+        .first()
+    )
+    if main_slot is None:
+        return None
+    plan_date, corner_id, meal_type = main_slot
+    side_rows = (
+        db.query(MenuMaster.menu_name)
+        .join(WeeklyMenuPlan, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .filter(
+            WeeklyMenuPlan.plan_date == plan_date,
+            WeeklyMenuPlan.corner_id == corner_id,
+            WeeklyMenuPlan.meal_type == meal_type,
+            WeeklyMenuPlan.menu_role == MenuRole.SIDE,
+        )
+        .all()
+    )
+    names = [name for (name,) in side_rows]
+    return ", ".join(names) if names else None
+
+
 def _build_menu_trend_prompt(facts: dict) -> str:
     direction = "올랐" if facts["delta"] > 0 else "떨어졌"
     lines = [
@@ -96,10 +156,18 @@ def _build_menu_trend_prompt(facts: dict) -> str:
         )
     if facts.get("competing_menus"):
         lines.append(f"- 같은 날 다른 코너의 인기 메뉴: {', '.join(facts['competing_menus'])}")
+    # §77: 점수·날짜만으로는 "왜"를 알 수 없어 LLM이 늘 "특정하기 어렵다"고만
+    # 답하던 문제 — 실제 직원 코멘트를 근거로 준다.
+    if facts.get("recent_comments") or facts.get("prior_comments"):
+        recent_c = "; ".join(facts.get("recent_comments") or []) or "없음"
+        prior_c = "; ".join(facts.get("prior_comments") or []) or "없음"
+        lines.append(f"- 최근 주 직원 코멘트: {recent_c}")
+        lines.append(f"- 이전 주 직원 코멘트: {prior_c}")
     lines.append(f"- 계절: 이전 {facts['prior_month']}월 → 최근 {facts['recent_month']}월")
     lines.append("")
     lines.append(
         "위 사실만 근거로 만족도가 왜 변했는지 한국어 두 문장 이내로 설명하세요. "
+        "직원 코멘트가 있다면 그 내용을 우선 근거로 삼으세요. "
         "사실에 없는 내용은 절대 지어내지 마세요. 근거가 부족하면 "
         "'뚜렷한 원인을 특정하기 어렵다'고 쓰세요."
     )
@@ -120,6 +188,8 @@ def _fallback_menu_trend_summary(facts: dict) -> str:
             parts.append("부찬 조합은 그대로였습니다.")
     if facts["prior_month"] != facts["recent_month"]:
         parts.append(f"{facts['prior_month']}월과 {facts['recent_month']}월 사이의 변화입니다.")
+    if facts.get("recent_comments"):
+        parts.append(f"직원 코멘트 {len(facts['recent_comments'])}건 있음(자동 요약 미설정이라 직접 확인 필요).")
     parts.append("(자동 분석 미설정 — 사실만 정리했습니다)")
     return " ".join(parts)
 
@@ -203,6 +273,9 @@ async def refresh_llm_analyses(
         # 배치의 period_*는 "이 분석이 언제 기준인지" 기록용으로만 넘긴다.
         highlights = menu_highlights(db=db)
         for entry in [*highlights.get("rising", []), *highlights.get("falling", [])]:
+            menu_id = entry["menu_id"]
+            prior_week_date = dt.date.fromisoformat(entry["prior_week"])
+            recent_week_date = dt.date.fromisoformat(entry["recent_week"])
             facts = {
                 "menu_name": entry["menu_name"],
                 "prior_week": entry["prior_week"],
@@ -212,6 +285,12 @@ async def refresh_llm_analyses(
                 "delta": entry["delta"],
                 "prior_month": int(entry["prior_week"][5:7]),
                 "recent_month": int(entry["recent_week"][5:7]),
+                # §77: 이전엔 이 두 필드가 프롬프트에서만 기대되고 한 번도 채워진
+                # 적이 없어(LLM이 "특정하기 어렵다"고만 답한 원인) — 이제 실제로 채운다.
+                "prior_sides": _side_dishes_for_menu_week(db, menu_id, prior_week_date),
+                "recent_sides": _side_dishes_for_menu_week(db, menu_id, recent_week_date),
+                "prior_comments": _recent_comments_for_menu(db, menu_id, prior_week_date),
+                "recent_comments": _recent_comments_for_menu(db, menu_id, recent_week_date),
             }
             summary = await summarize_menu_trend(llm_client, facts)
             save_analysis(

@@ -2014,6 +2014,12 @@ function WeeklyMenuReviewTab() {
     queryKey: ["weekly-menu-feedback", selectedMonday],
     queryFn: () => api.weeklyMenuFeedback({ period_start: selectedMonday, period_end: sunday }),
   });
+  // §77: 담당자가 준 4개 편성 기준 — combination-check와 같은 기간으로 호출해
+  // 화면에 보이는 주와 항상 일치시킨다.
+  const ruleCheckQuery = useQuery({
+    queryKey: ["weekly-menu-plan-rule-check", selectedMonday],
+    queryFn: () => api.weeklyMenuPlanRuleCheck({ period_start: selectedMonday, period_end: sunday }),
+  });
   const updateRole = useMutation({
     mutationFn: (params: { planId: number; menuRole: "메인" | "부찬" }) =>
       api.updateWeeklyMenuRole(params.planId, params.menuRole),
@@ -2164,6 +2170,49 @@ function WeeklyMenuReviewTab() {
             {compareAll.isPending ? "예측 계산 중..." : "전체 예측 비교"}
           </Button>
         </div>
+
+        {ruleCheckQuery.data && (
+          <div className="mb-4 rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
+            <h3 className="mb-2 text-[13px] font-semibold">주간 편성 규칙 검증</h3>
+            <div className="flex flex-wrap gap-x-6 gap-y-1.5 text-[13px]">
+              <Badge
+                tone={ruleCheckQuery.data.hangover.ok ? "good" : "critical"}
+                label={`해장 메뉴 ${ruleCheckQuery.data.hangover.count}개 (최소 1개)`}
+              />
+              <Badge
+                tone={ruleCheckQuery.data.noodle.ok ? "good" : "critical"}
+                label={`면류 ${ruleCheckQuery.data.noodle.count}개 (최대 ${ruleCheckQuery.data.noodle.limit}개)`}
+              />
+              <Badge
+                tone={ruleCheckQuery.data.spicy_red_broth.ok ? "good" : "critical"}
+                label={`매운(빨간국물) ${ruleCheckQuery.data.spicy_red_broth.count}개 (최대 ${ruleCheckQuery.data.spicy_red_broth.limit}개)`}
+              />
+              <Badge
+                tone={ruleCheckQuery.data.low_headcount_reuse.ok ? "good" : "critical"}
+                label={`최근 저조 식수(200식 이하) 재편성 ${ruleCheckQuery.data.low_headcount_reuse.violations.length}건`}
+              />
+            </div>
+            {!ruleCheckQuery.data.noodle.ok && (
+              <p className="mt-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+                면류: {ruleCheckQuery.data.noodle.matches.join(", ")}
+              </p>
+            )}
+            {!ruleCheckQuery.data.spicy_red_broth.ok && (
+              <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                매운(빨간국물): {ruleCheckQuery.data.spicy_red_broth.matches.join(", ")}
+              </p>
+            )}
+            {!ruleCheckQuery.data.low_headcount_reuse.ok && (
+              <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                재편성 권장 안 함:{" "}
+                {ruleCheckQuery.data.low_headcount_reuse.violations
+                  .map((v) => `${v.menu_name}(${v.corner_name}, 최근 평균 ${v.recent_avg_headcount}식)`)
+                  .join(", ")}
+              </p>
+            )}
+          </div>
+        )}
+
         {slotsQuery.isLoading && <LoadingState />}
         {slotsQuery.isError && <ErrorState error={slotsQuery.error} />}
         {compareAll.isError && <ErrorState error={compareAll.error} />}
@@ -3991,6 +4040,9 @@ export function MenuPlanningPage() {
       <MenuComboSection />
       <MenuRepertoireSection />
       <MenuPairAnalysisSection corners={cornersQuery.data ?? []} />
+      {/* §77: 담당자 요청으로 "현황" 탭에서 이동 — 날씨 배수(v0 가정치)를 실측으로
+          검증하는 참고 화면이라 메뉴 편성 판단과 같은 맥락에 두는 게 낫다는 판단. */}
+      <WeatherCorrelationSection />
     </div>
   );
 }

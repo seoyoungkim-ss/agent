@@ -24,6 +24,12 @@ SNAP_SNACK_ALIASES = {"스냅스낵", "스냅스넥"}
 # 그룹 없이 이름만 둔다.
 MICAM_HALL_CORNER_NAME = "미캠회관(전골)"
 
+# §77(2026-08): 배식 성격상 식수가 원래 적어도 정상인 코너들(스낵/다이어트식/
+# 전골 특성) — 주간 식단표 규칙검증의 "최근 식수 200식 이하 메뉴는 재편성
+# 금지" 규칙에서 예외로 둔다. §76에서 미캠회관 제외를 다룰 때와 같은 성격의
+# 요청이 또 나와, 이참에 세 코너를 한 곳에 묶는다.
+LOW_HEADCOUNT_EXEMPT_CORNER_NAMES = frozenset({SNAP_SNACK_CORNER_NAME, "그린미트", MICAM_HALL_CORNER_NAME})
+
 CORNER_ALIAS_GROUPS = (
     (TAKE_OUT_CORNER_NAME, TAKE_OUT_ALIASES),
     (SNAP_SNACK_CORNER_NAME, SNAP_SNACK_ALIASES),

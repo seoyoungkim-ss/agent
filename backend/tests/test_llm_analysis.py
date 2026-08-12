@@ -9,18 +9,24 @@ import datetime as dt
 
 import pytest
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.services.improvement_points import build_planning_point, collect_planning_issues
 from app.services.llm_analysis import (
     KIND_MENU_TREND,
+    _build_menu_trend_prompt,
     _fallback_menu_trend_summary,
     _fallback_planning_notice,
+    _recent_comments_for_menu,
+    _side_dishes_for_menu_week,
     get_cached,
     save_analysis,
     summarize_menu_trend,
     summarize_planning_notice,
 )
 from app.services.llm_client import InternalLLMClient
+
+MONDAY = dt.date(2026, 7, 20)
+AUTH_HEADERS = {"Authorization": f"Bearer {get_settings().ingest_api_token}"}
 
 
 def _facts(delta: float = 0.24) -> dict:
@@ -169,3 +175,97 @@ def test_build_planning_point_falls_back_to_raw_facts():
     point = build_planning_point(["A", "B"], None)
     assert point is not None
     assert "A" in point.detail and "B" in point.detail
+
+
+# ---------------------------------------------------------------------------
+# §77: 하이라이트 프롬프트 — 실제 코멘트 + 부찬 조합 배선
+#
+# 이전엔 prior_sides/recent_sides/competing_menus가 프롬프트에서만 기대되고
+# 한 번도 채워진 적이 없어(refresh_llm_analyses가 6개 필드만 넘김) LLM이 늘
+# "특정하기 어렵다"고만 답했다. 실제 코멘트를 근거로 주면 프롬프트에 반영되고,
+# 새 fact-수집 헬퍼 두 개가 DB에서 정확히 가져오는지 확인한다.
+# ---------------------------------------------------------------------------
+
+
+def test_build_menu_trend_prompt_includes_comments_when_present():
+    facts = _facts()
+    facts["recent_comments"] = ["짜서 별로였어요", "양이 줄었어요"]
+    facts["prior_comments"] = []
+    prompt = _build_menu_trend_prompt(facts)
+    assert "짜서 별로였어요" in prompt
+    assert "양이 줄었어요" in prompt
+    assert "최근 주 직원 코멘트:" in prompt
+    assert "그 내용을 우선 근거로 삼으세요" in prompt
+
+
+def test_build_menu_trend_prompt_omits_comment_lines_when_absent():
+    prompt = _build_menu_trend_prompt(_facts())
+    assert "최근 주 직원 코멘트:" not in prompt
+    assert "이전 주 직원 코멘트:" not in prompt
+
+
+def test_side_dishes_for_menu_week_finds_same_slot_side_menu(client, db_session):
+    from app.models.master import MenuMaster
+
+    resp = client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                {
+                    "plan_date": MONDAY.isoformat(),
+                    "meal_type": "중식",
+                    "corner_name": "한식",
+                    "menu_name": "제육볶음",
+                    "menu_role": "메인",
+                    "source_row_raw": "제육볶음\n계란후라이",
+                },
+                {
+                    "plan_date": MONDAY.isoformat(),
+                    "meal_type": "중식",
+                    "corner_name": "한식",
+                    "menu_name": "계란후라이",
+                    "menu_role": "부찬",
+                    "source_row_raw": "제육볶음\n계란후라이",
+                },
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    menu = db_session.query(MenuMaster).filter(MenuMaster.menu_name == "제육볶음").one()
+    assert _side_dishes_for_menu_week(db_session, menu.menu_id, MONDAY) == "계란후라이"
+
+
+def test_side_dishes_for_menu_week_returns_none_without_main_slot(db_session):
+    assert _side_dishes_for_menu_week(db_session, 99999, MONDAY) is None
+
+
+def test_recent_comments_for_menu_filters_to_week_range(client, db_session):
+    from app.models.master import MenuMaster
+
+    tuesday = MONDAY + dt.timedelta(days=1)
+    next_monday = MONDAY + dt.timedelta(days=7)
+    rows = [
+        {
+            "eaten_at": dt.datetime.combine(tuesday, dt.time(11, 50)).isoformat(),
+            "employee_id": "E1",
+            "meal_type": "중식",
+            "corner_name": "한식",
+            "taste_score": "맛남",
+            "comment": "짜요",
+            "menu_name": "동태찌개",
+        },
+        {
+            "eaten_at": dt.datetime.combine(next_monday, dt.time(11, 50)).isoformat(),
+            "employee_id": "E2",
+            "meal_type": "중식",
+            "corner_name": "한식",
+            "taste_score": "맛남",
+            "comment": "다음주 코멘트",
+            "menu_name": "동태찌개",
+        },
+    ]
+    resp = client.post("/api/ingest/meal-log", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+    menu = db_session.query(MenuMaster).filter(MenuMaster.menu_name == "동태찌개").one()
+    assert _recent_comments_for_menu(db_session, menu.menu_id, MONDAY) == ["짜요"]
