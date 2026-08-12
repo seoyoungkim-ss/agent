@@ -218,16 +218,17 @@ export interface HeadcountTrendRow {
   headcount: number;
 }
 
-export interface WeatherCorrelationBucket {
+// §75: 날짜별 원자료(가공된 교차표 아님) — 평일/주말+공휴일/패밀리데이 구분은
+// classification 값으로 프론트에서 체크박스 필터링한다.
+export interface WeatherHeadcountTimelineDay {
+  stat_date: string;
   classification: Classification;
-  had_rain: boolean;
-  day_count: number;
-  avg_headcount: number | null;
-  low_sample: boolean;
+  headcount: number;
+  precip_mm: number | null;
 }
 
-export interface WeatherCorrelationResponse {
-  buckets: WeatherCorrelationBucket[];
+export interface WeatherHeadcountTimelineResponse {
+  days: WeatherHeadcountTimelineDay[];
   days_missing_weather: number;
 }
 
@@ -241,6 +242,9 @@ export interface MenuWeatherEventRow {
   event_days: number;
   diff_vs_normal: number | null;
   low_sample: boolean;
+  // §75: 이 메뉴가 그 유형을 겪은 날들의 실측치(강수량/적설/기온) 평균 —
+  // 분류 결과를 실측값과 나란히 두고 검증할 수 있게. 실측치가 없으면 null.
+  actual_avg: number | null;
 }
 
 export interface MenuWeatherEventRankingResponse {
@@ -250,6 +254,8 @@ export interface MenuWeatherEventRankingResponse {
   // 없으면 true — "그런 날이 없어서"가 아니라 "재백필이 안 돼서" 폭설/폭염/
   // 한파가 안 나온다는 뜻이라 화면에서 구분해서 안내해야 한다.
   extended_fields_missing: boolean;
+  // §75: actual_avg 열의 헤더 라벨(예: "평균 강수량(mm)"). 이벤트별로 다르다.
+  actual_metric_label: string | null;
 }
 
 // predicted-impact의 weather_reference — 슬롯 상세에서 그 메인메뉴 하나의
@@ -731,15 +737,15 @@ export const api = {
     classification?: Classification;
   }) => request<HeadcountTrendRow[]>(`/analysis/headcount-trend${qs(params)}`),
 
-  // PRD 7.1(2026-08): 강수 여부 × 평일/주말+공휴일/패밀리데이 조합별 과거 실측
-  // 평균 식수 — "비가 오면 식수가 준다"는 기존 시뮬레이션 감(v0)을 실데이터로
-  // 검증하기 위한 참고용 화면. 배수를 자동으로 바꾸지 않는다.
-  weatherCorrelation: (params: { period_start: string; period_end: string }) =>
-    request<WeatherCorrelationResponse>(`/analysis/weather-correlation${qs(params)}`),
+  // PRD 7.1 확장(2026-08, §75): 날짜별 실측 식수·강수량 원자료 — "비가 오면
+  // 식수가 준다"는 기존 시뮬레이션 감(v0)을 실데이터로 검증하기 위한 참고용
+  // 화면. 이 결과가 배수를 자동으로 바꾸지 않는다.
+  weatherHeadcountTimeline: (params: { period_start: string; period_end: string }) =>
+    request<WeatherHeadcountTimelineResponse>(`/analysis/weather-headcount-timeline${qs(params)}`),
 
   // §71: 메인메뉴가 지정한 날씨유형(비/폭설/폭염/한파)의 날 평상시 대비 식수가
   // 얼마나 달랐는지 랭킹. 부찬은 대상이 아니다 — 이 결과가 시뮬레이션 배수나
-  // 주간 식단표 예측치를 자동으로 바꾸지 않는다(weatherCorrelation과 동일 원칙).
+  // 주간 식단표 예측치를 자동으로 바꾸지 않는다(weatherHeadcountTimeline과 동일 원칙).
   menuWeatherEventRanking: (params: {
     period_start: string;
     period_end: string;

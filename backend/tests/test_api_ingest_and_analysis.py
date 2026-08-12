@@ -3662,8 +3662,8 @@ def test_ingest_weather_csv_requires_token(client):
     assert resp.status_code == 401
 
 
-def test_weather_correlation_buckets_by_classification_and_rain(client, db_session):
-    """평일 비/맑음, 주말 비/맑음 4개 버킷이 섞이지 않고 각각 평균이 계산되는지 확인.
+def test_weather_headcount_timeline_returns_daily_rows(client, db_session):
+    """§75: 분류×강수여부 교차표 대신 날짜 하나하나를 그대로 돌려주는지 확인.
 
     MONDAY(2026-07-20, 평일)에 비/2명, 그 다음 화요일(평일, 맑음)에 4명,
     토요일(주말, 비)에 1명이 취식한 걸로 시딩한다.
@@ -3696,7 +3696,7 @@ def test_weather_correlation_buckets_by_classification_and_rain(client, db_sessi
     aggregate_daily_stats(db_session, wednesday)
 
     resp = client.get(
-        "/api/analysis/weather-correlation",
+        "/api/analysis/weather-headcount-timeline",
         params={"period_start": MONDAY.isoformat(), "period_end": saturday.isoformat()},
     )
     assert resp.status_code == 200, resp.text
@@ -3704,38 +3704,34 @@ def test_weather_correlation_buckets_by_classification_and_rain(client, db_sessi
 
     assert body["days_missing_weather"] == 1
 
-    buckets = {(b["classification"], b["had_rain"]): b for b in body["buckets"]}
-    weekday_rain = buckets[("평일", True)]
-    assert weekday_rain["day_count"] == 1
-    assert weekday_rain["avg_headcount"] == 2.0
+    days_by_date = {d["stat_date"]: d for d in body["days"]}
+    monday_row = days_by_date[MONDAY.isoformat()]
+    assert monday_row["classification"] == "평일"
+    assert monday_row["headcount"] == 2
+    assert monday_row["precip_mm"] == 10.0
 
-    weekday_dry = buckets[("평일", False)]
-    assert weekday_dry["day_count"] == 1
-    assert weekday_dry["avg_headcount"] == 4.0
+    tuesday_row = days_by_date[tuesday.isoformat()]
+    assert tuesday_row["headcount"] == 4
+    assert tuesday_row["precip_mm"] is None  # 비 안 온 날이라 강수량 0이 아니라 결측
 
-    weekend_rain = buckets[("주말+공휴일", True)]
-    assert weekend_rain["day_count"] == 1
-    assert weekend_rain["avg_headcount"] == 1.0
+    saturday_row = days_by_date[saturday.isoformat()]
+    assert saturday_row["classification"] == "주말+공휴일"
+    assert saturday_row["headcount"] == 1
+    assert saturday_row["precip_mm"] == 5.0
 
-    # 표본 부족 임계값(기본 5일) 미만이라 전부 low_sample=True여야 한다.
-    assert all(b["low_sample"] for b in body["buckets"])
+    wednesday_row = days_by_date[wednesday.isoformat()]
+    assert wednesday_row["precip_mm"] is None  # 날씨 데이터 자체가 없는 날
 
 
-def test_weather_correlation_returns_empty_buckets_when_no_weather_data(client, db_session):
-    from app.services.aggregation import aggregate_daily_stats
-
-    _ingest_weekly_menu(client)
-    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY)
-    aggregate_daily_stats(db_session, MONDAY)
-
+def test_weather_headcount_timeline_returns_empty_days_without_meal_log(client, db_session):
     resp = client.get(
-        "/api/analysis/weather-correlation",
+        "/api/analysis/weather-headcount-timeline",
         params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["buckets"] == []
-    assert body["days_missing_weather"] == 1
+    assert body["days"] == []
+    assert body["days_missing_weather"] == 0
 
 
 def _seed_menu_rain_vs_normal(client, db_session, menu_name: str, start_date: dt.date, employee_prefix: str) -> None:
@@ -3783,11 +3779,13 @@ def test_menu_weather_event_ranking_surfaces_high_diff_menu(client, db_session):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["event"] == "비"
+    assert body["actual_metric_label"] == "평균 강수량(mm)"
     row = next(r for r in body["rows"] if r["menu_name"] == "김치찌개")
     assert row["low_sample"] is False
     assert row["event_days"] == 5
     assert row["event_avg_headcount"] == 6.0
     assert row["diff_vs_normal"] == 4.0  # 비 오는 날 6명 - 평상시 2명
+    assert row["actual_avg"] == 8.0  # _seed_menu_rain_vs_normal의 비 오는 날 precip_mm
     assert body["rows"][0]["menu_name"] == "김치찌개"  # |diff| 내림차순 1위
 
 
@@ -3811,6 +3809,8 @@ def test_menu_weather_event_ranking_flags_low_sample(client, db_session):
     row = next(r for r in resp.json()["rows"] if r["menu_name"] == "우동")
     assert row["low_sample"] is True
     assert row["diff_vs_normal"] is None
+    # 표본이 부족해 diff는 못 내도 실측 강수량 자체는 그대로 보여준다(low_sample과 무관).
+    assert row["actual_avg"] == 5.0
 
 
 def test_menu_weather_event_ranking_rejects_invalid_event(client):

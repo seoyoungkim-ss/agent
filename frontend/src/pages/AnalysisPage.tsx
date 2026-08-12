@@ -3590,21 +3590,36 @@ function MenuRepertoireSection() {
 }
 
 
-const WEATHER_BAR_COLOR: Record<"비 안 온 날" | "비 온 날", string> = {
-  "비 안 온 날": "var(--series-1)",
-  "비 온 날": "var(--series-2)",
-};
-
 /**
- * PRD 7.1(2026-08): 강수 여부 × 평일/주말+공휴일/패밀리데이 조합별 과거 실측
- * 평균 식수. 담당자 가설("비 오면 외부 식사가 막혀 오히려 식수가 늘 수 있다")을
- * "금주 예상 식수" 카드의 v0 감(날씨 배수 0.9, 반대 가정)과 별개로 실데이터로
- * 검증하기 위한 참고용 화면 — 여기 결과가 그 배수를 자동으로 바꾸지 않는다.
+ * PRD 7.1 확장(2026-08, §75): 날짜별 실측 식수 × 강수량 타임라인. 담당자
+ * 가설("비 오면 외부 식사가 막혀 오히려 식수가 늘 수 있다")을 "금주 예상
+ * 식수" 카드의 v0 감(날씨 배수 0.9, 반대 가정)과 별개로 실데이터로 검증하기
+ * 위한 참고용 화면 — 여기 결과가 그 배수를 자동으로 바꾸지 않는다.
  *
- * 분류를 섞은 전체 평균은 절대 안 보여준다. 평일과 주말+공휴일은 기저 식수
- * 자체가 크게 달라(주말은 원래 인원이 훨씬 적음), 섞으면 우연한 상관으로
- * 왜곡될 수 있다는 게 이번 요청의 핵심 포인트다.
+ * §71~74엔 강수여부×분류 교차표 막대그래프였으나 "이 막대가 뭘 비교하는
+ * 건지 모르겠다"는 피드백(2026-08)에 따라 가공 없는 일별 타임라인으로
+ * 바꿨다 — 평일/주말+공휴일은 기저 식수 자체가 크게 달라(주말은 원래
+ * 인원이 훨씬 적음) 교차표로 미리 평균 내면 뭘 비교하는지 알기 어려웠는데,
+ * 날짜별 원자료 + 체크박스 필터면 "그날 실제 무슨 일이 있었는지"를 그대로
+ * 보여줘 설명이 거의 필요 없다.
  */
+const CLASSIFICATION_OPTIONS: Classification[] = ["평일", "주말+공휴일", "패밀리데이"];
+
+// §75: 랭킹 표를 기본 top5 상승/top5 하락만 보여주고 나머지는 펼치기로 미룬다
+// — 날씨유형·계절 랭킹 둘 다 같은 헬퍼로 일관되게 처리한다. 기존 |diff|
+// 내림차순 정렬(rows)은 그대로 두고, 접힌 상태에서 보여줄 부분집합만 뽑는다.
+function topMoversAndFallers<T>(rows: T[], getDiff: (row: T) => number | null, n = 5): T[] {
+  const risers = rows
+    .filter((r) => (getDiff(r) ?? 0) > 0)
+    .sort((a, b) => (getDiff(b) as number) - (getDiff(a) as number))
+    .slice(0, n);
+  const fallers = rows
+    .filter((r) => (getDiff(r) ?? 0) < 0)
+    .sort((a, b) => (getDiff(a) as number) - (getDiff(b) as number))
+    .slice(0, n);
+  return [...risers, ...fallers];
+}
+
 // §71: 메인메뉴 × 날씨유형 랭킹 탭 — 담당자 요청 예시 그대로("비오면 김치찌개…
 // 폭설이면… 폭염이면 메밀소바…") 네 유형을 눌러가며 훑어보는 멘탈모델.
 const MENU_WEATHER_EVENT_TABS: WeatherEvent[] = ["비", "폭설", "폭염", "한파"];
@@ -3617,11 +3632,15 @@ export function WeatherCorrelationSection() {
   const [periodEnd, setPeriodEnd] = useState(PERIOD_END);
   const [selectedEvent, setSelectedEvent] = useState<WeatherEvent>("비");
   const [selectedSeason, setSelectedSeason] = useState<Season>("여름");
+  const [visibleClassifications, setVisibleClassifications] =
+    useState<Set<Classification>>(new Set(CLASSIFICATION_OPTIONS));
+  const [showAllWeatherRanking, setShowAllWeatherRanking] = useState(false);
+  const [showAllSeasonRanking, setShowAllSeasonRanking] = useState(false);
   const chartTheme = useChartTheme();
 
-  const query = useQuery({
-    queryKey: ["weather-correlation", periodStart, periodEnd],
-    queryFn: () => api.weatherCorrelation({ period_start: periodStart, period_end: periodEnd }),
+  const timelineQuery = useQuery({
+    queryKey: ["weather-headcount-timeline", periodStart, periodEnd],
+    queryFn: () => api.weatherHeadcountTimeline({ period_start: periodStart, period_end: periodEnd }),
   });
 
   const menuRankingQuery = useQuery({
@@ -3631,6 +3650,9 @@ export function WeatherCorrelationSection() {
   });
   const menuRankingRows = menuRankingQuery.data?.rows ?? [];
   const extendedFieldsMissing = menuRankingQuery.data?.extended_fields_missing ?? false;
+  const actualMetricLabel = menuRankingQuery.data?.actual_metric_label;
+  const weatherRankingCollapsed = topMoversAndFallers(menuRankingRows, (r) => r.diff_vs_normal);
+  const visibleWeatherRankingRows = showAllWeatherRanking ? menuRankingRows : weatherRankingCollapsed;
 
   const menuSeasonQuery = useQuery({
     queryKey: ["menu-season-ranking", periodStart, periodEnd, selectedSeason],
@@ -3638,47 +3660,74 @@ export function WeatherCorrelationSection() {
       api.menuSeasonRanking({ period_start: periodStart, period_end: periodEnd, season: selectedSeason }),
   });
   const menuSeasonRows = menuSeasonQuery.data?.rows ?? [];
+  const seasonRankingCollapsed = topMoversAndFallers(menuSeasonRows, (r) => r.diff_vs_overall);
+  const visibleSeasonRankingRows = showAllSeasonRanking ? menuSeasonRows : seasonRankingCollapsed;
 
-  const buckets = query.data?.buckets ?? [];
-  const daysMissingWeather = query.data?.days_missing_weather ?? 0;
-  const classifications = Array.from(new Set(buckets.map((b) => b.classification)));
+  const allDays = timelineQuery.data?.days ?? [];
+  const daysMissingWeather = timelineQuery.data?.days_missing_weather ?? 0;
+  const visibleDays = allDays.filter((d) => visibleClassifications.has(d.classification));
 
-  const barSeries = (["비 안 온 날", "비 온 날"] as const).map((label) => ({
-    name: label,
-    type: "bar" as const,
-    itemStyle: { color: resolveColor(WEATHER_BAR_COLOR[label]) },
-    data: classifications.map((cls) => {
-      const bucket = buckets.find((b) => b.classification === cls && b.had_rain === (label === "비 온 날"));
-      return bucket?.avg_headcount ?? null;
-    }),
-  }));
-
-  const chartOption = {
+  const timelineOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 56, right: 24, top: 44, bottom: 40 },
+    grid: { left: 56, right: 56, top: 44, bottom: 56 },
     legend: { top: 0, textStyle: { color: chartTheme.text } },
     tooltip: { trigger: "axis" as const, axisPointer: { type: "shadow" as const } },
     xAxis: {
       type: "category" as const,
-      data: classifications,
-      axisLabel: { color: chartTheme.text },
+      data: visibleDays.map((d) => d.stat_date),
+      axisLabel: { color: chartTheme.text, rotate: 45 },
       axisLine: { lineStyle: { color: chartTheme.axis } },
     },
-    yAxis: {
-      type: "value" as const,
-      name: "평균 식수",
-      axisLabel: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-    },
-    series: barSeries,
+    yAxis: [
+      {
+        type: "value" as const,
+        name: "식수",
+        axisLabel: { color: chartTheme.text },
+        splitLine: { lineStyle: { color: chartTheme.grid } },
+      },
+      {
+        type: "value" as const,
+        name: "강수량(mm)",
+        axisLabel: { color: chartTheme.text },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      {
+        name: "식수",
+        type: "bar" as const,
+        yAxisIndex: 0,
+        itemStyle: { color: resolveColor("var(--series-1)") },
+        data: visibleDays.map((d) => d.headcount),
+      },
+      {
+        name: "강수량(mm)",
+        type: "line" as const,
+        yAxisIndex: 1,
+        symbol: "circle",
+        symbolSize: 6,
+        lineStyle: { width: 2, color: resolveColor("var(--series-2)") },
+        itemStyle: { color: resolveColor("var(--series-2)") },
+        data: visibleDays.map((d) => d.precip_mm),
+      },
+    ],
   };
 
+  function toggleClassification(cls: Classification) {
+    setVisibleClassifications((prev) => {
+      const next = new Set(prev);
+      if (next.has(cls)) next.delete(cls);
+      else next.add(cls);
+      return next;
+    });
+  }
+
   return (
-    <Card title="비 오는 날 식수 — 과거 실측 상관관계">
+    <Card title="날씨에 따른 식수 변화 — 과거 실측 현황">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
         위 "금주 예상 식수" 카드의 날씨 배수는 실측 근거 없는 가정치입니다. 여기는 기상청 ASOS
-        일자료(과거 실측 강수)와 그 날짜의 실제 식수를 대조한 참고용 화면입니다 — 이 결과가 위 예측
-        배수를 자동으로 바꾸지는 않습니다.
+        일자료(과거 실측 강수)와 그 날짜의 실제 식수를 나란히 보여주는 참고용 화면입니다 — 이 결과가
+        위 예측 배수를 자동으로 바꾸지는 않습니다.
       </p>
       <div className="mb-3 flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3704,49 +3753,44 @@ export function WeatherCorrelationSection() {
           />
         </label>
       </div>
+      <div className="mb-3 flex flex-wrap gap-4">
+        {CLASSIFICATION_OPTIONS.map((cls) => (
+          <label
+            key={cls}
+            className="flex items-center gap-1.5 text-[13px]"
+            style={{ color: "var(--ink-secondary)" }}
+          >
+            <input
+              type="checkbox"
+              checked={visibleClassifications.has(cls)}
+              onChange={() => toggleClassification(cls)}
+            />
+            {cls}
+          </label>
+        ))}
+      </div>
 
-      {query.isLoading && <LoadingState />}
-      {query.isError && <ErrorState error={query.error} />}
+      {timelineQuery.isLoading && <LoadingState />}
+      {timelineQuery.isError && <ErrorState error={timelineQuery.error} />}
 
-      {query.data && buckets.length === 0 && (
+      {timelineQuery.data && visibleDays.length === 0 && (
         <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          날씨 데이터가 없습니다. 기상청 연동(KMA_WEATHER_* 환경변수)을 설정하거나 CSV로
-          가져오세요(scripts/import_weather_csv.py).
+          {allDays.length === 0
+            ? "날씨 데이터가 없습니다. 기상청 연동(KMA_WEATHER_* 환경변수)을 설정하거나 CSV로 가져오세요(scripts/import_weather_csv.py)."
+            : "선택한 분류에 해당하는 날짜가 없습니다 — 위 체크박스를 조정해 보세요."}
         </p>
       )}
 
-      {buckets.length > 0 && (
+      {visibleDays.length > 0 && (
         <>
           {daysMissingWeather > 0 && (
             <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-              이 기간 중 {daysMissingWeather}일은 날씨 데이터가 없어 집계에서 제외했습니다.
+              이 기간 중 {daysMissingWeather}일은 날씨 데이터가 없어 강수량이 비어 있습니다.
             </p>
           )}
-          <ReactECharts option={chartOption} style={{ height: 280 }} />
-          <div className="mt-4">
-            <Table
-              columns={[
-                { key: "classification", label: "분류" },
-                { key: "had_rain", label: "강수여부" },
-                { key: "day_count", label: "일수(N)", align: "right" },
-                { key: "avg_headcount", label: "평균 식수", align: "right" },
-              ]}
-              rows={buckets.map((b) => ({
-                key: `${b.classification}-${b.had_rain}`,
-                classification: b.classification,
-                had_rain: b.had_rain ? "비" : "맑음",
-                day_count: b.low_sample ? (
-                  <span style={{ color: "var(--ink-muted)" }}>{b.day_count}일 (표본 적음)</span>
-                ) : (
-                  `${b.day_count}일`
-                ),
-                avg_headcount: b.avg_headcount != null ? `${b.avg_headcount}명` : "-",
-              }))}
-              rowKey={(r) => r.key as string}
-            />
-          </div>
+          <ReactECharts option={timelineOption} style={{ height: 320 }} />
           <p className="mt-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-            상관관계이며 인과관계가 아닙니다. 강수는 계절·요일과도 얽혀 있어 이 표만으로 결론
+            상관관계이며 인과관계가 아닙니다. 식수는 계절·요일과도 얽혀 있어 이 그래프만으로 결론
             내리지 마세요.
           </p>
         </>
@@ -3762,7 +3806,10 @@ export function WeatherCorrelationSection() {
           {MENU_WEATHER_EVENT_TABS.map((eventOption) => (
             <button
               key={eventOption}
-              onClick={() => setSelectedEvent(eventOption)}
+              onClick={() => {
+                setSelectedEvent(eventOption);
+                setShowAllWeatherRanking(false);
+              }}
               className="rounded-full border px-3 py-1.5 text-[13px] transition-colors"
               style={{
                 borderColor: selectedEvent === eventOption ? "var(--accent)" : "var(--border)",
@@ -3792,34 +3839,47 @@ export function WeatherCorrelationSection() {
         )}
 
         {menuRankingRows.length > 0 && (
-          <Table
-            columns={[
-              { key: "menu_name", label: "메뉴명" },
-              { key: "event_avg_headcount", label: `${selectedEvent} 평균`, align: "right" },
-              { key: "diff", label: "평상시 대비", align: "right" },
-              { key: "event_days", label: "표본(일)", align: "right" },
-            ]}
-            rows={menuRankingRows.map((r) => ({
-              key: String(r.menu_id),
-              menu_name: r.low_sample ? (
-                <span style={{ color: "var(--ink-muted)" }}>{r.menu_name ?? "이름 없음"}</span>
-              ) : (
-                r.menu_name ?? "이름 없음"
-              ),
-              event_avg_headcount: `${r.event_avg_headcount}명`,
-              diff:
-                r.diff_vs_normal == null ? (
-                  <Badge label="표본 부족" tone="muted" />
+          <>
+            <Table
+              columns={[
+                { key: "menu_name", label: "메뉴명" },
+                { key: "event_avg_headcount", label: `${selectedEvent} 평균`, align: "right" },
+                { key: "diff", label: "평상시 대비", align: "right" },
+                { key: "actual_avg", label: actualMetricLabel ?? "실측 평균", align: "right" },
+                { key: "event_days", label: "표본(일)", align: "right" },
+              ]}
+              rows={visibleWeatherRankingRows.map((r) => ({
+                key: String(r.menu_id),
+                menu_name: r.low_sample ? (
+                  <span style={{ color: "var(--ink-muted)" }}>{r.menu_name ?? "이름 없음"}</span>
                 ) : (
-                  <Badge
-                    label={`${r.diff_vs_normal > 0 ? "+" : ""}${r.diff_vs_normal}명`}
-                    tone={Math.abs(r.diff_vs_normal) >= 3 ? (r.diff_vs_normal > 0 ? "good" : "critical") : "muted"}
-                  />
+                  r.menu_name ?? "이름 없음"
                 ),
-              event_days: `${r.event_days}일`,
-            }))}
-            rowKey={(r) => r.key as string}
-          />
+                event_avg_headcount: `${r.event_avg_headcount}명`,
+                diff:
+                  r.diff_vs_normal == null ? (
+                    <Badge label="표본 부족" tone="muted" />
+                  ) : (
+                    <Badge
+                      label={`${r.diff_vs_normal > 0 ? "+" : ""}${r.diff_vs_normal}명`}
+                      tone={Math.abs(r.diff_vs_normal) >= 3 ? (r.diff_vs_normal > 0 ? "good" : "critical") : "muted"}
+                    />
+                  ),
+                actual_avg: r.actual_avg ?? "-",
+                event_days: `${r.event_days}일`,
+              }))}
+              rowKey={(r) => r.key as string}
+            />
+            {menuRankingRows.length > weatherRankingCollapsed.length && (
+              <button
+                className="mt-2 text-xs underline"
+                style={{ color: "var(--accent)" }}
+                onClick={() => setShowAllWeatherRanking((v) => !v)}
+              >
+                {showAllWeatherRanking ? "접기" : `전체 ${menuRankingRows.length}개 보기`}
+              </button>
+            )}
+          </>
         )}
       </div>
 
@@ -3834,7 +3894,10 @@ export function WeatherCorrelationSection() {
           {MENU_SEASON_TABS.map((seasonOption) => (
             <button
               key={seasonOption}
-              onClick={() => setSelectedSeason(seasonOption)}
+              onClick={() => {
+                setSelectedSeason(seasonOption);
+                setShowAllSeasonRanking(false);
+              }}
               className="rounded-full border px-3 py-1.5 text-[13px] transition-colors"
               style={{
                 borderColor: selectedSeason === seasonOption ? "var(--accent)" : "var(--border)",
@@ -3857,34 +3920,45 @@ export function WeatherCorrelationSection() {
         )}
 
         {menuSeasonRows.length > 0 && (
-          <Table
-            columns={[
-              { key: "menu_name", label: "메뉴명" },
-              { key: "season_avg_headcount", label: `${selectedSeason} 평균`, align: "right" },
-              { key: "diff", label: "전체 평균 대비", align: "right" },
-              { key: "season_days", label: "표본(일)", align: "right" },
-            ]}
-            rows={menuSeasonRows.map((r) => ({
-              key: String(r.menu_id),
-              menu_name: r.low_sample ? (
-                <span style={{ color: "var(--ink-muted)" }}>{r.menu_name ?? "이름 없음"}</span>
-              ) : (
-                r.menu_name ?? "이름 없음"
-              ),
-              season_avg_headcount: `${r.season_avg_headcount}명`,
-              diff:
-                r.diff_vs_overall == null ? (
-                  <Badge label="표본 부족" tone="muted" />
+          <>
+            <Table
+              columns={[
+                { key: "menu_name", label: "메뉴명" },
+                { key: "season_avg_headcount", label: `${selectedSeason} 평균`, align: "right" },
+                { key: "diff", label: "전체 평균 대비", align: "right" },
+                { key: "season_days", label: "표본(일)", align: "right" },
+              ]}
+              rows={visibleSeasonRankingRows.map((r) => ({
+                key: String(r.menu_id),
+                menu_name: r.low_sample ? (
+                  <span style={{ color: "var(--ink-muted)" }}>{r.menu_name ?? "이름 없음"}</span>
                 ) : (
-                  <Badge
-                    label={`${r.diff_vs_overall > 0 ? "+" : ""}${r.diff_vs_overall}명`}
-                    tone={Math.abs(r.diff_vs_overall) >= 3 ? (r.diff_vs_overall > 0 ? "good" : "critical") : "muted"}
-                  />
+                  r.menu_name ?? "이름 없음"
                 ),
-              season_days: `${r.season_days}일`,
-            }))}
-            rowKey={(r) => r.key as string}
-          />
+                season_avg_headcount: `${r.season_avg_headcount}명`,
+                diff:
+                  r.diff_vs_overall == null ? (
+                    <Badge label="표본 부족" tone="muted" />
+                  ) : (
+                    <Badge
+                      label={`${r.diff_vs_overall > 0 ? "+" : ""}${r.diff_vs_overall}명`}
+                      tone={Math.abs(r.diff_vs_overall) >= 3 ? (r.diff_vs_overall > 0 ? "good" : "critical") : "muted"}
+                    />
+                  ),
+                season_days: `${r.season_days}일`,
+              }))}
+              rowKey={(r) => r.key as string}
+            />
+            {menuSeasonRows.length > seasonRankingCollapsed.length && (
+              <button
+                className="mt-2 text-xs underline"
+                style={{ color: "var(--accent)" }}
+                onClick={() => setShowAllSeasonRanking((v) => !v)}
+              >
+                {showAllSeasonRanking ? "접기" : `전체 ${menuSeasonRows.length}개 보기`}
+              </button>
+            )}
+          </>
         )}
       </div>
     </Card>

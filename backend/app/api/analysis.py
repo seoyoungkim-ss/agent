@@ -46,7 +46,12 @@ from app.services.food_vector import (
     describe_average_bias,
 )
 from app.services.food_vector_tagging import run_llm_food_vector_tagging, run_llm_ingredient_extraction
-from app.services.holidays import DayClassification, HolidayService, family_day_dates_in_range
+from app.services.holidays import (
+    DayClassification,
+    HolidayService,
+    family_day_dates_in_range,
+    get_holiday_service,
+)
 from app.services.llm_client import InternalLLMClient
 from app.services.master_data import (
     PLACEHOLDER_MENU_NAMES,
@@ -313,25 +318,23 @@ def headcount_trend(
     ]
 
 
-@router.get("/weather-correlation")
-def weather_correlation(
+@router.get("/weather-headcount-timeline")
+def weather_headcount_timeline(
     period_start: dt.date,
     period_end: dt.date,
     db: Session = Depends(get_db),
 ):
-    """PRD 7.1: 강수 여부 × 평일/주말+공휴일/패밀리데이 조합별 과거 실측 평균 식수(2026-08).
+    """PRD 7.1 확장(2026-08, §75): 날짜별 실측 식수·강수량 원자료(과거엔 강수여부×
+    평일/주말+공휴일/패밀리데이로 미리 평균 낸 교차표를 줬으나, "이 막대가 뭘
+    비교하는 건지 모르겠다"는 피드백에 따라 가공 없이 날짜 하나하나를 그대로
+    반환하는 방식으로 바꿨다 — 평일/주말+공휴일 구분이 필요하면 프론트가
+    `classification` 값으로 직접 체크박스 필터링한다.
 
     담당자 가설("비 오면 외부 식사가 막혀 오히려 식수가 늘 수 있다")을
     `simulation.py`의 v0 감(`_WEATHER_MULTIPLIER[RAIN]=0.90`, 반대 가정)과 별개로
     과거 데이터로 검증하기 위한 참고용 화면 — 이 결과가 그 배수를 자동으로
     바꾸지 않는다.
-
-    분류를 섞은 전체 평균은 절대 계산하지 않는다. 평일과 주말+공휴일은 기저
-    식수 자체가 크게 달라(주말은 원래 인원이 훨씬 적음), 섞어서 평균 내면
-    "비가 많이 온 달에 마침 주말이 적었다" 같은 우연으로 왜곡될 수 있다.
     """
-    settings = get_settings()
-
     weather_rows = (
         db.query(DailyWeather).filter(DailyWeather.stat_date.between(period_start, period_end)).all()
     )
@@ -342,59 +345,54 @@ def weather_correlation(
     for row in corner_rows:
         headcount_by_date[row.stat_date] = headcount_by_date.get(row.stat_date, 0) + row.headcount
 
-    classification_by_date = HolidayService(db).classify_range(period_start, period_end)
+    classification_by_date = get_holiday_service(db).classify_range(period_start, period_end)
 
-    buckets: dict[tuple[str, bool], dict[str, int]] = {}
+    days = []
     days_missing_weather = 0
-    for target_date, total_headcount in headcount_by_date.items():
-        weather = weather_by_date.get(target_date)
-        if weather is None:
-            days_missing_weather += 1
-            continue
+    for target_date, headcount in sorted(headcount_by_date.items()):
         classification = classification_by_date.get(target_date)
         if classification is None:
             continue
-        key = (classification.value, weather.had_rain)
-        bucket = buckets.setdefault(key, {"day_count": 0, "total_headcount": 0})
-        bucket["day_count"] += 1
-        bucket["total_headcount"] += total_headcount
-
-    results = []
-    for (classification, had_rain), agg in sorted(buckets.items()):
-        day_count = agg["day_count"]
-        results.append(
+        weather = weather_by_date.get(target_date)
+        if weather is None:
+            days_missing_weather += 1
+        days.append(
             {
-                "classification": classification,
-                "had_rain": had_rain,
-                "day_count": day_count,
-                "avg_headcount": round(agg["total_headcount"] / day_count, 1) if day_count else None,
-                "low_sample": day_count < settings.weather_correlation_low_sample_days,
+                "stat_date": target_date.isoformat(),
+                "classification": classification.value,
+                "headcount": headcount,
+                "precip_mm": weather.precip_mm if weather else None,
             }
         )
 
     return {
-        "buckets": results,
+        "days": days,
         "days_missing_weather": days_missing_weather,
     }
 
 
 def _weather_event_by_date(
     db: Session, period_start: dt.date, period_end: dt.date
-) -> tuple[dict[dt.date, WeatherEvent], bool]:
+) -> tuple[dict[dt.date, WeatherEvent], dict[dt.date, DailyWeather], bool]:
     """§71: 기간 내 날짜별 날씨유형(평상시/비/폭설/폭염/한파) 맵. weather_correlation의
     DailyWeather 전체 로드 패턴과 동일 — 다만 (classification, had_rain) 대신
     classify_weather_event로 다섯 유형 중 하나를 매긴다.
 
-    §72: 두 번째 반환값 `extended_fields_missing`은 그 기간의 daily_weather
+    §72: 세 번째 반환값 `extended_fields_missing`은 그 기간의 daily_weather
     행에 snow_cm/max_temp_c/min_temp_c가 단 하나도 채워져 있지 않은지 여부다.
     §71 배포 전에 이미 백필된 행은 이 세 필드가 전부 NULL이라 폭설/폭염/한파가
     구조적으로 절대 안 나오는데(classify_weather_event 참고), 그걸 "그런 날이
     없어서"와 구분해 화면에 안내하기 위해 필요하다(§72).
+
+    §75: 두 번째 반환값 `weather_by_date`는 이미 로드한 DailyWeather 행을 그대로
+    날짜별 맵으로 준다 — 날씨유형 랭킹에 "실제 강수량/적설/기온이 몇이었는지"
+    검증용 실측치를 같이 보여주기 위해 새 쿼리 없이 재사용한다.
     """
     settings = get_settings()
     weather_rows = (
         db.query(DailyWeather).filter(DailyWeather.stat_date.between(period_start, period_end)).all()
     )
+    weather_by_date = {w.stat_date: w for w in weather_rows}
     extended_fields_missing = bool(weather_rows) and all(
         w.snow_cm is None and w.max_temp_c is None and w.min_temp_c is None for w in weather_rows
     )
@@ -408,7 +406,7 @@ def _weather_event_by_date(
         )
         for w in weather_rows
     }
-    return event_by_date, extended_fields_missing
+    return event_by_date, weather_by_date, extended_fields_missing
 
 
 def _headcount_by_date_by_menu_bulk(
@@ -478,9 +476,20 @@ def _headcount_by_date_for_menu(
     return result
 
 
+# §75: 날씨유형별로 "실제로 뭘 봐야 검증되는지" — 필드명과 화면에 보여줄 라벨.
+# NORMAL(평상시)은 특정 실측 필드 하나로 정의되는 유형이 아니라 매핑에 없다.
+_EVENT_ACTUAL_METRIC: dict[WeatherEvent, tuple[str, str]] = {
+    WeatherEvent.RAIN: ("precip_mm", "평균 강수량(mm)"),
+    WeatherEvent.HEAVY_SNOW: ("snow_cm", "평균 적설(cm)"),
+    WeatherEvent.HEATWAVE: ("max_temp_c", "평균 최고기온(℃)"),
+    WeatherEvent.COLDWAVE: ("min_temp_c", "평균 최저기온(℃)"),
+}
+
+
 def _menu_weather_event_summary(
     headcount_by_date: dict[dt.date, int],
     event_by_date: dict[dt.date, WeatherEvent],
+    weather_by_date: dict[dt.date, DailyWeather],
     low_sample_days: int,
 ) -> list[dict]:
     """§71: 메뉴 하나의 날짜별 식수를 날씨유형별로 묶어 평상시(NORMAL) 평균 대비
@@ -489,13 +498,19 @@ def _menu_weather_event_summary(
     표본이 부족하면(그 유형 자체가 low_sample_days 미만이거나, 비교 기준인
     평상시 표본이 부족하면) `diff_vs_normal`을 None으로 비워 화면에서 흐리게
     처리하게 한다 — weather_correlation의 low_sample 관례와 동일.
+
+    §75: `actual_avg`는 "이 메뉴가 그 유형을 겪은 날들"의 실측치(강수량/적설/
+    기온) 평균이다 — 분류 결과("폭설일 때 많이 나갔다")를 실측값과 나란히
+    보여줘 검증할 수 있게 한다. NORMAL이나 실측치가 없는 날은 None.
     """
     by_event: dict[WeatherEvent, list[int]] = {}
+    dates_by_event: dict[WeatherEvent, list[dt.date]] = {}
     for target_date, headcount in headcount_by_date.items():
         event = event_by_date.get(target_date)
         if event is None:
             continue
         by_event.setdefault(event, []).append(headcount)
+        dates_by_event.setdefault(event, []).append(target_date)
 
     normal_counts = by_event.get(WeatherEvent.NORMAL, [])
     normal_avg = statistics.fmean(normal_counts) if normal_counts else None
@@ -510,6 +525,19 @@ def _menu_weather_event_summary(
             diff_vs_normal = None
         else:
             diff_vs_normal = round(avg_headcount - normal_avg, 1)
+
+        actual_avg = None
+        metric = _EVENT_ACTUAL_METRIC.get(event)
+        if metric is not None:
+            field_name, _label = metric
+            raw_values = [
+                getattr(weather_by_date[d], field_name)
+                for d in dates_by_event.get(event, [])
+                if d in weather_by_date and getattr(weather_by_date[d], field_name) is not None
+            ]
+            if raw_values:
+                actual_avg = round(statistics.fmean(raw_values), 1)
+
         summaries.append(
             {
                 "event": event.value,
@@ -517,6 +545,7 @@ def _menu_weather_event_summary(
                 "day_count": day_count,
                 "diff_vs_normal": diff_vs_normal,
                 "low_sample": low_sample or (event != WeatherEvent.NORMAL and normal_low_sample),
+                "actual_avg": actual_avg,
             }
         )
     return summaries
@@ -534,11 +563,11 @@ def _menu_weather_reference(db: Session, menu_id: int, plan_date: dt.date) -> li
     headcount_by_date = _headcount_by_date_for_menu(db, menu_id, period_start, period_end)
     if not headcount_by_date:
         return []
-    event_by_date, _extended_missing = _weather_event_by_date(db, period_start, period_end)
+    event_by_date, weather_by_date, _extended_missing = _weather_event_by_date(db, period_start, period_end)
     if not event_by_date:
         return []
     return _menu_weather_event_summary(
-        headcount_by_date, event_by_date, settings.weather_correlation_low_sample_days
+        headcount_by_date, event_by_date, weather_by_date, settings.weather_correlation_low_sample_days
     )
 
 
@@ -567,14 +596,16 @@ def menu_weather_event_ranking(
         raise HTTPException(status_code=400, detail="event는 비/폭설/폭염/한파 중 하나여야 합니다")
 
     settings = get_settings()
-    event_by_date, extended_fields_missing = _weather_event_by_date(db, period_start, period_end)
+    event_by_date, weather_by_date, extended_fields_missing = _weather_event_by_date(
+        db, period_start, period_end
+    )
     headcount_by_menu = _headcount_by_date_by_menu_bulk(db, period_start, period_end, meal_type)
     menu_names = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
 
     rows = []
     for menu_id, headcount_by_date in headcount_by_menu.items():
         summaries = _menu_weather_event_summary(
-            headcount_by_date, event_by_date, settings.weather_correlation_low_sample_days
+            headcount_by_date, event_by_date, weather_by_date, settings.weather_correlation_low_sample_days
         )
         match = next((s for s in summaries if s["event"] == target_event.value), None)
         if match is None:
@@ -587,6 +618,7 @@ def menu_weather_event_ranking(
                 "event_days": match["day_count"],
                 "diff_vs_normal": match["diff_vs_normal"],
                 "low_sample": match["diff_vs_normal"] is None,
+                "actual_avg": match["actual_avg"],
             }
         )
 
@@ -599,7 +631,16 @@ def menu_weather_event_ranking(
             -abs(r["diff_vs_normal"]) if r["diff_vs_normal"] is not None else 0,
         ),
     )
-    return {"event": target_event.value, "rows": ranked, "extended_fields_missing": extended_fields_missing}
+    actual_metric_label = None
+    metric = _EVENT_ACTUAL_METRIC.get(target_event)
+    if metric is not None:
+        actual_metric_label = metric[1]
+    return {
+        "event": target_event.value,
+        "rows": ranked,
+        "extended_fields_missing": extended_fields_missing,
+        "actual_metric_label": actual_metric_label,
+    }
 
 
 def _menu_season_summary(headcount_by_date: dict[dt.date, int], low_sample_days: int) -> list[dict]:
