@@ -10,6 +10,12 @@
 프록시가 걸려 있다면 오히려 그 프록시를 **타야** 도달할 수 있다 — 그래서
 여기서는 `trust_env`를 기본값(True)으로 둔다.
 
+다만 이 방향 가정이 모든 사내망에 맞는 건 아니라는 게 확인됐다(2026-08,
+§73) — 어떤 사내망에서는 반대로 프록시를 타는 것 자체가 접속 실패
+원인이었다. 그래서 `trust_env`를 `Settings.kma_weather_trust_env`로
+빼서, 그런 환경에서는 `.env`에서 `false`로 뒤집어 llm_client.py와 같은
+방식으로 프록시를 완전히 무시할 수 있게 했다.
+
 **TLS 검사 프록시 대응(2026-08 실사용 확인)**: 사내 방화벽을 연 뒤에도
 `unable to get local issuer certificate` 에러가 났다 — 사내 프록시가 아웃바운드
 HTTPS를 가로채(TLS 인터셉션) 자체 인증서로 다시 서명하는 경우 흔한 증상이다.
@@ -125,7 +131,9 @@ class KmaWeatherClient:
         # 안 된다 — kma_weather_ca_bundle이 설정돼 있으면 그 PEM 파일을 추가로
         # 신뢰한다(미설정이면 기본 검증 그대로).
         verify = self._settings.kma_weather_ca_bundle or True
-        async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
+        async with httpx.AsyncClient(
+            timeout=30.0, verify=verify, trust_env=self._settings.kma_weather_trust_env
+        ) as client:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             data = resp.json()

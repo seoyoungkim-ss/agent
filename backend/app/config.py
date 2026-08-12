@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     # issuer certificate" 실사용 확인, 2026-08) 사내 루트 인증서(PEM) 경로를 넣으면
     # 그걸 추가로 신뢰한다. 비워두면 기본 인증서 목록(certifi)만 쓴다.
     kma_weather_ca_bundle: str = ""
+    # PRD 7.1 확장(2026-08, §73): 사내망에 따라 아웃바운드 인터넷 접속에 프록시가
+    # 필요할 수도(§69 가정), 반대로 프록시를 타는 것 자체가 실패 원인일 수도
+    # 있다(2026-08 실사용 확인 — 사내에서 backfill이 안 되는데 원인이 프록시였음).
+    # 기본값(True, 프록시 환경변수를 따름)은 §69 가정을 유지하되, 이 값을
+    # false로 두면 llm_client.py와 같은 방식(trust_env=False)으로 HTTP_PROXY/
+    # HTTPS_PROXY를 완전히 무시한다.
+    kma_weather_trust_env: bool = True
     # PRD 7.1: 날씨-식수 상관관계 버킷의 표본 일수가 이 값 미만이면 참고용으로 흐리게 표시
     weather_correlation_low_sample_days: int = 5
 

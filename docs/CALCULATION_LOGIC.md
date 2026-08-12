@@ -5048,3 +5048,39 @@ period_start=&period_end=&season=봄|여름|가을|겨울[&meal_type=]` —
   냉면이 "메인메뉴 × 계절 인기 랭킹"의 "여름" 탭에서 "여름 평균 6명 ·
   전체 평균 대비 +2명 · 표본 5일"로 1위에 정확히 렌더링됨. 콘솔 에러
   없음.
+
+## §73. 기상청 API httpx 클라이언트 — 사내망 프록시 우회를 설정으로 (2026-08)
+
+담당자가 `scripts/import_weather_csv.py backfill`을 사내망에서 돌리다가
+에러를 만났고, 참고 자료가 `httpx.Client(proxies={"all://": None})`처럼
+프록시를 완전히 꺼야 한다고 알려줬다 — **사내에서 안 되는 원인이
+프록시**라는 뜻이다.
+
+이건 `weather_client.py`의 기존 가정과 정반대다. §69에서 이미 사내
+프록시 이슈(TLS 인터셉션)를 다뤘지만, 그때 결론은 "공인 인터넷
+(data.go.kr) 목적지라 프록시를 **타야** 도달한다"였고, 그래서
+`trust_env`를 기본값(`True`, 프록시 환경변수를 따름)으로 고정해뒀다.
+이번에 확인된 건 정반대 사례 — 어떤 사내망에서는 프록시를 타는 것
+자체가 실패 원인이다. 즉 "프록시가 필요한지 방해되는지"는 환경마다
+다르다 — 코드에 하나로 못박을 수 없다.
+
+**수정**: `httpx`의 옛 `proxies={"all://": None}` 문법(0.28에서 제거됨)을
+그대로 쓰는 대신, 이미 코드베이스에 있는 같은 목적의 도구를 재사용했다
+— `llm_client.py`가 사내 LLM 게이트웨이용으로 쓰는 `trust_env=False`
+(프록시 등 환경변수 기반 설정을 전부 무시)다. 이걸 `kma_weather_ca_bundle`
+처럼 신규 설정값 `kma_weather_trust_env`(기본값 `True`, §69 가정 유지)로
+빼서, 프록시가 문제인 사내망에서는 `.env`에서 `KMA_WEATHER_TRUST_ENV=false`
+로 뒤집을 수 있게 했다 — 코드 수정 없이 운영자가 전환 가능.
+
+`weather_client.py`의 `httpx.AsyncClient(...)` 호출에
+`trust_env=self._settings.kma_weather_trust_env`를 추가했을 뿐, 그 외
+로직(CA 번들, 서비스키 이중 인코딩 방지 등 §69/§70)은 그대로다.
+
+### 검증
+
+- `test_weather_client.py`에 `test_fetch_daily_range_respects_kma_weather_trust_env_false`
+  추가 — `kma_weather_trust_env=False`로 설정하면 `httpx.AsyncClient`에
+  `trust_env=False`가 실제로 전달되는지 확인. 기존
+  `test_fetch_daily_range_does_not_force_trust_env_false`(기본값 `True`일
+  때 강제로 꺼지지 않는지)도 그대로 통과.
+- `pytest -q` 전체 537개 통과.

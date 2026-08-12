@@ -174,6 +174,24 @@ async def test_fetch_daily_range_does_not_force_trust_env_false(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_daily_range_respects_kma_weather_trust_env_false(monkeypatch):
+    """§73: 사내망에 따라 프록시를 타는 것 자체가 실패 원인인 경우도 확인돼
+    kma_weather_trust_env=False면 llm_client.py와 같은 방식으로 프록시를
+    완전히 무시해야 한다."""
+    captured_kwargs: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"response": {"body": {"items": {"item": []}}}})
+
+    _patch_async_client(monkeypatch, handler, captured_kwargs)
+
+    client = KmaWeatherClient(_configured_settings(kma_weather_trust_env=False))
+    await client.fetch_daily_range(dt.date(2026, 8, 1), dt.date(2026, 8, 1))
+
+    assert captured_kwargs.get("trust_env") is False
+
+
+@pytest.mark.asyncio
 async def test_fetch_daily_range_uses_default_verify_when_ca_bundle_not_set(monkeypatch):
     captured_kwargs: dict = {}
 
