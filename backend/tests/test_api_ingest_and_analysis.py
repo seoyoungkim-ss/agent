@@ -4033,8 +4033,9 @@ def _daily_result_for(results: list[dict], plan_date: dt.date) -> dict:
 
 def test_weekly_menu_plan_rule_check_flags_noodle_overage_on_a_single_day(client):
     """5개를 월요일 하루에 몰아넣으면 그날이 위반돼야 한다 — 하루 기준 판정의
-    핵심 케이스."""
-    noodle_menus = ["라면", "우동", "짜장면", "짬뽕", "냉면"]
+    핵심 케이스. §79에서 "짬뽕"이 해장 키워드에도 추가돼 hangover 어서션과
+    겹치므로, 순수 면류만 걸리는 "쫄면"으로 바꿨다(면류 판정 자체는 동일)."""
+    noodle_menus = ["라면", "우동", "짜장면", "쫄면", "냉면"]
     rows = [_plan_row(MONDAY, name, "메인") for name in noodle_menus]
     resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
     assert resp.status_code == 200, resp.text

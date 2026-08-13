@@ -39,6 +39,16 @@ def test_is_hangover_dish_matches_known_keywords():
     assert not is_hangover_dish("제육볶음")
 
 
+def test_is_hangover_dish_matches_common_hangover_foods_without_the_word_haejang():
+    """§79: "해장"이 이름에 없어도 통상 해장 음식으로 꼽히는 메뉴들 —
+    담당자가 직접 예로 든 부대찌개·짬뽕밥과, 같은 성격의 국물 요리들."""
+    assert is_hangover_dish("부대찌개")
+    assert is_hangover_dish("짬뽕밥")
+    assert is_hangover_dish("순댓국")
+    assert is_hangover_dish("감자탕")
+    assert is_hangover_dish("육개장")
+
+
 def test_is_noodle_dish_matches_ramen_and_other_noodles():
     assert is_noodle_dish("라면")
     assert is_noodle_dish("우동")
