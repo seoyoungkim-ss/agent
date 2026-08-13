@@ -20,16 +20,12 @@ DB를 모르는 순수 함수만 둔다. 조회는 `app/api/analysis.py`가 맡�
 """
 
 import statistics
-from dataclasses import dataclass
 from enum import Enum
 
 # 평가가 이보다 적으면 만족도를 믿고 편성을 바꾸기 어렵다.
 # menu_performance의 low_sample_threshold와 같은 취지지만, 이쪽은 기간이 훨씬
 # 길어(6~12개월) 기준을 조금 높게 잡는다.
 DEFAULT_MIN_EVALUATIONS = 5
-
-# 레퍼토리 집중도에서 "상위 몇 개"를 볼지.
-TOP_MENU_COUNT = 5
 
 
 class PlanningAction(str, Enum):
@@ -82,46 +78,3 @@ def classify_planning_action(
 def median_or_zero(values: list[float]) -> float:
     """빈 목록이면 0 — 중앙값 계산에서 예외를 던지지 않게 한다."""
     return statistics.median(values) if values else 0.0
-
-
-# ---------------------------------------------------------------------------
-# 코너별 레퍼토리 집중도
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class RepertoireStats:
-    total_slots: int  # 편성 슬롯 수(같은 메뉴가 여러 번이면 여러 번 센다)
-    unique_menus: int  # 고유 메뉴 종수
-    top_share: float  # 상위 N개 메뉴가 전체 편성에서 차지하는 비중 (0~1)
-    hhi: float  # 허핀달 지수 — 0에 가까울수록 고르게 분산, 1이면 한 메뉴뿐
-    top_menus: list[tuple[str, int]]  # (메뉴명, 편성 횟수) 상위 N개
-
-
-def compute_repertoire(
-    plan_counts: dict[str, int], *, top_n: int = TOP_MENU_COUNT
-) -> RepertoireStats:
-    """순수 함수 — 메뉴명→편성 횟수에서 다양성 지표를 낸다.
-
-    `top_share`와 `hhi`를 **둘 다** 내는 이유: 종수가 적어도 고르게 돌리면 체감
-    다양성은 나쁘지 않고(HHI가 그걸 잡는다), 종수가 많아도 몇 개에 쏠리면 체감은
-    단조롭다(top_share가 그걸 잡는다). 한 지표만 보면 오진한다.
-    """
-    total = sum(plan_counts.values())
-    if total == 0:
-        return RepertoireStats(
-            total_slots=0, unique_menus=0, top_share=0.0, hhi=0.0, top_menus=[]
-        )
-
-    ranked = sorted(plan_counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    top = ranked[:top_n]
-    top_share = sum(count for _, count in top) / total
-    hhi = sum((count / total) ** 2 for count in plan_counts.values())
-
-    return RepertoireStats(
-        total_slots=total,
-        unique_menus=len(plan_counts),
-        top_share=round(top_share, 3),
-        hhi=round(hhi, 4),
-        top_menus=top,
-    )

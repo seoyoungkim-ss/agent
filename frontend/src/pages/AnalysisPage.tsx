@@ -9,7 +9,6 @@ import {
   type DailyMenuPlanRuleResult,
   type MealType,
   type MenuFoodVectorRow,
-  type MenuPairRow,
   type MenuPerformanceRow,
   type MenuRotationRow,
   type PredictedNumbersRow,
@@ -578,346 +577,6 @@ export function CornerMetricComparisonSection() {
         )}
       </Card>
     </div>
-  );
-}
-
-const ALL_MENUS_TAB = "전체";
-
-// 메뉴 쌍을 표(정확한 수치)와 함께 관계도(연결성)로도 보여준다 — 노드 크기는
-// 그 메뉴가 관련된 쌍들의 동반 인원 합, 엣지 굵기는 lift(연관 강도)에 비례.
-function buildMenuPairGraphOption(
-  pairs: MenuPairRow[],
-  nodeColor: string,
-  chartTheme: { text: string },
-) {
-  const nodeWeight = new Map<string, number>();
-  for (const p of pairs) {
-    nodeWeight.set(p.menu_a, (nodeWeight.get(p.menu_a) ?? 0) + p.co_count);
-    nodeWeight.set(p.menu_b, (nodeWeight.get(p.menu_b) ?? 0) + p.co_count);
-  }
-  const maxWeight = Math.max(1, ...nodeWeight.values());
-  const maxLift = Math.max(1, ...pairs.map((p) => p.lift));
-
-  const nodes = [...nodeWeight.entries()].map(([name, weight]) => ({
-    name,
-    symbolSize: 14 + (weight / maxWeight) * 22,
-    itemStyle: { color: nodeColor },
-    // formatter를 안 주면 ECharts가 값(숫자)을 찍는다 — 메뉴명이 나와야 한다.
-    label: {
-      show: true,
-      position: "right" as const,
-      color: chartTheme.text,
-      fontSize: 11,
-      formatter: (p: { name: string }) => p.name,
-    },
-  }));
-  const edges = pairs.map((p) => ({
-    source: p.menu_a,
-    target: p.menu_b,
-    value: p.lift,
-    co_count: p.co_count,
-    lineStyle: { width: 1 + (p.lift / maxLift) * 4, color: nodeColor, opacity: 0.4, curveness: 0.1 },
-  }));
-
-  return {
-    tooltip: {
-      formatter: (params: {
-        dataType?: string;
-        name?: string;
-        data?: { source?: string; target?: string; value?: number; co_count?: number };
-      }) => {
-        if (params.dataType === "edge") {
-          const d = params.data ?? {};
-          return `${d.source} + ${d.target}<br/>동반 인원: ${d.co_count}<br/>lift: ${formatTooltipNumber(d.value ?? 0)}`;
-        }
-        return params.name ?? "";
-      },
-    },
-    series: [
-      {
-        type: "graph" as const,
-        layout: "force" as const,
-        roam: true,
-        draggable: true,
-        force: { repulsion: 140, edgeLength: [40, 100] },
-        edgeSymbol: ["none", "none"],
-        nodes,
-        edges,
-      },
-    ],
-  };
-}
-
-type PairSortKey = "co_count" | "lift";
-
-// PRD 10-2: 메뉴 동반 선택 쌍 = "메뉴 선호 연관 분석"(장바구니 분석과 같은 개념).
-// "부대찌개+참치김치찌개"처럼 자명한 조합(같은 카테고리)은 기본으로 숨기고,
-// 연관도(lift) 기준으로 정렬하면 "부대찌개를 선호하는 사람이 떡볶이도 유의미하게
-// 선호한다" 같은 직관적이지 않은 조합이 먼저 보인다.
-function MenuPairAnalysisSection({ corners }: { corners: { corner_id: number; corner_name: string }[] }) {
-  const chartTheme = useChartTheme();
-  const [selection, setSelection] = useState<string>(ALL_MENUS_TAB);
-  const [minVisitCount, setMinVisitCount] = useState(3);
-  const [minShare, setMinShare] = useState(30);
-  const [minCoCount, setMinCoCount] = useState(3);
-  const [sortKey, setSortKey] = useState<PairSortKey>("co_count");
-  const [showObviousPairs, setShowObviousPairs] = useState(false);
-
-  const isAll = selection === ALL_MENUS_TAB;
-  const effectiveCornerId = isAll ? null : Number(selection);
-
-  const cornerQuery = useQuery({
-    queryKey: ["corner-core-layer-menu-pairs", effectiveCornerId, minVisitCount, minShare],
-    queryFn: () =>
-      api.cornerCoreLayerMenuPairs(effectiveCornerId as number, {
-        period_start: PERIOD_START,
-        period_end: PERIOD_END,
-        min_visit_count: minVisitCount,
-        min_share: minShare / 100,
-      }),
-    enabled: !isAll && effectiveCornerId != null,
-  });
-
-  const allQuery = useQuery({
-    queryKey: ["top-menu-pairs", minCoCount],
-    queryFn: () =>
-      api.topMenuPairs({ period_start: PERIOD_START, period_end: PERIOD_END, min_co_count: minCoCount }),
-    enabled: isAll,
-  });
-
-  function filterAndSort(rows: MenuPairRow[]): MenuPairRow[] {
-    const filtered = showObviousPairs ? rows : rows.filter((r) => r.is_obvious_pair !== true);
-    return [...filtered].sort((a, b) => (sortKey === "lift" ? b.lift - a.lift : b.co_count - a.co_count));
-  }
-
-  const pairColumns = [
-    { key: "pair", label: "메뉴 쌍" },
-    { key: "co_count", label: "동반 인원", align: "right" as const },
-    { key: "lift", label: "연관도(lift, 그룹 내부 기준)", align: "right" as const },
-  ];
-  const pairRows = (rows: MenuPairRow[]) =>
-    filterAndSort(rows).map((r) => ({
-      pair: r.is_obvious_pair ? `${r.menu_a} + ${r.menu_b} (자명)` : `${r.menu_a} + ${r.menu_b}`,
-      co_count: r.co_count,
-      lift: r.lift.toFixed(2),
-    }));
-
-  const crossPairColumns = [
-    { key: "pair", label: "메뉴 쌍" },
-    { key: "corners", label: "코너 조합" },
-    { key: "co_count", label: "동반 인원", align: "right" as const },
-    { key: "lift", label: "연관도(lift, 그룹 내부 기준)", align: "right" as const },
-  ];
-  const crossPairRows = (rows: MenuPairRow[]) =>
-    filterAndSort(rows).map((r) => ({
-      pair: r.is_obvious_pair ? `${r.menu_a} + ${r.menu_b} (자명)` : `${r.menu_a} + ${r.menu_b}`,
-      corners: `${r.corner_a ?? "-"} ↔ ${r.corner_b ?? "-"}`,
-      co_count: r.co_count,
-      lift: r.lift.toFixed(2),
-    }));
-
-  const sortAndFilterControls = (
-    <>
-      <SegmentedControl
-        value={sortKey}
-        options={[
-          { label: "동반 인원순", value: "co_count" },
-          { label: "연관도(lift)순", value: "lift" },
-        ]}
-        onChange={setSortKey}
-      />
-      <label className="flex items-center gap-1.5 text-xs" style={{ color: "var(--ink-muted)" }}>
-        <input
-          type="checkbox"
-          checked={showObviousPairs}
-          onChange={(e) => setShowObviousPairs(e.target.checked)}
-        />
-        자명한 조합도 보기
-      </label>
-    </>
-  );
-
-  if (corners.length === 0) return null;
-
-  return (
-    <Card title="메뉴 동반 선택 쌍 — 메뉴 선호 연관 분석">
-      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-        "전체"는 코너 구분 없이 전체 인원 기준, 코너를 선택하면 그 코너 코어층/나머지가 각각 가장 흔하게
-        함께 고르는 메뉴 쌍을 봅니다(lift는 각 그룹 내부 기준이라 그룹 간 직접 비교는 동반 인원 수로
-        합니다). 자명한 조합(같은 음식 카테고리, food_vector 유사도 기준)은 기본으로 숨겨 뻔하지 않은
-        연관관계가 먼저 보이게 합니다.
-      </p>
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <SegmentedControl
-          value={selection}
-          options={[
-            { label: ALL_MENUS_TAB, value: ALL_MENUS_TAB },
-            ...corners.map((c) => ({ label: c.corner_name, value: String(c.corner_id) })),
-          ]}
-          onChange={setSelection}
-        />
-        {isAll ? (
-          <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-            최소 동반 인원
-            <input
-              type="number"
-              min={1}
-              className="w-14 rounded-md border px-2 py-1 text-[13px]"
-              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-              value={minCoCount}
-              onChange={(e) => setMinCoCount(Number(e.target.value))}
-            />
-          </label>
-        ) : (
-          <>
-            <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-              최소 방문횟수
-              <input
-                type="number"
-                min={1}
-                className="w-14 rounded-md border px-2 py-1 text-[13px]"
-                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                value={minVisitCount}
-                onChange={(e) => setMinVisitCount(Number(e.target.value))}
-              />
-            </label>
-            <label className="flex items-center gap-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-              최소 비중(%)
-              <input
-                type="number"
-                min={0}
-                max={100}
-                className="w-14 rounded-md border px-2 py-1 text-[13px]"
-                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                value={minShare}
-                onChange={(e) => setMinShare(Number(e.target.value))}
-              />
-            </label>
-          </>
-        )}
-        {sortAndFilterControls}
-      </div>
-
-      {isAll ? (
-        <>
-          {allQuery.isLoading && <LoadingState />}
-          {allQuery.isError && <ErrorState error={allQuery.error} />}
-          {allQuery.data && allQuery.data.length === 0 && (
-            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-              표본 부족
-            </p>
-          )}
-          {allQuery.data && allQuery.data.length > 0 && (
-            <>
-              <ReactECharts
-                option={buildMenuPairGraphOption(
-                  filterAndSort(allQuery.data),
-                  resolveColor("var(--accent)"),
-                  chartTheme,
-                )}
-                style={{ height: 320 }}
-              />
-              <Table columns={pairColumns} rows={pairRows(allQuery.data)} rowKey={(r) => r.pair as string} />
-            </>
-          )}
-        </>
-      ) : (
-        <>
-          {cornerQuery.isLoading && <LoadingState />}
-          {cornerQuery.isError && <ErrorState error={cornerQuery.error} />}
-          {cornerQuery.data && (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                  코어층 ({cornerQuery.data.core_layer.employee_count}명)
-                </p>
-                {cornerQuery.data.core_layer.top_pairs.length === 0 ? (
-                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                    표본 부족
-                  </p>
-                ) : (
-                  <>
-                    <ReactECharts
-                      option={buildMenuPairGraphOption(
-                        filterAndSort(cornerQuery.data.core_layer.top_pairs),
-                        resolveColor("var(--series-1)"),
-                        chartTheme,
-                      )}
-                      style={{ height: 260 }}
-                    />
-                    <Table
-                      columns={pairColumns}
-                      rows={pairRows(cornerQuery.data.core_layer.top_pairs)}
-                      rowKey={(r) => r.pair as string}
-                    />
-                  </>
-                )}
-                <div className="mt-4">
-                  <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                    다른 코너 조합 Top {cornerQuery.data.core_layer.cross_corner_pairs.length} — 같은 코너
-                    조합에 묻히지 않게 따로 모았습니다
-                  </p>
-                  {cornerQuery.data.core_layer.cross_corner_pairs.length === 0 ? (
-                    <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                      표본 부족
-                    </p>
-                  ) : (
-                    <Table
-                      columns={crossPairColumns}
-                      rows={crossPairRows(cornerQuery.data.core_layer.cross_corner_pairs)}
-                      rowKey={(r) => r.pair as string}
-                    />
-                  )}
-                </div>
-              </div>
-              <div>
-                <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                  나머지 ({cornerQuery.data.non_core.employee_count}명)
-                </p>
-                {cornerQuery.data.non_core.top_pairs.length === 0 ? (
-                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                    표본 부족
-                  </p>
-                ) : (
-                  <>
-                    <ReactECharts
-                      option={buildMenuPairGraphOption(
-                        filterAndSort(cornerQuery.data.non_core.top_pairs),
-                        resolveColor("var(--series-2)"),
-                        chartTheme,
-                      )}
-                      style={{ height: 260 }}
-                    />
-                    <Table
-                      columns={pairColumns}
-                      rows={pairRows(cornerQuery.data.non_core.top_pairs)}
-                      rowKey={(r) => r.pair as string}
-                    />
-                  </>
-                )}
-                <div className="mt-4">
-                  <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                    다른 코너 조합 Top {cornerQuery.data.non_core.cross_corner_pairs.length} — 같은 코너
-                    조합에 묻히지 않게 따로 모았습니다
-                  </p>
-                  {cornerQuery.data.non_core.cross_corner_pairs.length === 0 ? (
-                    <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                      표본 부족
-                    </p>
-                  ) : (
-                    <Table
-                      columns={crossPairColumns}
-                      rows={crossPairRows(cornerQuery.data.non_core.cross_corner_pairs)}
-                      rowKey={(r) => r.pair as string}
-                    />
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </Card>
   );
 }
 
@@ -2979,10 +2638,9 @@ function usePlanPeriod(defaultDays = "90") {
 const ROTATION_MAIN_ROLE = "메인";
 
 /**
- * 메뉴 중복 점검 — "이 메뉴 최근에 또 내보내지 않았나"(회전 이력)만 다룬다.
- * "한 끼 구성 겹침" 점검은 관심사가 달라 `MealClashCheckSection`으로,
- * "자주 반복되는 부찬 랭킹"은 별도 기간·코너 필터를 쓰는 독립 도구라
- * `RepeatedSideDishRankingSection`으로 각각 분리했다.
+ * 재편성 점검 패널 — "이 메뉴 최근에 또 내보내지 않았나"(회전 이력)만 다룬다.
+ * §82: `MenuDuplicationCheckSection`의 탭 하나로 합쳐지면서 카드 래퍼는
+ * 벗겨내고 내부 로직은 그대로 옮겼다(원래 이름 `MenuRotationCheckSection`).
  *
  * §81: "너무 모든 내용이 다 뜬다"는 재신고로, 경고 있는 메뉴를 전부
  * 나열하던 방식(그룹별 역할 분리 + preview-cap)을 걷어내고 (1) 기간 내
@@ -2991,7 +2649,7 @@ const ROTATION_MAIN_ROLE = "메인";
  * 보여준다. 각 항목의 편성이력(그 메뉴·코너의 전체 편성일)은 "이력 보기"로
  * 펼쳐야 볼 수 있다.
  */
-function MenuRotationCheckSection() {
+function RotationCheckPanel() {
   const [rotationStart, setRotationStart] = useState(PERIOD_START);
   const [rotationEnd, setRotationEnd] = useState(PERIOD_END);
   const [gapThresholdInput, setGapThresholdInput] = useState("");
@@ -3135,7 +2793,7 @@ function MenuRotationCheckSection() {
   }
 
   return (
-    <Card title="메뉴 중복 점검 — 이 메뉴 최근에 또 내보내지 않았나">
+    <>
       <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
         기간 내 직전 편성 대비 가장 이르게(짧은 간격으로) 재편성된 메인 메뉴 Top5입니다. 아래 "편성
         기준(일)"을 입력하면 그 기준보다 짧게 재편성된 메인 메뉴 전체를 확인할 수 있습니다(부찬·건강가든은
@@ -3218,18 +2876,19 @@ function MenuRotationCheckSection() {
           )}
         </div>
       )}
-    </Card>
+    </>
   );
 }
 
 /**
- * 자주 반복되는 부찬 랭킹 — 담당자: "부찬 중복 볼 때 보기가 너무 불편함,
+ * 부찬 반복 랭킹 패널 — 담당자: "부찬 중복 볼 때 보기가 너무 불편함,
  * 정말 자주 나오고 돌려막기한 부찬을 보고싶어". §79: 원래
  * `MenuRotationCheckSection` 카드 하단에 자기 기간·코너 필터를 따로 갖고
  * 붙어 있었는데("보기 힘듦" 신고) 회전 이력과는 독립된 도구라 별도
- * 카드로 뺐다.
+ * 카드로 뺐다. §82: 다시 `MenuDuplicationCheckSection`의 탭 하나로
+ * 합쳐지면서 카드 래퍼만 벗겨냈다(원래 이름 `RepeatedSideDishRankingSection`).
  */
-function RepeatedSideDishRankingSection() {
+function RepeatedSideDishPanel() {
   const [repeatStart, setRepeatStart] = useState(PERIOD_START);
   const [repeatEnd, setRepeatEnd] = useState(PERIOD_END);
   const [repeatCornerId, setRepeatCornerId] = useState<number | null>(null);
@@ -3286,7 +2945,7 @@ function RepeatedSideDishRankingSection() {
   });
 
   return (
-    <Card title="자주 반복되는 부찬 랭킹">
+    <>
       <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
         기간을 직접 골라 볼 수 있습니다. 같은 코너 안에서만 세고(다른 코너에 같은 반찬이
         나온 건 중복이 아님), 건강가든은 공용이라 어느 코너와 겹쳐도 셉니다.
@@ -3451,22 +3110,23 @@ function RepeatedSideDishRankingSection() {
           )}
         </>
       )}
-    </Card>
+    </>
   );
 }
 
 /**
- * 한 끼 구성 겹침 점검 — "이 한 끼 구성이 겹치지 않나"(슬롯 내 재료·특성
- * 중복). `MenuRotationCheckSection`과 관심사가 달라 별도 카드로 분리했다
- * (2026-08 "너무 복잡하게 나타남" 신고). 주간 네비게이션은 이 섹션만 쓰므로
- * 로컬 상태로 옮겼다.
+ * 한 끼 겹침 패널 — "이 한 끼 구성이 겹치지 않나"(슬롯 내 재료·특성
+ * 중복). 회전 이력과 관심사가 달라 원래 별도 카드였다(2026-08 "너무
+ * 복잡하게 나타남" 신고). §82: `MenuDuplicationCheckSection`의 탭
+ * 하나로 합쳐지면서 카드 래퍼만 벗겨냈다(원래 이름 `MealClashCheckSection`).
+ * 주간 네비게이션은 이 패널만 쓰므로 로컬 상태로 유지한다.
  */
 // §79: 담당자 "메뉴 중복점검 보기가 힘듦" — 슬롯이 많으면 그룹·접기 없이
-// 다 펼쳐지던 걸 요일별로 묶고 기본 상위 N일만 보여준다(MenuRotationCheckSection
+// 다 펼쳐지던 걸 요일별로 묶고 기본 상위 N일만 보여준다(RotationCheckPanel
 // 의 ROTATION_PREVIEW_COUNT/showAll 관례를 그대로 따름).
 const CLASH_DAY_PREVIEW_COUNT = 3;
 
-function MealClashCheckSection() {
+function MealClashPanel() {
   const [selectedMonday, setSelectedMonday] = useState(() => weeklyMondayOf(new Date()));
   const periodEnd = weeklyAddDays(selectedMonday, 6);
   const [showAllClashDays, setShowAllClashDays] = useState(false);
@@ -3494,7 +3154,7 @@ function MealClashCheckSection() {
   const visibleClashDates = showAllClashDays ? clashDates : clashDates.slice(0, CLASH_DAY_PREVIEW_COUNT);
 
   return (
-    <Card title="한 끼 구성 겹침 점검 — 이 한 끼 구성이 겹치지 않나">
+    <>
       <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
         같은 날·같은 코너·같은 끼니 안에서 메인·부찬·건강가든끼리 재료가 겹치거나(콩나물국밥 +
         콩나물무침) 특성이 겹치는지(둘 다 매움, 둘 다 탄수화물) 봅니다.
@@ -3607,6 +3267,36 @@ function MealClashCheckSection() {
           {showAllClashDays ? "접기" : `전체 ${clashDates.length}일 보기`}
         </button>
       )}
+    </>
+  );
+}
+
+/**
+ * §82: "메뉴 중복 점검" 3개 카드(재편성 점검/부찬 반복 랭킹/한 끼 겹침)를
+ * 담당자가 "1개로 통합해서 남김"으로 확정한 데 따라 하나의 카드 안 탭
+ * 전환으로 묶었다 — 세 패널은 서로 상태를 공유하지 않고(날짜 범위도
+ * 각자 관리) API 호출도 독립적이라 로직은 그대로 두고 카드 껍데기만
+ * 합쳤다. 탭을 바꾸면 안 보이는 패널은 언마운트돼(다시 돌아오면 재요청)
+ * 페이지 로드 시 동시에 나가던 쿼리가 3개에서 1개(기본 탭)로 준다.
+ */
+function MenuDuplicationCheckSection() {
+  const [activeTab, setActiveTab] = useState<"rotation" | "repeated" | "clash">("rotation");
+  return (
+    <Card title="메뉴 중복 점검">
+      <div className="mb-4">
+        <SegmentedControl
+          value={activeTab}
+          options={[
+            { label: "재편성 점검", value: "rotation" },
+            { label: "부찬 반복 랭킹", value: "repeated" },
+            { label: "한 끼 겹침", value: "clash" },
+          ]}
+          onChange={setActiveTab}
+        />
+      </div>
+      {activeTab === "rotation" && <RotationCheckPanel />}
+      {activeTab === "repeated" && <RepeatedSideDishPanel />}
+      {activeTab === "clash" && <MealClashPanel />}
     </Card>
   );
 }
@@ -3863,71 +3553,6 @@ function MenuPlanPerformanceSection() {
     </Card>
   );
 }
-
-/** 코너별 레퍼토리 진단 — 몇 종을 돌렸고 얼마나 쏠렸나. */
-function MenuRepertoireSection() {
-  const { days, setDays, periodStart, periodEnd } = usePlanPeriod();
-  const query = useQuery({
-    queryKey: ["menu-plan-repertoire", periodStart, periodEnd],
-    queryFn: () => api.menuPlanRepertoire({ period_start: periodStart, period_end: periodEnd }),
-  });
-
-  return (
-    <Card title="코너별 레퍼토리 — 메뉴 다양성 진단">
-      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        코너가 그 기간에 <strong>몇 종을 돌렸고</strong> 상위 5개에 얼마나 쏠렸는지 봅니다. 집중도(HHI)는
-        0에 가까울수록 고르게 분산된 것입니다. 종수가 적어도 고르게 돌리면 체감 다양성은 나쁘지 않고,
-        종수가 많아도 몇 개에 쏠리면 단조롭게 느껴지므로 두 지표를 같이 봅니다.
-      </p>
-      <div className="mb-3 flex flex-wrap items-center gap-3">
-        <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-          조회 기간
-        </span>
-        <SegmentedControl value={days} options={PLAN_PERIOD_OPTIONS} onChange={setDays} />
-      </div>
-      {query.isLoading && <LoadingState />}
-      {query.isError && <ErrorState error={query.error} />}
-      {query.data && query.data.items.length === 0 && (
-        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          이 기간에 등록된 식단표가 없습니다.
-        </p>
-      )}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        {(query.data?.items ?? []).map((r) => (
-          <div
-            key={`${r.corner_name}-${r.menu_role}`}
-            className="rounded-xl border p-3"
-            style={{ borderColor: "var(--border)" }}
-          >
-            <div className="flex items-baseline justify-between">
-              <span className="text-[13px] font-medium">
-                {r.corner_name} · {r.menu_role}
-              </span>
-              <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                {r.unique_menus}종 / {r.total_slots}회 편성
-              </span>
-            </div>
-            <div className="mt-1 text-xs" style={{ color: "var(--ink-secondary)" }}>
-              상위 5개 비중 {(r.top_share * 100).toFixed(0)}% · 집중도(HHI) {r.hhi.toFixed(3)}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {r.top_menus.map((m) => (
-                <span
-                  key={m.menu_name}
-                  className="rounded-md border px-1.5 py-0.5 text-xs"
-                  style={{ borderColor: "var(--border)", color: "var(--ink-muted)" }}
-                >
-                  {m.menu_name} {m.count}
-                </span>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </Card>
-  );
-}
-
 
 /**
  * PRD 7.1 확장(2026-08, §75): 날짜별 실측 식수 × 강수량 타임라인. 담당자
@@ -4415,19 +4040,12 @@ export function WeatherCorrelationSection() {
 
 /** 메뉴 편성·운영 — "다음 주 식단을 어떻게 짤까"에 답하는 화면. */
 export function MenuPlanningPage() {
-  // 메뉴 동반 선택 쌍은 코너 목록이 필요한데, 배치 집계(daily_corner_stats)에
-  // 의존하지 않는 마스터 기반 목록을 쓴다(집계 전에도 코너가 보이도록).
-  const cornersQuery = useQuery({ queryKey: ["corner-list"], queryFn: () => api.cornerList() });
   return (
     <div className="space-y-6">
       <WeeklyMenuReviewTab />
-      <MenuRotationCheckSection />
-      <RepeatedSideDishRankingSection />
-      <MealClashCheckSection />
+      <MenuDuplicationCheckSection />
       <MenuPlanPerformanceSection />
       <MenuComboSection />
-      <MenuRepertoireSection />
-      <MenuPairAnalysisSection corners={cornersQuery.data ?? []} />
     </div>
   );
 }

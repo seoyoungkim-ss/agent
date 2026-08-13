@@ -35,9 +35,7 @@ from app.services.aggregation import (
 )
 from app.services.corner_core_layer import (
     build_employee_corner_counts,
-    build_menu_controlled_meal_log_rows,
     classify_corner_core_layer,
-    classify_menu_controlled_corner_preference,
 )
 from app.services.corner_aliases import LOW_HEADCOUNT_EXEMPT_CORNER_NAMES
 from app.services.food_vector import (
@@ -73,8 +71,6 @@ from app.services.menu_performance import (
 from app.services.menu_affinity import (
     build_employee_menu_sets,
     compute_menu_affinity,
-    compute_top_menu_pairs,
-    is_obvious_pair,
 )
 from app.services.menu_combination import (
     build_side_combos_bulk,
@@ -96,7 +92,6 @@ from app.services.weekly_menu_prediction import (
 from app.services.menu_clash import find_ingredient_clashes, find_vector_clashes
 from app.services.menu_plan_analytics import (
     classify_planning_action,
-    compute_repertoire,
     median_or_zero,
 )
 from app.services.menu_plan_rules import (
@@ -970,122 +965,6 @@ def corner_main_menu_by_date(period_start: dt.date, period_end: dt.date, db: Ses
         {"corner_id": corner_id, "plan_date": plan_date.isoformat(), "menu_name": menu_name}
         for corner_id, plan_date, menu_name in rows
     ]
-
-
-@router.get("/corners/{corner_id}/core-layer-menu-pairs")
-def corner_core_layer_menu_pairs(
-    corner_id: int,
-    period_start: dt.date,
-    period_end: dt.date,
-    min_visit_count: int = 3,
-    min_share: float = 0.3,
-    min_co_count: int = 2,
-    top_n: int = 10,
-    db: Session = Depends(get_db),
-):
-    """PRD 6.2: 코너 코어층(반복 이용자) vs 나머지 인원의 메뉴 동반 선택 쌍 비교.
-
-    lift는 각 그룹(코어층/나머지) 내부 모집단 기준으로 따로 계산되므로, 두 그룹의
-    lift 수치를 직접 비교하면 안 된다 — co_count(동반 인원 수)만 그룹 간 비교에
-    쓸 수 있다.
-    """
-    corner = db.get(CornerMaster, corner_id)
-    if corner is None:
-        raise HTTPException(status_code=404, detail="코너를 찾을 수 없습니다")
-
-    employee_corner_counts = build_employee_corner_counts(db, period_start, period_end)
-    core_results = classify_corner_core_layer(
-        employee_corner_counts, corner_id, min_visit_count=min_visit_count, min_share=min_share
-    )
-    core_employee_ids = {r.employee_id for r in core_results}
-    non_core_employee_ids = set(employee_corner_counts.keys()) - core_employee_ids
-
-    employee_menus = build_employee_menu_sets(db, period_start, period_end)
-    core_menus = {e: m for e, m in employee_menus.items() if e in core_employee_ids}
-    non_core_menus = {e: m for e, m in employee_menus.items() if e in non_core_employee_ids}
-
-    # 동반선택쌍의 각 메뉴가 어느 코너 소속인지 붙여준다 — "다른 코너 조합"을
-    # 화면에서 구분해 보여주려는 목적(취식기록 기준 최빈 코너, weekly_menu_plan은
-    # 누락되기 쉬워 안 씀 — _corner_id_by_menu_from_meal_log 관례와 동일).
-    corner_id_by_menu_id = _corner_id_by_menu_from_meal_log(db, period_start, period_end)
-    menu_id_by_name = {name: mid for mid, name in db.query(MenuMaster.menu_id, MenuMaster.menu_name).all()}
-    corner_name_by_id = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
-    # 같은 카테고리 메뉴끼리(예: 부대찌개+참치김치찌개)는 "자명한 조합"으로 표시해
-    # 화면에서 뺄 수 있게 한다 — food_vector 코사인 유사도 기반(menu_affinity.py).
-    food_vector_by_name = {
-        m.menu_name: [float(x) for x in m.food_vector]
-        for m in db.query(MenuMaster).all()
-        if m.food_vector is not None
-    }
-
-    def _corner_name_for_menu(menu_name: str) -> str | None:
-        menu_id = menu_id_by_name.get(menu_name)
-        corner_id = corner_id_by_menu_id.get(menu_id) if menu_id is not None else None
-        return corner_name_by_id.get(corner_id) if corner_id is not None else None
-
-    def _serialize(pairs):
-        return [
-            {
-                "menu_a": p.menu_a,
-                "menu_b": p.menu_b,
-                "co_count": p.co_count,
-                "lift": p.lift,
-                "corner_a": _corner_name_for_menu(p.menu_a),
-                "corner_b": _corner_name_for_menu(p.menu_b),
-                "is_obvious_pair": is_obvious_pair(
-                    food_vector_by_name.get(p.menu_a), food_vector_by_name.get(p.menu_b)
-                ),
-            }
-            for p in pairs
-        ]
-
-    def _cross_corner_top_pairs(employee_menus_subset: dict[str, set[str]]):
-        # top_n 안에서만 자르면 같은 코너 조합이 워낙 흔해 다른 코너 조합이 거의
-        # 안 보이므로, 후보 풀을 넉넉히 넓혀 계산한 뒤 다른 코너 조합만 걸러
-        # top_n을 뽑는다.
-        candidates = _serialize(
-            compute_top_menu_pairs(employee_menus_subset, min_co_count=min_co_count, top_n=max(top_n * 20, 200))
-        )
-        cross = [p for p in candidates if p["corner_a"] and p["corner_b"] and p["corner_a"] != p["corner_b"]]
-        return cross[:top_n]
-
-    # 코너 충성도 신호 2번째 기준 — 같은 날 같은 메인메뉴가 여러 코너에서 동시
-    # 제공된 경우, 메뉴가 같으니 코너 선택은 순수하게 코너 선호를 반영한다고 볼
-    # 수 있다(PRD, 2026-07). 방문 빈도/비중(위 core_results)과는 다른 신호라
-    # AND로 합치지 않고 별도 지표로 나란히 보여준다.
-    menu_controlled_rows = build_menu_controlled_meal_log_rows(db, period_start, period_end)
-    menu_controlled_preferences = classify_menu_controlled_corner_preference(menu_controlled_rows)
-    this_corner_preference = menu_controlled_preferences.get(corner_id)
-
-    return {
-        "corner_id": corner_id,
-        "corner_name": corner.corner_name,
-        "menu_controlled_preference": (
-            {
-                "contested_occasions": this_corner_preference.contested_occasions,
-                "chosen_count": this_corner_preference.chosen_count,
-                "preference_ratio": round(this_corner_preference.preference_ratio, 3),
-            }
-            if this_corner_preference
-            else None
-        ),
-        "core_layer": {
-            "employee_count": len(core_employee_ids),
-            "min_visit_count": min_visit_count,
-            "min_share": min_share,
-            "top_pairs": _serialize(
-                compute_top_menu_pairs(core_menus, min_co_count=min_co_count, top_n=top_n)
-            ),
-            "cross_corner_pairs": _cross_corner_top_pairs(core_menus),
-        },
-        "non_core": {
-            "employee_count": len(non_core_employee_ids),
-            "top_pairs": _serialize(
-                compute_top_menu_pairs(non_core_menus, min_co_count=min_co_count, top_n=top_n)
-            ),
-            "cross_corner_pairs": _cross_corner_top_pairs(non_core_menus),
-        },
-    }
 
 
 @router.get("/corners/core-layer-summary")
@@ -2529,56 +2408,6 @@ def menu_plan_performance(
     }
 
 
-@router.get("/menu-plan/repertoire")
-def menu_plan_repertoire(
-    period_start: dt.date,
-    period_end: dt.date,
-    db: Session = Depends(get_db),
-):
-    """코너 × 역할(메인/부찬/건강가든)별 레퍼토리 다양성 (2026-08).
-
-    "이 코너는 8개월간 몇 종을 돌렸나, 상위 몇 개에 얼마나 쏠렸나"를 본다.
-    `top_share`와 `hhi`를 둘 다 내는 이유는 `menu_plan_analytics`의 docstring 참고.
-    """
-    rows = (
-        db.query(
-            CornerMaster.corner_name,
-            WeeklyMenuPlan.menu_role,
-            MenuMaster.menu_name,
-        )
-        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
-        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
-        .filter(WeeklyMenuPlan.plan_date.between(period_start, period_end))
-        .all()
-    )
-    buckets: dict[tuple[str, str], dict[str, int]] = {}
-    for corner_name, menu_role, menu_name in rows:
-        role_value = menu_role.value if hasattr(menu_role, "value") else str(menu_role)
-        counts = buckets.setdefault((corner_name, role_value), {})
-        counts[menu_name] = counts.get(menu_name, 0) + 1
-
-    results = []
-    for (corner_name, role_value), counts in buckets.items():
-        stats = compute_repertoire(counts)
-        results.append(
-            {
-                "corner_name": corner_name,
-                "menu_role": role_value,
-                "total_slots": stats.total_slots,
-                "unique_menus": stats.unique_menus,
-                "top_share": stats.top_share,
-                "hhi": stats.hhi,
-                "top_menus": [{"menu_name": n, "count": c} for n, c in stats.top_menus],
-            }
-        )
-    results.sort(key=lambda r: (r["corner_name"], r["menu_role"]))
-    return {
-        "period_start": period_start.isoformat(),
-        "period_end": period_end.isoformat(),
-        "items": results,
-    }
-
-
 @router.get("/menu-combinations/spread-ranking")
 def menu_combination_spread_ranking(
     period_start: dt.date,
@@ -2702,36 +2531,3 @@ def menu_side_combinations(
             for s in summaries
         ],
     }
-
-
-@router.get("/menu-pairs/top")
-def top_menu_pairs(
-    period_start: dt.date,
-    period_end: dt.date,
-    min_co_count: int = 3,
-    top_n: int = 10,
-    db: Session = Depends(get_db),
-):
-    """PRD 6.2 확장: 코너 구분 없이 전체 인원 기준 가장 흔한 메뉴 동반 선택 쌍.
-
-    코너별 코어층 비교(`/corners/{corner_id}/core-layer-menu-pairs`)는 특정
-    코너의 반복 이용자로 범위를 좁히지만, 이건 전체 인원·전체 메뉴를 대상으로
-    구한다 — 같은 `compute_top_menu_pairs`를 코너로 나누지 않고 그대로 호출한다.
-    """
-    employee_menus = build_employee_menu_sets(db, period_start, period_end)
-    pairs = compute_top_menu_pairs(employee_menus, min_co_count=min_co_count, top_n=top_n)
-    food_vector_by_name = {
-        m.menu_name: [float(x) for x in m.food_vector]
-        for m in db.query(MenuMaster).all()
-        if m.food_vector is not None
-    }
-    return [
-        {
-            "menu_a": p.menu_a,
-            "menu_b": p.menu_b,
-            "co_count": p.co_count,
-            "lift": p.lift,
-            "is_obvious_pair": is_obvious_pair(food_vector_by_name.get(p.menu_a), food_vector_by_name.get(p.menu_b)),
-        }
-        for p in pairs
-    ]

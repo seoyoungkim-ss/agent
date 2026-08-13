@@ -1,6 +1,4 @@
-import pytest
-
-from app.services.menu_affinity import compute_menu_affinity, compute_top_menu_pairs, is_obvious_pair
+from app.services.menu_affinity import compute_menu_affinity
 
 
 def test_strong_co_occurrence_has_high_lift():
@@ -83,73 +81,3 @@ def test_top_n_limits_results():
     employee_menus = {f"E{i}": {"떡볶이", f"메뉴{i}"} for i in range(20)}
     results = compute_menu_affinity(employee_menus, "떡볶이", min_co_count=1, top_n=5)
     assert len(results) == 5
-
-
-def test_top_menu_pairs_ranks_most_common_pair_first():
-    # 떡볶이+짜장면 쌍이 4번으로 가장 흔함
-    employee_menus = {
-        "E1": {"떡볶이", "짜장면"},
-        "E2": {"떡볶이", "짜장면"},
-        "E3": {"떡볶이", "짜장면"},
-        "E4": {"떡볶이", "짜장면"},
-        "E5": {"돈까스", "순대"},
-        "E6": {"돈까스", "순대"},
-    }
-    results = compute_top_menu_pairs(employee_menus, min_co_count=2)
-    top = results[0]
-    assert {top.menu_a, top.menu_b} == {"떡볶이", "짜장면"}
-    assert top.co_count == 4
-
-
-def test_top_menu_pairs_min_co_count_filters():
-    employee_menus = {
-        "E1": {"A", "B"},
-        "E2": {"C", "D"},
-        "E3": {"C", "D"},
-        "E4": {"C", "D"},
-    }
-    results = compute_top_menu_pairs(employee_menus, min_co_count=2)
-    pairs = [{r.menu_a, r.menu_b} for r in results]
-    assert {"A", "B"} not in pairs  # co_count=1이라 걸러짐
-    assert {"C", "D"} in pairs
-
-
-def test_top_menu_pairs_top_n_limits_results():
-    employee_menus = {f"E{i}": {"떡볶이", f"메뉴{i}", "짜장면"} for i in range(20)}
-    results = compute_top_menu_pairs(employee_menus, min_co_count=1, top_n=5)
-    assert len(results) == 5
-
-
-def test_top_menu_pairs_empty_input_returns_empty():
-    assert compute_top_menu_pairs({}) == []
-
-
-def test_top_menu_pairs_lift_matches_formula():
-    employee_menus = {
-        "E1": {"A", "B"},
-        "E2": {"A", "B"},
-        "E3": {"A"},
-        "E4": {"B"},
-    }
-    results = compute_top_menu_pairs(employee_menus, min_co_count=1)
-    pair = next(r for r in results if {r.menu_a, r.menu_b} == {"A", "B"})
-    # lift(A,B) = co_count * total / (count_A * count_B) = 2 * 4 / (3 * 3)
-    assert pair.lift == pytest.approx(2 * 4 / (3 * 3))
-
-
-def test_is_obvious_pair_true_for_near_identical_vectors():
-    # 부대찌개-참치김치찌개처럼 같은 카테고리(둘 다 매운맛/국물 강함)
-    a = [0.9, 0.1, 0.5, 0.2, 0.3, 0.4, 0.3, 0.1, 0.9, 0.3]
-    b = [0.88, 0.12, 0.52, 0.18, 0.31, 0.42, 0.29, 0.1, 0.87, 0.28]
-    assert is_obvious_pair(a, b) is True
-
-
-def test_is_obvious_pair_false_for_different_vectors():
-    a = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    b = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    assert is_obvious_pair(a, b) is False
-
-
-def test_is_obvious_pair_none_when_vector_missing():
-    assert is_obvious_pair(None, [0.5] * 10) is None
-    assert is_obvious_pair([0.5] * 10, None) is None

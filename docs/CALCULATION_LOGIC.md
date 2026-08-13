@@ -5771,3 +5771,125 @@ null 제외된 코너-메뉴 랭킹 행)의 `recent_avg_headcount` 합계로
   값을 넣으면 기준 미달 목록이 추가로 뜨며 "편성이력 보기"로
   드릴다운되는지, (6) 편성빈도×성과의 NO_INTAKE 목록이 렌더되는지
   (이 개발 DB는 8개뿐이라 12개 임계값 아래라 토글 버튼은 안 뜸 — 정상).
+
+## §82. 기능 축소 — 메뉴 편성·운영 탭 8개 섹션 → 4개로 간결화 (2026-08)
+
+81라운드 동안 계속 "추가"만 해온 결과 "메뉴 편성·운영" 탭이
+`WeeklyMenuReviewTab`·`MenuRotationCheckSection`(메뉴 중복 점검)·
+`RepeatedSideDishRankingSection`(부찬 반복 랭킹)·`MealClashCheckSection`
+(한 끼 구성 겹침 점검)·`MenuPlanPerformanceSection`(편성 빈도×성과)·
+`MenuComboSection`(부찬 조합 만족도)·`MenuRepertoireSection`(레퍼토리
+집중도)·`MenuPairAnalysisSection`(코너 동반 선택쌍) 8개 섹션이 한 페이지에
+계속 쌓인 상태였다. 담당자가 "전체적으로 기능을 축소하고 간결하게
+정리"하고 싶다고 요청했고, AskUserQuestion으로 확인한 결과:
+
+- **목적**: 화면이 너무 복잡해 실사용자(식당 운영담당자)가 헷갈림 —
+  실제 쓰는 핵심 기능만 남긴다.
+- **범위**: 메뉴 편성·운영 탭 우선(8개 섹션으로 가장 많고, 서로 겹치는
+  기능이 있다는 문제의식).
+- **방식**: 코드까지 완전 삭제(단순 UI 숨김이 아님) — git 이력에서
+  나중에 복원 가능하니 코드량 자체를 줄인다.
+
+8개 섹션을 세 그룹으로 나눠 확인했다:
+- **"중복" 계열 3개**(메뉴 중복 점검=재편성 간격, 부찬 반복 랭킹=반복
+  횟수, 한 끼 구성 겹침 점검=같은 끼니 내 재료/특성 겹침) — 서로 다른
+  각도지만 개념이 겹쳐 보인다는 지적. **1개 카드로 통합**(삭제 아님 —
+  기능 자체는 다 남기되 카드 수만 줄인다).
+- **"탐색적 분석" 계열 3개**(부찬 조합별 만족도, 레퍼토리 집중도, 코너
+  동반 선택쌍) — 일상 운영 판단보다 탐색적 분석 도구에 가깝다는 지적.
+  부찬 조합별 만족도는 남기고, **레퍼토리 집중도·코너 동반 선택쌍은
+  완전 삭제**.
+- **핵심 2개**(주간 식단표 관리+규칙검증, 편성 빈도×성과) — 실제
+  식단표를 관리하고 실행 가능한 추천을 주는 화면이라 **그대로 유지**.
+
+결과: `MenuPlanningPage`가 8개 섹션 → **4개**(주간 식단표 관리, 메뉴
+중복 점검(통합), 편성 빈도×성과, 부찬 조합별 만족도)로 줄었다.
+
+### 완전 삭제 — 레퍼토리 집중도 + 코너 동반 선택쌍
+
+사전 조사(Explore)로 삭제 대상의 의존 관계를 정확히 확인했다 — 프론트
+다른 화면에서 재사용되는 함수·타입은 없었다. 백엔드는 엔드포인트
+3개(`GET /menu-plan/repertoire`, `GET /corners/{corner_id}/core-layer-menu-pairs`,
+`GET /menu-pairs/top`)를 지우면서, 그 엔드포인트들만 쓰던 서비스
+함수만 같이 지웠다: `compute_repertoire`(`menu_plan_analytics.py`),
+`build_menu_controlled_meal_log_rows`/`classify_menu_controlled_corner_preference`
+(`corner_core_layer.py`), `is_obvious_pair`/`compute_top_menu_pairs`
+(`menu_affinity.py`). 반면 같은 파일의 `build_employee_corner_counts`/
+`classify_corner_core_layer`(코너 코어층 요약 엔드포인트가 계속 씀),
+`build_employee_menu_sets`(메뉴 동반선택 엔드포인트가 계속 씀),
+`_corner_id_by_menu_from_meal_log`(`dashboard.py`/`simulation.py`도
+직접 import)는 **다른 곳에서 재사용 중이라 절대 지우지 않았다** — "삭제
+대상 엔드포인트에서만 쓰였는지"를 exhaustive grep으로 하나하나 확인한
+뒤에야 지웠다.
+
+프론트에서는 `MenuRepertoireSection`·`MenuPairAnalysisSection` 함수
+전체와 그 전용 헬퍼(`buildMenuPairGraphOption`, 모듈 상수
+`ALL_MENUS_TAB`, `type PairSortKey`)를 삭제하고, `MenuPlanningPage`가
+`MenuPairAnalysisSection`에게 `corners` prop을 주기 위해서만 갖고 있던
+`cornersQuery` 선언도 같이 지웠다(단 `api.cornerList()` 자체는
+`HomePage.tsx`/`MenuComboSection`/`RepeatedSideDishRankingSection`이
+각자 독립적으로 호출하므로 함수는 유지). `client.ts`에서도 대응하는
+타입·함수(`menuPlanRepertoire`, `cornerCoreLayerMenuPairs`,
+`topMenuPairs`, `RepertoireResponse`/`RepertoireRow`,
+`MenuPairRow`/`CornerCoreLayerMenuPairsResponse`)를 지웠다.
+
+테스트는 삭제된 엔드포인트를 직접 때리는 API 테스트 10개와 삭제된
+서비스 함수의 유닛 테스트 17개(레퍼토리 6개, `menu_affinity` 8개,
+`corner_core_layer`의 `menu_controlled_preference` 3개)를 지우고,
+`test_demoted_features_keep_working_apis`(예전 "UI만 숨기고 API는
+유지" 라운드의 계약 테스트)는 전체 삭제가 아니라 이번에 지운 두
+엔드포인트에 대한 assert 두 줄만 제거해 살아있는 다른 demoted
+엔드포인트 검증은 그대로 남겼다.
+
+### 통합 — "메뉴 중복 점검" 하나로(재편성/부찬반복/한끼겹침)
+
+세 컴포넌트는 서로 상태를 공유하지 않고(날짜 범위도 각자 관리 —
+`MealClashCheckSection`은 주 단위 이전/다음 네비게이터라 나머지 둘의
+자유 시작·종료일 선택기와 구조가 달라 하나의 날짜 컨트롤로 억지로
+통합하지 않았다) API 호출도 독립적이라, **로직은 그대로 두고 카드
+껍데기만 하나로 합쳤다** — 백엔드·`client.ts` 변경 없음.
+
+새 컴포넌트 `MenuDuplicationCheckSection`이 `activeTab` state
+(`"rotation" | "repeated" | "clash"`)와 `SegmentedControl`로 세 패널
+중 하나만 렌더한다. 기존 `MenuRotationCheckSection`/
+`RepeatedSideDishRankingSection`/`MealClashCheckSection` 세 함수는
+이름을 `RotationCheckPanel`/`RepeatedSideDishPanel`/`MealClashPanel`로
+바꾸고 최상위 `<Card title="...">...</Card>` 래퍼만 벗겨내 안쪽
+`useState`/`useQuery`/JSX는 그대로 이식했다(§81에서 재설계한 Top5+
+편성기준, 정렬+클릭 상세, 요일별 그룹 로직은 완전히 그대로 유지). 탭을
+바꾸면 안 보이는 패널은 언마운트되고(다시 돌아오면 재요청) —
+`WeatherCorrelationSection`의 날씨유형/계절 탭 전환이 이미 같은 패턴이라
+일관된 관례. 부수 효과로 페이지 로드 시 동시에 나가던 API 요청이
+3개에서 1개(기본 탭)로 줄었다.
+
+### `MenuPlanningPage` 최종 구성
+
+```tsx
+export function MenuPlanningPage() {
+  return (
+    <div className="space-y-6">
+      <WeeklyMenuReviewTab />
+      <MenuDuplicationCheckSection />
+      <MenuPlanPerformanceSection />
+      <MenuComboSection />
+    </div>
+  );
+}
+```
+
+## 검증
+
+- `pytest -q` 전체 회귀 — 558개 통과(585개에서 27개 삭제: API 10개 +
+  레퍼토리 6개 + menu_affinity 8개 + corner_core_layer 3개; 재편성/
+  부찬반복/한끼겹침 테스트는 그대로 유지).
+- `npx tsc -b`·`npm run build` — 삭제 후 안 쓰는 import·타입이 안 남아
+  있는지, 통합 컴포넌트가 타입 에러 없이 컴파일되는지 확인. 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건): (1) "메뉴 편성·운영" 탭에 "레퍼토리"·"동반 선택 쌍" 텍스트가
+  더 이상 안 보이고 "메뉴 중복 점검"·"편성 빈도"·"부찬 조합" 4개 섹션만
+  남았는지, (2) "메뉴 중복 점검" 카드 안에서 재편성 점검/부찬 반복
+  랭킹/한 끼 겹침 세 탭을 각각 눌렀을 때 §81 재설계 내용(Top5+편성기준,
+  정렬+클릭 상세, 요일별 그룹+주 네비게이터)이 그대로 동작하는지, (3)
+  삭제된 세 엔드포인트(`/menu-plan/repertoire`, `/menu-pairs/top`,
+  `/corners/{id}/core-layer-menu-pairs`)를 직접 호출하면 404가, 살아있는
+  `/corners/core-layer-summary`는 200이 나오는지 — 전부 확인됨.

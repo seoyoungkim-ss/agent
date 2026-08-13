@@ -1,7 +1,6 @@
 from app.services.menu_plan_analytics import (
     PlanningAction,
     classify_planning_action,
-    compute_repertoire,
     median_or_zero,
 )
 
@@ -68,54 +67,3 @@ def test_low_sample_wins_over_quadrant():
 def test_median_or_zero_handles_empty():
     assert median_or_zero([]) == 0.0
     assert median_or_zero([1.0, 3.0, 5.0]) == 3.0
-
-
-# ---------------------------------------------------------------------------
-# 레퍼토리 집중도
-# ---------------------------------------------------------------------------
-
-
-def test_repertoire_empty_input():
-    stats = compute_repertoire({})
-    assert stats.total_slots == 0
-    assert stats.unique_menus == 0
-    assert stats.top_menus == []
-
-
-def test_repertoire_counts_slots_and_unique_menus():
-    stats = compute_repertoire({"돈까스": 3, "김치찌개": 2, "제육볶음": 1})
-    assert stats.total_slots == 6
-    assert stats.unique_menus == 3
-    assert stats.top_menus[0] == ("돈까스", 3)
-
-
-def test_hhi_discriminates_where_unique_count_and_top_share_cannot():
-    """지표를 여러 개 내는 이유 — 하나만 보면 오진한다.
-
-    종수가 top_n 이하면 top_share는 무조건 1.0이라 아무것도 구분 못 한다.
-    바로 그 구간을 HHI가 잡는다.
-    """
-    even = compute_repertoire({"A": 5, "B": 5, "C": 5, "D": 5})  # 4종, 완전히 고르게
-    skewed = compute_repertoire({"A": 91, **{chr(ord("B") + i): 1 for i in range(9)}})  # 10종, 쏠림
-
-    assert even.unique_menus < skewed.unique_menus  # 종수만 보면 even이 더 단조로워 보이고
-    assert even.top_share == 1.0  # top_share는 종수 ≤ top_n이라 판별력이 없다
-    assert even.hhi < skewed.hhi  # 실제 집중도는 even이 훨씬 낮다 — HHI만 이걸 잡는다
-
-
-def test_top_share_discriminates_when_menu_count_is_large():
-    """반대로 종수가 충분히 많으면 top_share가 쏠림을 직관적으로 보여준다."""
-    even = compute_repertoire({chr(ord("A") + i): 5 for i in range(20)})
-    skewed = compute_repertoire({"A": 91, **{chr(ord("B") + i): 1 for i in range(19)}})
-    assert even.top_share < skewed.top_share
-
-
-def test_top_share_is_one_when_all_menus_fit_in_top_n():
-    stats = compute_repertoire({"A": 2, "B": 1}, top_n=5)
-    assert stats.top_share == 1.0
-
-
-def test_repertoire_breaks_count_ties_by_menu_name():
-    """동점일 때 순서가 흔들리면 화면이 새로고침마다 바뀐다."""
-    stats = compute_repertoire({"나": 2, "가": 2, "다": 2}, top_n=3)
-    assert [name for name, _ in stats.top_menus] == ["가", "나", "다"]

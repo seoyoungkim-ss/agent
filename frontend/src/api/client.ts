@@ -333,43 +333,11 @@ export interface MenuAffinityRow {
   lift: number;
 }
 
-export interface MenuPairRow {
-  menu_a: string;
-  menu_b: string;
-  co_count: number;
-  lift: number;
-  corner_a?: string | null;
-  corner_b?: string | null;
-  is_obvious_pair?: boolean | null;
-}
-
 export interface CornerCoreLayerSummaryRow {
   corner_id: number;
   corner_name: string;
   core_employee_count: number;
   non_core_employee_count: number;
-}
-
-export interface CornerCoreLayerMenuPairsResponse {
-  corner_id: number;
-  corner_name: string;
-  core_layer: {
-    employee_count: number;
-    min_visit_count: number;
-    min_share: number;
-    top_pairs: MenuPairRow[];
-    cross_corner_pairs: MenuPairRow[];
-  };
-  non_core: {
-    employee_count: number;
-    top_pairs: MenuPairRow[];
-    cross_corner_pairs: MenuPairRow[];
-  };
-  menu_controlled_preference?: {
-    contested_occasions: number;
-    chosen_count: number;
-    preference_ratio: number;
-  } | null;
 }
 
 export interface MenuThroughputRow {
@@ -633,22 +601,6 @@ export interface PlanPerformanceResponse {
   median_satisfaction: number;
   items: PlanPerformanceRow[];
   matching: { matched: number; plan_only: string[]; log_only: string[] };
-}
-
-export interface RepertoireRow {
-  corner_name: string;
-  menu_role: string;
-  total_slots: number;
-  unique_menus: number;
-  top_share: number;
-  hhi: number;
-  top_menus: { menu_name: string; count: number }[];
-}
-
-export interface RepertoireResponse {
-  period_start: string;
-  period_end: string;
-  items: RepertoireRow[];
 }
 
 export interface WeeklyMenuFeedbackRow {
@@ -962,9 +914,6 @@ export const api = {
     corner_id?: number;
   }) => request<PlanPerformanceResponse>(`/analysis/menu-plan/performance${qs(params)}`),
 
-  menuPlanRepertoire: (params: { period_start: string; period_end: string }) =>
-    request<RepertoireResponse>(`/analysis/menu-plan/repertoire${qs(params)}`),
-
   weeklyMenuRotation: (params: { period_start: string; period_end: string; lookback_days?: number }) =>
     request<MenuRotationResponse>(`/analysis/weekly-menu/rotation${qs(params)}`),
 
@@ -997,29 +946,11 @@ export const api = {
     min_share?: number;
   }) => request<CornerCoreLayerSummaryRow[]>(`/analysis/corners/core-layer-summary${qs(params)}`),
 
-  cornerCoreLayerMenuPairs: (
-    cornerId: number,
-    params: {
-      period_start: string;
-      period_end: string;
-      min_visit_count?: number;
-      min_share?: number;
-      min_co_count?: number;
-      top_n?: number;
-    },
-  ) =>
-    request<CornerCoreLayerMenuPairsResponse>(
-      `/analysis/corners/${cornerId}/core-layer-menu-pairs${qs(params)}`,
-    ),
-
   cornerMenuThroughput: (
     cornerId: number,
     params: { period_start: string; period_end: string; min_day_count?: number },
   ) =>
     request<CornerMenuThroughputResponse>(`/analysis/corners/${cornerId}/menu-throughput${qs(params)}`),
-
-  topMenuPairs: (params: { period_start: string; period_end: string; min_co_count?: number; top_n?: number }) =>
-    request<MenuPairRow[]>(`/analysis/menu-pairs/top${qs(params)}`),
 
   menuFoodVectors: (params: { untagged_only?: boolean } = {}) =>
     request<MenuFoodVectorRow[]>(`/analysis/menus/food-vectors${qs(params)}`),
