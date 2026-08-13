@@ -82,6 +82,8 @@ from app.services.menu_combination import (
     compute_combo_nutrition_profile,
     compute_combo_satisfaction_summary,
     compute_combo_spread,
+    find_main_menu_pairings_for_side_dish,
+    summarize_side_dish_pairings,
 )
 from app.services.menu_throughput import build_corner_daily_throughput, compute_menu_throughput_summary
 from app.services.taste_clustering import compute_taste_clusters
@@ -1855,6 +1857,59 @@ def weekly_menu_plan_rule_check(
     }
 
 
+@router.get("/weekly-menu/planned-headcount-ranking")
+def weekly_menu_planned_headcount_ranking(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """§80: 이번 주 편성된 코너-메뉴(MAIN)를 최근 실측 평균 식수로 랭킹한다.
+
+    담당자 피드백 — "예상 식수는 오차 리스크가 있을 것 같은데 최근 실측
+    평균으로 변경 가능할까요" — 홈 화면의 날씨/메뉴배수 예측 기반 "금주
+    예상 식수" 차트를 대체한다. `weekly_menu_plan_rule_check`의
+    `low_headcount_reuse`와 같은 계산(직전 `_HISTORY_WINDOW_DAYS`일
+    `_recent_avg_headcount_by_menu`)을 재사용하되, 위반 여부와 무관하게
+    이번 주 편성된 MAIN 슬롯 전체를 식수 내림차순으로 반환한다.
+    """
+    plan_rows = (
+        db.query(
+            WeeklyMenuPlan.menu_id,
+            WeeklyMenuPlan.plan_date,
+            WeeklyMenuPlan.meal_type,
+            MenuMaster.menu_name,
+            CornerMaster.corner_name,
+        )
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
+        .filter(
+            WeeklyMenuPlan.plan_date.between(period_start, period_end),
+            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+        )
+        .all()
+    )
+    slots = [
+        (menu_id, plan_date, meal_type, menu_name, corner_name)
+        for menu_id, plan_date, meal_type, menu_name, corner_name in plan_rows
+        if menu_name not in PLACEHOLDER_MENU_NAMES and corner_name not in LOW_HEADCOUNT_EXEMPT_CORNER_NAMES
+    ]
+
+    history_end = period_start - dt.timedelta(days=1)
+    history_start = history_end - dt.timedelta(days=_HISTORY_WINDOW_DAYS)
+    avg_by_menu = _recent_avg_headcount_by_menu(db, {s[0] for s in slots}, history_start, history_end)
+
+    rows = [
+        {
+            "plan_date": plan_date.isoformat(),
+            "meal_type": meal_type.value,
+            "corner_name": corner_name,
+            "menu_name": menu_name,
+            "recent_avg_headcount": round(avg_by_menu[menu_id], 1) if menu_id in avg_by_menu else None,
+        }
+        for menu_id, plan_date, meal_type, menu_name, corner_name in slots
+    ]
+    # 식수 내림차순 — 이력 없는 신메뉴(None)는 맨 뒤로.
+    rows.sort(key=lambda r: (r["recent_avg_headcount"] is None, -(r["recent_avg_headcount"] or 0)))
+
+    return {"period_start": period_start.isoformat(), "period_end": period_end.isoformat(), "rows": rows}
+
+
 @router.get("/weekly-menu/rotation")
 def weekly_menu_rotation(
     period_start: dt.date,
@@ -2003,8 +2058,10 @@ def weekly_menu_repeated_side_dishes(
     rows = (
         db.query(
             WeeklyMenuPlan.plan_date,
+            MenuMaster.menu_id,
             MenuMaster.menu_name,
             WeeklyMenuPlan.menu_role,
+            CornerMaster.corner_id,
             CornerMaster.corner_name,
         )
         .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
@@ -2014,11 +2071,25 @@ def weekly_menu_repeated_side_dishes(
     )
     planned = [
         (plan_date, corner_name, menu_name, menu_role.value if hasattr(menu_role, "value") else str(menu_role))
-        for plan_date, menu_name, menu_role, corner_name in rows
+        for plan_date, _menu_id, menu_name, menu_role, _corner_id, corner_name in rows
     ]
+    # §80: "연결 메인 만족도" 정렬용 — (코너명, 메뉴명)으로 menu_id/corner_id를
+    # 되찾는다(별도 이름 재조회 없이 위에서 이미 가져온 행을 재사용).
+    ids_by_corner_menu = {
+        (corner_name, menu_name): (corner_id, menu_id)
+        for _plan_date, menu_id, menu_name, _menu_role, corner_id, corner_name in rows
+    }
     overused = find_overused_menus(planned, threshold=0)
     side_roles = {MenuRole.SIDE.value, MenuRole.HEALTH_GARDEN.value}
     items = [o for o in overused if o.menu_role in side_roles]
+
+    def _avg_main_satisfaction(o) -> float | None:
+        ids = ids_by_corner_menu.get((o.corner_name, o.menu_name))
+        if ids is None:
+            return None
+        corner_id_, menu_id_ = ids
+        pairings = find_main_menu_pairings_for_side_dish(db, menu_id_, period_start, period_end, corner_id=corner_id_)
+        return summarize_side_dish_pairings(pairings)["avg_main_satisfaction"]
 
     return {
         "period_start": period_start.isoformat(),
@@ -2031,8 +2102,52 @@ def weekly_menu_repeated_side_dishes(
                 "menu_role": o.menu_role,
                 "count": o.count,
                 "dates": [d.isoformat() for d in o.dates],
+                "avg_main_satisfaction": _avg_main_satisfaction(o),
             }
             for o in items
+        ],
+    }
+
+
+@router.get("/weekly-menu/side-dish-detail")
+def weekly_menu_side_dish_detail(
+    menu_name: str, corner_name: str, period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)
+):
+    """§80: 부찬 클릭 상세 — "단무지 클릭 → 8/01 신포짜장면 / 8/11 스냅스낵
+    신라면"처럼 그 부찬이 어느 날짜·코너·메인메뉴와 함께 편성됐는지 보여준다.
+    `find_main_menu_pairings_for_side_dish`(menu_combination.py)가 실제 계산을
+    한다 — 여기는 이름→ID 조회 후 그대로 호출해 이름을 다시 붙이는 얇은 층.
+    """
+    menu = find_menu_by_name(db, menu_name)
+    if menu is None:
+        raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다")
+    corner = db.query(CornerMaster).filter(CornerMaster.corner_name == corner_name).first()
+    if corner is None:
+        raise HTTPException(status_code=404, detail="코너를 찾을 수 없습니다")
+
+    pairings = find_main_menu_pairings_for_side_dish(
+        db, menu.menu_id, period_start, period_end, corner_id=corner.corner_id
+    )
+    corner_names_by_id = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+    main_menu_ids = {p.main_menu_id for p in pairings if p.main_menu_id is not None}
+    main_menu_names_by_id = {
+        m.menu_id: m.menu_name for m in db.query(MenuMaster).filter(MenuMaster.menu_id.in_(main_menu_ids))
+    } if main_menu_ids else {}
+
+    return {
+        "menu_name": menu_name,
+        "corner_name": corner_name,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "pairings": [
+            {
+                "plan_date": p.plan_date.isoformat(),
+                "corner_name": corner_names_by_id.get(p.corner_id, "-"),
+                "meal_type": p.meal_type,
+                "main_menu_name": main_menu_names_by_id.get(p.main_menu_id) if p.main_menu_id else None,
+                "main_avg_satisfaction": p.main_avg_satisfaction,
+            }
+            for p in pairings
         ],
     }
 
@@ -2226,8 +2341,12 @@ def menu_plan_performance(
         if taste_score is not None:
             scores.setdefault(menu_id, []).append(TASTE_SCORE_POINTS[taste_score])
 
-    # 기준선은 그 기간 전체의 중앙값 — 기존 4분면(aggregation.py)과 같은 방식
-    median_plan = median_or_zero([float(c) for c in plan_count.values()])
+    # §80: 기준선을 편성 횟수 대신 "1회 편성당 식수"의 그 기간 전체 중앙값으로
+    # 바꿨다(기존 4분면(aggregation.py)과 같은 "전체 중앙값 기준" 방식은 유지).
+    headcount_per_plan_by_menu = {
+        menu_id: (headcount.get(menu_id, 0) / count if count else 0.0) for menu_id, count in plan_count.items()
+    }
+    median_headcount_per_plan = median_or_zero(list(headcount_per_plan_by_menu.values()))
     satisfaction_values = [
         statistics.fmean(v) for v in scores.values() if v
     ]
@@ -2238,12 +2357,13 @@ def menu_plan_performance(
         menu_scores = scores.get(menu_id, [])
         avg_satisfaction = statistics.fmean(menu_scores) if menu_scores else None
         total_headcount = headcount.get(menu_id, 0)
+        headcount_per_plan = headcount_per_plan_by_menu[menu_id]
         action = classify_planning_action(
-            count,
+            headcount_per_plan,
             avg_satisfaction,
             len(menu_scores),
             total_headcount,
-            median_plan_count=median_plan,
+            median_headcount_per_plan=median_headcount_per_plan,
             median_satisfaction=median_satisfaction,
         )
         items.append(
@@ -2252,13 +2372,13 @@ def menu_plan_performance(
                 "menu_name": plan_name[menu_id],
                 "plan_count": count,
                 "total_headcount": total_headcount,
-                "headcount_per_plan": round(total_headcount / count, 1) if count else 0.0,
+                "headcount_per_plan": round(headcount_per_plan, 1),
                 "evaluation_count": len(menu_scores),
                 "avg_satisfaction": round(avg_satisfaction, 2) if avg_satisfaction is not None else None,
                 "action": action.value,
             }
         )
-    items.sort(key=lambda r: (-r["plan_count"], r["menu_name"]))
+    items.sort(key=lambda r: (-r["headcount_per_plan"], r["menu_name"]))
 
     # 매칭 진단 — 식단표 MAIN과 취식기록이 실제로 이어졌는지
     planned_ids = set(plan_count)
@@ -2281,7 +2401,7 @@ def menu_plan_performance(
     return {
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
-        "median_plan_count": median_plan,
+        "median_headcount_per_plan": round(median_headcount_per_plan, 1),
         "median_satisfaction": round(median_satisfaction, 2),
         "items": items,
         "matching": {

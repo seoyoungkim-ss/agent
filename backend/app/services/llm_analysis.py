@@ -26,13 +26,14 @@ from sqlalchemy.orm import Session
 from app.models.enums import MenuRole
 from app.models.logs import MealLog, WeeklyMenuPlan
 from app.models.master import MenuMaster
-from app.models.stats import LlmAnalysisCache
+from app.models.stats import LlmAnalysisCache, MonthlyVoeCluster
 from app.services.llm_client import InternalLLMClient
 
 logger = logging.getLogger(__name__)
 
 KIND_MENU_TREND = "menu_trend"
 KIND_PLANNING_NOTICE = "planning_notice"
+KIND_VOE_BRIEFING = "voe_briefing"
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +247,77 @@ async def summarize_planning_notice(llm_client: InternalLLMClient, facts: dict) 
     except Exception:
         logger.exception("편성 문제 notice 요약 실패 — 폴백 문구로 대체")
         return _fallback_planning_notice(facts)
+
+
+# ---------------------------------------------------------------------------
+# 3. VOE AI 브리핑 (§80)
+# ---------------------------------------------------------------------------
+# 담당자: "네이버 리뷰 AI 브리핑처럼 주관식 VoE 요약" — 기존 `summarize_voe_comments`
+# (improvement_points.py)는 카테고리 1개(가장 변화 큰 항목)의 코멘트 10개만
+# 요약하는 좁은 기능이라(홈 화면 개선포인트 카드 전용), 만족도·VoE 탭에 이번
+# 달 전체를 여러 테마로 묶어 요약하는 별도 브리핑을 새로 만든다.
+#
+# 코멘트를 새로 임베딩/재군집하지 않는다 — `cluster_monthly_voe`가 이미 그 달의
+# `MonthlyVoeCluster`(테마 라벨·키워드·대표 코멘트·건수)를 계산해뒀으므로, 그
+# 결과를 그대로 근거 사실로 재사용한다. 클러스터링이 아직 안 돌았으면(그 달
+# `MonthlyVoeCluster`가 없으면) 브리핑도 만들 수 없다 — 호출부가 먼저 확인한다.
+
+
+def _collect_voe_briefing_facts(db: Session, month_start: dt.date) -> dict:
+    clusters = (
+        db.query(MonthlyVoeCluster)
+        .filter(MonthlyVoeCluster.period == month_start)
+        .order_by(MonthlyVoeCluster.comment_count.desc())
+        .all()
+    )
+    return {
+        "month": month_start.isoformat(),
+        "clusters": [
+            {
+                "label": c.cluster_label,
+                "keywords": c.keywords or [],
+                "representative_comment": c.representative_comment,
+                "comment_count": c.comment_count,
+            }
+            for c in clusters
+        ],
+    }
+
+
+def _build_voe_briefing_prompt(facts: dict) -> str:
+    lines = [f"{facts['month'][:7]}월 구내식당 주관식 의견을 주제별로 묶은 결과입니다(건수 많은 순)."]
+    for c in facts["clusters"]:
+        keyword_part = f" (키워드: {', '.join(c['keywords'])})" if c["keywords"] else ""
+        lines.append(f"- {c['label']}{keyword_part} — {c['comment_count']}건. 예: \"{c['representative_comment']}\"")
+    lines.append("")
+    lines.append(
+        "위 주제들을 건수 비중을 반영해 한국어 3~4문장의 브리핑으로 요약하세요 — 네이버 리뷰 "
+        "AI 브리핑처럼 이번 달 핵심을 훑어볼 수 있게 씁니다. 사실에 없는 내용은 지어내지 마세요."
+    )
+    return "\n".join(lines)
+
+
+def _fallback_voe_briefing(facts: dict) -> str:
+    """LLM 미설정·실패 시 — 건수 상위 클러스터를 불릿으로 나열."""
+    if not facts["clusters"]:
+        return "이번 달 주관식 의견이 없습니다."
+    lines = [f"{c['label']}({c['comment_count']}건): {c['representative_comment']}" for c in facts["clusters"]]
+    return " / ".join(lines) + " (자동 분석 미설정 — 사실만 정리했습니다)"
+
+
+async def summarize_voe_briefing(llm_client: InternalLLMClient, facts: dict) -> str:
+    if not facts["clusters"]:
+        return _fallback_voe_briefing(facts)
+    if not llm_client.is_configured:
+        return _fallback_voe_briefing(facts)
+    try:
+        summary = await llm_client.chat_complete(
+            [{"role": "user", "content": _build_voe_briefing_prompt(facts)}]
+        )
+        return summary.strip() or _fallback_voe_briefing(facts)
+    except Exception:
+        logger.exception("VOE AI 브리핑 요약 실패 — 폴백 문구로 대체")
+        return _fallback_voe_briefing(facts)
 
 
 # ---------------------------------------------------------------------------

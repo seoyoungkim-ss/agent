@@ -25,7 +25,15 @@ from app.services.improvement_points import (
     select_voe_points,
     summarize_voe_comments,
 )
-from app.services.llm_analysis import KIND_MENU_TREND, KIND_PLANNING_NOTICE, get_cached
+from app.services.llm_analysis import (
+    KIND_MENU_TREND,
+    KIND_PLANNING_NOTICE,
+    KIND_VOE_BRIEFING,
+    _collect_voe_briefing_facts,
+    get_cached,
+    save_analysis,
+    summarize_voe_briefing,
+)
 from app.services.master_data import find_menu_by_name
 from app.services.llm_client import InternalLLMClient
 from app.services.menu_highlights import (
@@ -390,6 +398,51 @@ async def recompute_voe_clusters(period: dt.date, db: Session = Depends(get_db))
             detail=f"VOE 클러스터링 실패(사내 LLM 임베딩/응답 오류 가능성): {exc}",
         ) from exc
     return {"clusters_created": clusters_created}
+
+
+@router.get("/voe-briefing")
+def voe_briefing(period: dt.date, db: Session = Depends(get_db)):
+    """§80: 이달의 VOE AI 브리핑 — voe_clusters(월간 클러스터링)를 재사용해
+    여러 테마를 한 번에 요약한 캐시 조회 전용 엔드포인트.
+
+    클러스터링(POST /voe-clusters/recompute)이 그 달에 아직 한 번도
+    안 돌았으면 has_clusters=false로 알려준다 — 화면이 "먼저 클러스터링을
+    계산하세요" 안내로 구분할 수 있게.
+    """
+    month_start = period.replace(day=1)
+    has_clusters = (
+        db.query(MonthlyVoeCluster.id).filter(MonthlyVoeCluster.period == month_start).first() is not None
+    )
+    cached = get_cached(db, KIND_VOE_BRIEFING, month_start.isoformat())
+    return {
+        "has_clusters": has_clusters,
+        "briefing": cached.summary if cached else None,
+        "briefing_computed_at": cached.created_at.isoformat() if cached else None,
+    }
+
+
+@router.post("/voe-briefing/recompute")
+async def recompute_voe_briefing(period: dt.date, db: Session = Depends(get_db)):
+    """그 달의 VOE 클러스터를 사내 LLM으로 다중 테마 브리핑 문장으로 요약한다.
+
+    voe-clusters/recompute와 마찬가지로 수동 트리거 — 재임베딩/재군집은
+    하지 않고 이미 저장된 MonthlyVoeCluster 행만 재사용한다.
+    """
+    month_start = period.replace(day=1)
+    facts = _collect_voe_briefing_facts(db, month_start)
+    settings = get_settings()
+    llm_client = InternalLLMClient(settings)
+    summary = await summarize_voe_briefing(llm_client, facts)
+    save_analysis(
+        db,
+        kind=KIND_VOE_BRIEFING,
+        subject_key=month_start.isoformat(),
+        period_start=month_start,
+        period_end=month_start,
+        summary=summary,
+        facts=facts,
+    )
+    return {"briefing": summary, "has_clusters": bool(facts["clusters"])}
 
 
 @router.get("/menu-highlights")

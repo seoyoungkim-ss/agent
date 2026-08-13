@@ -450,6 +450,7 @@ export interface RepeatedSideDish {
   menu_role: string; // "부찬" | "건강가든"
   count: number;
   dates: string[];
+  avg_main_satisfaction: number | null;
 }
 
 export interface RepeatedSideDishResponse {
@@ -457,6 +458,22 @@ export interface RepeatedSideDishResponse {
   period_end: string;
   corner_id: number | null;
   items: RepeatedSideDish[];
+}
+
+export interface SideDishPairing {
+  plan_date: string;
+  corner_name: string;
+  meal_type: MealType;
+  main_menu_name: string | null;
+  main_avg_satisfaction: number | null;
+}
+
+export interface SideDishDetailResponse {
+  menu_name: string;
+  corner_name: string;
+  period_start: string;
+  period_end: string;
+  pairings: SideDishPairing[];
 }
 
 // 슬롯 내 재료·특성 중복 진단 (2026-08). menu_rotation과 축이 다르다 —
@@ -530,6 +547,20 @@ export interface WeeklyMenuPlanRuleCheckResponse {
   low_headcount_reuse: { ok: boolean; violations: LowHeadcountViolation[] };
 }
 
+export interface PlannedHeadcountRankingRow {
+  plan_date: string;
+  meal_type: MealType;
+  corner_name: string;
+  menu_name: string;
+  recent_avg_headcount: number | null;
+}
+
+export interface WeeklyMenuPlannedHeadcountRankingResponse {
+  period_start: string;
+  period_end: string;
+  rows: PlannedHeadcountRankingRow[];
+}
+
 export interface ComboSpreadEntry {
   sides: (string | null)[];
   avg_satisfaction: number | null;
@@ -575,7 +606,7 @@ export interface PlanPerformanceRow {
 export interface PlanPerformanceResponse {
   period_start: string;
   period_end: string;
-  median_plan_count: number;
+  median_headcount_per_plan: number;
   median_satisfaction: number;
   items: PlanPerformanceRow[];
   matching: { matched: number; plan_only: string[]; log_only: string[] };
@@ -686,6 +717,12 @@ export interface CongestionForecastResponse {
   corners: CongestionForecastRow[];
 }
 
+export interface VoeBriefingResponse {
+  has_clusters: boolean;
+  briefing: string | null;
+  briefing_computed_at: string | null;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
@@ -708,6 +745,13 @@ export const api = {
 
   recomputeVoeClusters: (period: string) =>
     request<{ clusters_created: number }>(`/dashboard/voe-clusters/recompute${qs({ period })}`, {
+      method: "POST",
+    }),
+
+  voeBriefing: (period: string) => request<VoeBriefingResponse>(`/dashboard/voe-briefing${qs({ period })}`),
+
+  recomputeVoeBriefing: (period: string) =>
+    request<{ briefing: string; has_clusters: boolean }>(`/dashboard/voe-briefing/recompute${qs({ period })}`, {
       method: "POST",
     }),
 
@@ -861,6 +905,13 @@ export const api = {
   weeklyMenuPlanRuleCheck: (params: { period_start: string; period_end: string }) =>
     request<WeeklyMenuPlanRuleCheckResponse>(`/analysis/weekly-menu/plan-rule-check${qs(params)}`),
 
+  // §80: "금주 예상 식수"를 날씨/메뉴배수 예측 대신 최근 실측 평균 기반
+  // 코너-메뉴 랭킹으로 보여준다.
+  weeklyMenuPlannedHeadcountRanking: (params: { period_start: string; period_end: string }) =>
+    request<WeeklyMenuPlannedHeadcountRankingResponse>(
+      `/analysis/weekly-menu/planned-headcount-ranking${qs(params)}`,
+    ),
+
   menuCombinationSpreadRanking: (params: {
     period_start: string;
     period_end: string;
@@ -884,6 +935,14 @@ export const api = {
 
   weeklyMenuRepeatedSideDishes: (params: { period_start: string; period_end: string; corner_id?: number }) =>
     request<RepeatedSideDishResponse>(`/analysis/weekly-menu/repeated-side-dishes${qs(params)}`),
+
+  // §80: 부찬 클릭 상세 — 어느 날짜·코너·메인메뉴와 함께 편성됐는지.
+  weeklyMenuSideDishDetail: (params: {
+    menu_name: string;
+    corner_name: string;
+    period_start: string;
+    period_end: string;
+  }) => request<SideDishDetailResponse>(`/analysis/weekly-menu/side-dish-detail${qs(params)}`),
 
   updateHealthGarden: (body: {
     plan_date: string;

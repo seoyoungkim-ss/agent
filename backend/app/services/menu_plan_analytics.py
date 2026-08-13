@@ -9,8 +9,12 @@
 `by_menu`에 안 들어와 4분면에서 **아예 사라진다**. 여기선 `weekly_menu_plan`
 기준이라 그게 보이고, 그게 가장 강한 감편 신호다.
 
-편성 횟수는 담당자가 **직접 통제하는 유일한 변수**다 — 만족도·식수는 결과지만
-편성 횟수는 다음 주에 바꿀 수 있다.
+§80: X축을 "편성 횟수"(plan_count)에서 "1회 편성당 식수"(headcount_per_plan)
+로 바꿨다(담당자: "편성 횟수는 불필요") — 판정 기준값도 같이 바꿨다(화면엔
+식수 축인데 감편/증편 라벨은 편성 횟수 기준이면 불일치가 생긴다). 취식이
+아예 없는 메뉴(감편의 가장 강한 신호)를 여전히 보여주는 이 화면의 원래
+목적은 유지된다 — headcount_per_plan도 취식 0이면 0이라 `NO_INTAKE` 판정이
+먼저 걸린다.
 
 DB를 모르는 순수 함수만 둔다. 조회는 `app/api/analysis.py`가 맡는다(레포 관례).
 """
@@ -38,16 +42,17 @@ class PlanningAction(str, Enum):
 
 
 def classify_planning_action(
-    plan_count: int,
+    headcount_per_plan: float,
     avg_satisfaction: float | None,
     evaluation_count: int,
     total_headcount: int,
     *,
-    median_plan_count: float,
+    median_headcount_per_plan: float,
     median_satisfaction: float,
     min_evaluations: int = DEFAULT_MIN_EVALUATIONS,
 ) -> PlanningAction:
-    """순수 함수 — 편성 횟수와 반응을 기간 중앙값과 비교해 편성 조정 방향을 낸다.
+    """순수 함수 — 1회 편성당 식수와 만족도를 기간 중앙값과 비교해 편성 조정
+    방향을 낸다.
 
     기준선으로 **그 기간 전체의 중앙값**을 쓰는 건 기존 4분면
     (`aggregation.py`의 `demand_values`/`score_values` 중앙값)과 같은 방식이다.
@@ -62,14 +67,14 @@ def classify_planning_action(
     if avg_satisfaction is None or evaluation_count < min_evaluations:
         return PlanningAction.LOW_SAMPLE
 
-    planned_often = plan_count >= median_plan_count
+    high_demand = headcount_per_plan >= median_headcount_per_plan
     liked = avg_satisfaction >= median_satisfaction
 
-    if planned_often and not liked:
+    if high_demand and not liked:
         return PlanningAction.REDUCE
-    if not planned_often and liked:
+    if not high_demand and liked:
         return PlanningAction.INCREASE
-    if planned_often and liked:
+    if high_demand and liked:
         return PlanningAction.KEEP
     return PlanningAction.AS_IS
 

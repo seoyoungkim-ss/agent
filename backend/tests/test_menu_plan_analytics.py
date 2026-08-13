@@ -6,61 +6,61 @@ from app.services.menu_plan_analytics import (
 )
 
 
-def _classify(plan_count, satisfaction, evaluations=10, headcount=100, **kw):
+def _classify(headcount_per_plan, satisfaction, evaluations=10, headcount=100, **kw):
     return classify_planning_action(
-        plan_count,
+        headcount_per_plan,
         satisfaction,
         evaluations,
         headcount,
-        median_plan_count=kw.get("median_plan_count", 5),
+        median_headcount_per_plan=kw.get("median_headcount_per_plan", 5),
         median_satisfaction=kw.get("median_satisfaction", 3.5),
         min_evaluations=kw.get("min_evaluations", 5),
     )
 
 
 # ---------------------------------------------------------------------------
-# 편성 조정 판정
+# 편성 조정 판정 — §80: X축이 "편성 횟수"에서 "1회 편성당 식수"로 바뀌었다.
 # ---------------------------------------------------------------------------
 
 
-def test_frequent_but_disliked_is_reduce():
-    assert _classify(plan_count=10, satisfaction=3.0) == PlanningAction.REDUCE
+def test_high_demand_but_disliked_is_reduce():
+    assert _classify(headcount_per_plan=10, satisfaction=3.0) == PlanningAction.REDUCE
 
 
-def test_rare_but_liked_is_increase():
-    assert _classify(plan_count=2, satisfaction=4.5) == PlanningAction.INCREASE
+def test_low_demand_but_liked_is_increase():
+    assert _classify(headcount_per_plan=2, satisfaction=4.5) == PlanningAction.INCREASE
 
 
-def test_frequent_and_liked_is_keep():
-    assert _classify(plan_count=10, satisfaction=4.5) == PlanningAction.KEEP
+def test_high_demand_and_liked_is_keep():
+    assert _classify(headcount_per_plan=10, satisfaction=4.5) == PlanningAction.KEEP
 
 
-def test_rare_and_disliked_is_as_is():
-    assert _classify(plan_count=2, satisfaction=3.0) == PlanningAction.AS_IS
+def test_low_demand_and_disliked_is_as_is():
+    assert _classify(headcount_per_plan=2, satisfaction=3.0) == PlanningAction.AS_IS
 
 
-def test_boundary_counts_as_frequent_and_liked():
+def test_boundary_counts_as_high_demand_and_liked():
     """중앙값과 같은 값은 '자주'·'높음' 쪽에 넣는다(>= 기준)."""
-    assert _classify(plan_count=5, satisfaction=3.5) == PlanningAction.KEEP
+    assert _classify(headcount_per_plan=5, satisfaction=3.5) == PlanningAction.KEEP
 
 
 def test_no_intake_wins_over_everything():
     """편성됐는데 취식이 0이면 만족도 비교 자체가 성립하지 않는다."""
-    assert _classify(plan_count=10, satisfaction=None, evaluations=0, headcount=0) == (
+    assert _classify(headcount_per_plan=10, satisfaction=None, evaluations=0, headcount=0) == (
         PlanningAction.NO_INTAKE
     )
     # 취식이 0이면 평가가 있는 것처럼 들어와도 취식 없음이 우선이다
-    assert _classify(plan_count=10, satisfaction=4.5, evaluations=99, headcount=0) == (
+    assert _classify(headcount_per_plan=10, satisfaction=4.5, evaluations=99, headcount=0) == (
         PlanningAction.NO_INTAKE
     )
 
 
 def test_low_sample_wins_over_quadrant():
     """평가가 적으면 4분면 판정보다 표본 부족이 우선 — 섣불리 감편하면 안 된다."""
-    assert _classify(plan_count=10, satisfaction=3.0, evaluations=2) == (
+    assert _classify(headcount_per_plan=10, satisfaction=3.0, evaluations=2) == (
         PlanningAction.LOW_SAMPLE
     )
-    assert _classify(plan_count=10, satisfaction=None, evaluations=0) == (
+    assert _classify(headcount_per_plan=10, satisfaction=None, evaluations=0) == (
         PlanningAction.LOW_SAMPLE
     )
 

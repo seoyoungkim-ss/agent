@@ -2273,6 +2273,38 @@ def test_voe_clusters_recompute_creates_clusters_from_comments(client, db_sessio
     assert sum(c["comment_count"] for c in clusters) == 2
 
 
+def test_voe_briefing_reports_no_clusters_before_clustering_runs(client):
+    """§80: 클러스터링을 아직 안 돌렸으면 has_clusters=false로 화면이 구분할 수 있어야 한다."""
+    resp = client.get("/api/dashboard/voe-briefing", params={"period": f"{MONDAY.isoformat()[:7]}-01"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"has_clusters": False, "briefing": None, "briefing_computed_at": None}
+
+
+def test_voe_briefing_recompute_reuses_existing_clusters(client):
+    """§80: 재임베딩 없이 이미 계산된 MonthlyVoeCluster를 그대로 요약에 재사용한다."""
+    _ingest_meal_log(client, "E1", "맛남", comment="정말 맛있어요")
+    _ingest_meal_log(client, "E2", "개선", comment="너무 짰어요")
+    period = f"{MONDAY.isoformat()[:7]}-01"
+
+    resp = client.post("/api/dashboard/voe-clusters/recompute", params={"period": period})
+    assert resp.status_code == 200
+    assert resp.json()["clusters_created"] >= 1
+
+    resp = client.post("/api/dashboard/voe-briefing/recompute", params={"period": period})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_clusters"] is True
+    assert body["briefing"]
+
+    resp = client.get("/api/dashboard/voe-briefing", params={"period": period})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_clusters"] is True
+    assert body["briefing"]
+    assert body["briefing_computed_at"] is not None
+
+
 def test_average_menu_food_vector_uses_only_main_menus(client, db_session):
     _ingest_weekly_menu(client)  # 제육볶음(메인)/계란후라이(부찬), 한식, MONDAY
 
@@ -2811,6 +2843,77 @@ def test_repeated_side_dishes_counts_unique_dates_not_rows(client):
     assert item["count"] == 2
 
 
+# ---------------------------------------------------------------------------
+# §80: 부찬 클릭 상세(날짜/코너/메인메뉴) + 연결 메인 만족도
+# ---------------------------------------------------------------------------
+
+
+def _side_dish_detail(client, **params):
+    resp = client.get("/api/analysis/weekly-menu/side-dish-detail", params=params)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_side_dish_detail_returns_date_corner_main_menu_and_satisfaction(client):
+    """단무지 클릭 → 그 날짜/코너/메인메뉴 목록이 나오고, 그날 메인의 평균
+    만족도도 같이 붙어야 한다."""
+    rows = [
+        _plan_row(MONDAY, "짜장면", "메인"),
+        _plan_row(MONDAY, "단무지", "부찬"),
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    _ingest_meal_log(client, "E1", "맛남", menu_name="짜장면", corner_name="한식", eaten_date=MONDAY)
+    _ingest_meal_log(client, "E2", "보통", menu_name="짜장면", corner_name="한식", eaten_date=MONDAY)
+
+    data = _side_dish_detail(
+        client,
+        menu_name="단무지",
+        corner_name="한식",
+        period_start=MONDAY.isoformat(),
+        period_end=(MONDAY + dt.timedelta(days=6)).isoformat(),
+    )
+    assert len(data["pairings"]) == 1
+    pairing = data["pairings"][0]
+    assert pairing["plan_date"] == MONDAY.isoformat()
+    assert pairing["corner_name"] == "한식"
+    assert pairing["main_menu_name"] == "짜장면"
+    assert pairing["main_avg_satisfaction"] == 4.0  # (5+3)/2
+
+
+def test_side_dish_detail_health_garden_matches_every_corner_same_day(client):
+    """건강가든은 코너 무관 공용이라(§132) 그날 모든 코너의 메인과 매칭돼야 한다."""
+    rows = [
+        _plan_row(MONDAY, "제육볶음", "메인", corner_name="한식"),
+        _plan_row(MONDAY, "생선구이", "메인", corner_name="일식"),
+        _plan_row(MONDAY, "대추차", "건강가든", corner_name="한식"),
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+
+    data = _side_dish_detail(
+        client,
+        menu_name="대추차",
+        corner_name="한식",
+        period_start=MONDAY.isoformat(),
+        period_end=(MONDAY + dt.timedelta(days=6)).isoformat(),
+    )
+    main_menu_names = {p["main_menu_name"] for p in data["pairings"]}
+    assert main_menu_names == {"제육볶음", "생선구이"}
+
+
+def test_repeated_side_dishes_includes_avg_main_satisfaction(client):
+    rows = [_plan_row(MONDAY, "짜장면", "메인")] + [
+        _plan_row(MONDAY + dt.timedelta(days=i), "단무지", "부찬") for i in range(3)
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    _ingest_meal_log(client, "E1", "맛남", menu_name="짜장면", corner_name="한식", eaten_date=MONDAY)
+
+    data = _repeated(
+        client, period_start=MONDAY.isoformat(), period_end=(MONDAY + dt.timedelta(days=6)).isoformat()
+    )
+    item = next(i for i in data["items"] if i["menu_name"] == "단무지")
+    assert item["avg_main_satisfaction"] == 5.0
+
+
 def test_health_garden_text_input_replaces_slot_and_feeds_rotation(client, db_session):
     """건강가든 텍스트 입력 → 식단표 조회에 반영되고 회전 판정에도 들어간다."""
     _ingest_weekly_menu(client)
@@ -3209,6 +3312,23 @@ def test_plan_performance_counts_plan_appearances_not_intake_days(client):
     assert row["plan_count"] == 2  # 편성 2회
     assert row["total_headcount"] == 4  # 취식 4건
     assert row["headcount_per_plan"] == 2.0
+
+
+def test_plan_performance_response_exposes_median_headcount_per_plan(client):
+    """§80: X축이 '편성 횟수'에서 '1회 편성당 식수'로 바뀌면서 중앙값 필드명도
+    median_plan_count → median_headcount_per_plan으로 바뀌었다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY, "제육볶음", "메인")]},
+        headers=AUTH_HEADERS,
+    )
+    _ingest_meal_log(client, "E1", "맛남", corner_name="한식", menu_name="제육볶음")
+
+    data = _plan_performance(
+        client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat()
+    )
+    assert "median_headcount_per_plan" in data
+    assert "median_plan_count" not in data
 
 
 def test_plan_performance_reports_log_only_menus(client):

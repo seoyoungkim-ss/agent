@@ -238,6 +238,133 @@ def build_side_combos_bulk(
     return results
 
 
+# ---------------------------------------------------------------------------
+# 부찬 → 메인 역방향 조회 (§80)
+# ---------------------------------------------------------------------------
+# build_side_combos_for_main_menu는 "이 메인이 언제 어떤 부찬과 나왔는지"를
+# 본다. 여기는 반대 방향 — "이 부찬이 언제 어떤 코너의 어떤 메인과 나왔는지"
+# 담당자 요청: "단무지 클릭 → 8/01 신포짜장면 / 8/11 스냅스낵 신라면"처럼
+# 부찬 하나를 클릭해 상세 편성 이력을 보고 싶다는 것.
+
+
+@dataclass(frozen=True)
+class SideDishPairing:
+    plan_date: dt.date
+    corner_id: int
+    meal_type: str
+    main_menu_id: int | None
+    main_avg_satisfaction: float | None
+
+
+def find_main_menu_pairings_for_side_dish(
+    db: Session,
+    side_menu_id: int,
+    period_start: dt.date,
+    period_end: dt.date,
+    *,
+    corner_id: int | None = None,
+) -> list[SideDishPairing]:
+    """side_menu_id가 SIDE/HEALTH_GARDEN으로 나온 슬롯마다, 같은 슬롯의 MAIN
+    메뉴와 그날 그 코너의 만족도를 묶는다.
+
+    건강가든은 특정 코너 소속처럼 저장되지만 실제로는 코너 무관 공용이다
+    (§132, menu_rotation.py와 동일 원칙) — 그래서 건강가든 슬롯은 그 날짜·
+    식사구분의 모든 코너 MAIN과 매칭한다(어느 코너 손님이 가져갔는지 알 수
+    없으므로 후보 전부를 보여준다). SIDE는 기존처럼 같은 코너의 MAIN만 본다.
+    """
+    side_filters = [
+        WeeklyMenuPlan.menu_id == side_menu_id,
+        WeeklyMenuPlan.menu_role.in_([MenuRole.SIDE, MenuRole.HEALTH_GARDEN]),
+        WeeklyMenuPlan.plan_date.between(period_start, period_end),
+    ]
+    if corner_id is not None:
+        side_filters.append(WeeklyMenuPlan.corner_id == corner_id)
+    side_slots = (
+        db.query(WeeklyMenuPlan.plan_date, WeeklyMenuPlan.corner_id, WeeklyMenuPlan.meal_type, WeeklyMenuPlan.menu_role)
+        .filter(*side_filters)
+        .distinct()
+        .all()
+    )
+    if not side_slots:
+        return []
+
+    dates = {plan_date for plan_date, _, _, _ in side_slots}
+    main_rows = (
+        db.query(WeeklyMenuPlan.plan_date, WeeklyMenuPlan.corner_id, WeeklyMenuPlan.meal_type, WeeklyMenuPlan.menu_id)
+        .filter(WeeklyMenuPlan.menu_role == MenuRole.MAIN, WeeklyMenuPlan.plan_date.in_(dates))
+        .all()
+    )
+    main_by_slot: dict[tuple[dt.date, int, str], int] = {}
+    main_by_date_meal: dict[tuple[dt.date, str], list[tuple[int, int]]] = {}
+    for plan_date, main_corner_id, meal_type, menu_id in main_rows:
+        main_by_slot[(plan_date, main_corner_id, meal_type)] = menu_id
+        main_by_date_meal.setdefault((plan_date, meal_type), []).append((main_corner_id, menu_id))
+
+    def _avg_satisfaction(main_menu_id: int, at_corner_id: int, plan_date: dt.date) -> float | None:
+        day_start = dt.datetime.combine(plan_date, dt.time())
+        day_end = day_start + dt.timedelta(days=1)
+        rows = (
+            db.query(MealLog.taste_score)
+            .filter(
+                MealLog.menu_id == main_menu_id,
+                MealLog.corner_id == at_corner_id,
+                MealLog.eaten_at >= day_start,
+                MealLog.eaten_at < day_end,
+            )
+            .all()
+        )
+        score_values = [TASTE_SCORE_POINTS[s] for (s,) in rows if s is not None]
+        return statistics.fmean(score_values) if score_values else None
+
+    results = []
+    for plan_date, slot_corner_id, meal_type, menu_role in side_slots:
+        meal_type_value = meal_type.value
+        if menu_role == MenuRole.HEALTH_GARDEN:
+            candidates = main_by_date_meal.get((plan_date, meal_type_value), [])
+            if not candidates:
+                results.append(
+                    SideDishPairing(
+                        plan_date=plan_date, corner_id=slot_corner_id, meal_type=meal_type_value,
+                        main_menu_id=None, main_avg_satisfaction=None,
+                    )
+                )
+            for main_corner_id, main_menu_id in candidates:
+                results.append(
+                    SideDishPairing(
+                        plan_date=plan_date,
+                        corner_id=main_corner_id,
+                        meal_type=meal_type_value,
+                        main_menu_id=main_menu_id,
+                        main_avg_satisfaction=_avg_satisfaction(main_menu_id, main_corner_id, plan_date),
+                    )
+                )
+        else:
+            main_menu_id = main_by_slot.get((plan_date, slot_corner_id, meal_type_value))
+            results.append(
+                SideDishPairing(
+                    plan_date=plan_date,
+                    corner_id=slot_corner_id,
+                    meal_type=meal_type_value,
+                    main_menu_id=main_menu_id,
+                    main_avg_satisfaction=(
+                        _avg_satisfaction(main_menu_id, slot_corner_id, plan_date) if main_menu_id is not None else None
+                    ),
+                )
+            )
+    results.sort(key=lambda p: p.plan_date)
+    return results
+
+
+def summarize_side_dish_pairings(pairings: list[SideDishPairing]) -> dict:
+    """{avg_main_satisfaction, pairing_count} — compute_combo_satisfaction_summary
+    와 같은 스타일(일자별 평균의 평균)."""
+    scores = [p.main_avg_satisfaction for p in pairings if p.main_avg_satisfaction is not None]
+    return {
+        "avg_main_satisfaction": statistics.fmean(scores) if scores else None,
+        "pairing_count": len(pairings),
+    }
+
+
 def compute_combo_spread(summaries: list[ComboSummary]) -> float | None:
     """순수 함수 — 조합별 만족도의 (최고 - 최저).
 

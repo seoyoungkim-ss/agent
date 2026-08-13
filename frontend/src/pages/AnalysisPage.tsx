@@ -163,6 +163,10 @@ export function CornerMetricComparisonSection() {
   const [showCornerTable, setShowCornerTable] = useState(false);
   const [leftMetric, setLeftMetric] = useState<CornerMetricKey>("headcount");
   const [rightMetric, setRightMetric] = useState<CornerMetricKey>("satisfaction");
+  // §80: "선이 너무 많고 뭘 봐야할지 모르겠음" — 코너마다 지표 2개(듀얼축)를
+  // 항상 같이 그려 코너 8개면 선이 최대 16개까지 뜨던 걸, 기본은 지표 1개
+  // (코너당 선 1개)만 보여주고 두 번째 지표는 명시적 옵트인으로 바꿨다.
+  const [showSecondMetric, setShowSecondMetric] = useState(false);
   function handleLeftMetricChange(v: CornerMetricKey) {
     if (v === rightMetric) setRightMetric(leftMetric);
     setLeftMetric(v);
@@ -319,17 +323,18 @@ export function CornerMetricComparisonSection() {
     return total > 0 && headcount != null ? Number(((headcount / total) * 100).toFixed(2)) : null;
   }
   const cornerMetricCorners =
-    leftMetric === "share" || rightMetric === "share" ? shareEligibleCorners : activeCorners;
-  const cornerMetricTooltipFormatter = buildMetricTooltipFormatter({
-    [leftMetric]: CORNER_METRIC_LABELS[leftMetric],
-    [rightMetric]: CORNER_METRIC_LABELS[rightMetric],
-  });
+    leftMetric === "share" || (showSecondMetric && rightMetric === "share") ? shareEligibleCorners : activeCorners;
+  const cornerMetricTooltipFormatter = buildMetricTooltipFormatter(
+    showSecondMetric
+      ? { [leftMetric]: CORNER_METRIC_LABELS[leftMetric], [rightMetric]: CORNER_METRIC_LABELS[rightMetric] }
+      : { [leftMetric]: CORNER_METRIC_LABELS[leftMetric] },
+  );
   // 서브속도가 축 중 하나면 전체 평균을 회색 점선으로 항상 표시한다(기존
   // buildMenuThroughputOption의 "전체 평균" 패턴과 동일한 취지) — 코너별
   // 시리즈 각각에 markLine을 달면 겹쳐 중복 렌더링되므로, 데이터 없는 전용
   // 시리즈 하나에만 붙인다.
   const overallThroughputAvg = (() => {
-    if (leftMetric !== "throughput" && rightMetric !== "throughput") return null;
+    if (leftMetric !== "throughput" && !(showSecondMetric && rightMetric === "throughput")) return null;
     const values: number[] = [];
     for (const c of cornerMetricCorners) {
       for (const p of activePeriods) {
@@ -365,35 +370,46 @@ export function CornerMetricComparisonSection() {
     tooltip: { trigger: "axis", formatter: cornerMetricTooltipFormatter },
     legend: { top: 0, textStyle: { color: chartTheme.text }, data: cornerMetricCorners.map((c) => c.corner_name) },
     xAxis: trendXAxis,
-    yAxis: [
-      {
-        type: "value",
-        ...CORNER_METRIC_AXIS[leftMetric],
-        axisLabel: { color: chartTheme.text },
-        splitLine: { lineStyle: { color: chartTheme.grid } },
-      },
-      {
-        type: "value",
-        ...CORNER_METRIC_AXIS[rightMetric],
-        axisLabel: { color: chartTheme.text },
-        splitLine: { show: false },
-      },
-    ],
+    yAxis: showSecondMetric
+      ? [
+          {
+            type: "value",
+            ...CORNER_METRIC_AXIS[leftMetric],
+            axisLabel: { color: chartTheme.text },
+            splitLine: { lineStyle: { color: chartTheme.grid } },
+          },
+          {
+            type: "value",
+            ...CORNER_METRIC_AXIS[rightMetric],
+            axisLabel: { color: chartTheme.text },
+            splitLine: { show: false },
+          },
+        ]
+      : [
+          {
+            type: "value",
+            ...CORNER_METRIC_AXIS[leftMetric],
+            axisLabel: { color: chartTheme.text },
+            splitLine: { lineStyle: { color: chartTheme.grid } },
+          },
+        ],
     series: [
       ...cornerMetricCorners.flatMap((c) => {
         const color = resolveColor(cornerColor.get(c.corner_id) ?? "var(--series-1)");
+        const leftSeries = {
+          id: `${c.corner_name}::${leftMetric}`,
+          name: c.corner_name,
+          type: "line" as const,
+          yAxisIndex: 0,
+          symbol: "circle",
+          symbolSize: 8,
+          lineStyle: { width: 2, color },
+          itemStyle: { color, borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
+          data: activePeriods.map((p) => cornerMetricValue(leftMetric, c.corner_name, p)),
+        };
+        if (!showSecondMetric) return [leftSeries];
         return [
-          {
-            id: `${c.corner_name}::${leftMetric}`,
-            name: c.corner_name,
-            type: "line" as const,
-            yAxisIndex: 0,
-            symbol: "circle",
-            symbolSize: 8,
-            lineStyle: { width: 2, color },
-            itemStyle: { color, borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
-            data: activePeriods.map((p) => cornerMetricValue(leftMetric, c.corner_name, p)),
-          },
+          leftSeries,
           {
             id: `${c.corner_name}::${rightMetric}`,
             name: c.corner_name,
@@ -498,14 +514,14 @@ export function CornerMetricComparisonSection() {
             <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
               <div className="mb-3">
                 <p className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                  왼쪽/오른쪽 축에 넣을 지표를 각각 고르세요 — 점유율은 Take Out·그린미트·미캠회관(전골)을 제외한
-                  착석 취식 코너 기준입니다. 범례를 클릭하면 코너별로 켜고 끌 수 있습니다.
+                  기본은 지표 1개(코너당 선 1개)만 보여줍니다 — 점유율은 Take Out·그린미트·미캠회관(전골)을
+                  제외한 착석 취식 코너 기준입니다. 범례를 클릭하면 코너별로 켜고 끌 수 있습니다.
                 </p>
               </div>
               <>
                   <div className="mb-3 flex flex-wrap items-center gap-3 text-[13px]">
                     <label className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
-                      왼쪽 축
+                      {showSecondMetric ? "왼쪽 축" : "지표"}
                       <select
                         value={leftMetric}
                         onChange={(e) => handleLeftMetricChange(e.target.value as CornerMetricKey)}
@@ -520,20 +536,30 @@ export function CornerMetricComparisonSection() {
                       </select>
                     </label>
                     <label className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
-                      오른쪽 축
-                      <select
-                        value={rightMetric}
-                        onChange={(e) => handleRightMetricChange(e.target.value as CornerMetricKey)}
-                        className="rounded-md border px-2 py-1 text-[13px]"
-                        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                      >
-                        {CORNER_METRIC_OPTIONS.map((o) => (
-                          <option key={o.value} value={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
+                      <input
+                        type="checkbox"
+                        checked={showSecondMetric}
+                        onChange={(e) => setShowSecondMetric(e.target.checked)}
+                      />
+                      두 번째 지표 비교
                     </label>
+                    {showSecondMetric && (
+                      <label className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
+                        오른쪽 축
+                        <select
+                          value={rightMetric}
+                          onChange={(e) => handleRightMetricChange(e.target.value as CornerMetricKey)}
+                          className="rounded-md border px-2 py-1 text-[13px]"
+                          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                        >
+                          {CORNER_METRIC_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
                   </div>
                   {activeIsLoading && <LoadingState />}
                   {activeIsError && <ErrorState error={activeError} />}
@@ -2593,6 +2619,15 @@ function VoeAnalysisTab() {
     onSuccess: () => voeClusters.refetch(),
   });
 
+  const voeBriefing = useQuery({
+    queryKey: ["voe-briefing-tab", period],
+    queryFn: () => api.voeBriefing(`${period}-01`),
+  });
+  const recomputeVoeBriefing = useMutation({
+    mutationFn: () => api.recomputeVoeBriefing(`${period}-01`),
+    onSuccess: () => voeBriefing.refetch(),
+  });
+
   const trendMonths = Array.from({ length: VOE_TREND_MONTHS }, (_, i) => monthsBefore(period, VOE_TREND_MONTHS - 1 - i));
   const monthlyVolumeQuery = useQuery({
     queryKey: ["voe-monthly-volume", period],
@@ -2757,6 +2792,47 @@ function VoeAnalysisTab() {
               </div>
             )}
           </>
+        )}
+      </Card>
+
+      <Card title="이달의 VOE AI 브리핑">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            아래 "월간 VOE 클러스터링" 결과를 다시 임베딩하지 않고 그대로 재사용해, 이번 달 여러 주제를
+            사내 LLM이 한 번에 문단으로 요약합니다. 클러스터링이 먼저 계산돼 있어야 합니다.
+          </p>
+          <Button
+            variant="secondary"
+            onClick={() => recomputeVoeBriefing.mutate()}
+            disabled={recomputeVoeBriefing.isPending}
+          >
+            {recomputeVoeBriefing.isPending ? "요약 중..." : "이번 달 재계산"}
+          </Button>
+        </div>
+        {recomputeVoeBriefing.isError && <ErrorState error={recomputeVoeBriefing.error} />}
+        {voeBriefing.isLoading && <LoadingState />}
+        {voeBriefing.isError && <ErrorState error={voeBriefing.error} />}
+        {voeBriefing.data && !voeBriefing.data.has_clusters && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            먼저 아래 "월간 VOE 클러스터링"을 계산하세요.
+          </p>
+        )}
+        {voeBriefing.data && voeBriefing.data.has_clusters && !voeBriefing.data.briefing && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            아직 브리핑이 계산되지 않았습니다. "이번 달 재계산"을 눌러보세요.
+          </p>
+        )}
+        {voeBriefing.data?.briefing && voeBriefing.data.has_clusters && (
+          <div>
+            <p className="whitespace-pre-line text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+              {voeBriefing.data.briefing}
+            </p>
+            {voeBriefing.data.briefing_computed_at && (
+              <p className="mt-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+                {voeBriefing.data.briefing_computed_at.replace("T", " ")} 기준
+              </p>
+            )}
+          </div>
         )}
       </Card>
 
@@ -3187,6 +3263,19 @@ function RepeatedSideDishRankingSection() {
   const [repeatCornerId, setRepeatCornerId] = useState<number | null>(null);
   const [showAllRepeated, setShowAllRepeated] = useState(false);
   const REPEATED_PREVIEW_COUNT = 20;
+  // §80: "어떤 부찬이 중복해서 나올 때마다 만족도가 떨어지는지 패턴을 파악하고
+  // 싶다" — 횟수/연결 메인 만족도로 정렬 가능하게 한다.
+  const [sortKey, setSortKey] = useState<"count" | "satisfaction">("count");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  function toggleSort(key: "count" | "satisfaction") {
+    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  }
+  // 부찬 클릭 상세 — "단무지 클릭 → 8/01 신포짜장면 / 8/11 스냅스낵 신라면".
+  const [selectedItemKey, setSelectedItemKey] = useState<string | null>(null);
 
   const repeatCorners = useQuery({ queryKey: ["corner-list"], queryFn: () => api.cornerList() });
   const repeated = useQuery({
@@ -3198,10 +3287,31 @@ function RepeatedSideDishRankingSection() {
         ...(repeatCornerId != null ? { corner_id: repeatCornerId } : {}),
       }),
   });
-  const repeatedItems = repeated.data?.items ?? [];
+  const repeatedItems = [...(repeated.data?.items ?? [])].sort((a, b) => {
+    const dir = sortDir === "asc" ? 1 : -1;
+    if (sortKey === "count") return (a.count - b.count) * dir;
+    const av = a.avg_main_satisfaction;
+    const bv = b.avg_main_satisfaction;
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1; // 만족도 없는 행은 정렬 방향과 무관하게 맨 뒤
+    if (bv == null) return -1;
+    return (av - bv) * dir;
+  });
   const visibleRepeatedItems = showAllRepeated
     ? repeatedItems
     : repeatedItems.slice(0, REPEATED_PREVIEW_COUNT);
+  const selectedItem = repeatedItems.find((o) => `${o.corner_name}|${o.menu_name}` === selectedItemKey) ?? null;
+  const sideDishDetail = useQuery({
+    queryKey: ["weekly-menu-side-dish-detail", selectedItem?.corner_name, selectedItem?.menu_name, repeatStart, repeatEnd],
+    queryFn: () =>
+      api.weeklyMenuSideDishDetail({
+        menu_name: selectedItem!.menu_name,
+        corner_name: selectedItem!.corner_name,
+        period_start: repeatStart,
+        period_end: repeatEnd,
+      }),
+    enabled: selectedItem != null,
+  });
 
   return (
     <Card title="자주 반복되는 부찬 랭킹">
@@ -3258,24 +3368,80 @@ function RepeatedSideDishRankingSection() {
       )}
       {repeatedItems.length > 0 && (
         <>
-          <Table
-            columns={[
-              { key: "rank", label: "순위", align: "right" },
-              { key: "corner", label: "코너" },
-              { key: "menu", label: "메뉴" },
-              { key: "role", label: "역할" },
-              { key: "count", label: "횟수", align: "right" },
-            ]}
-            rows={visibleRepeatedItems.map((o, i) => ({
-              key: `${o.corner_name}-${o.menu_name}`,
-              rank: i + 1,
-              corner: o.corner_name,
-              menu: o.menu_name,
-              role: o.menu_role,
-              count: `${o.count}회`,
-            }))}
-            rowKey={(r) => r.key as string}
-          />
+          <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+            메뉴명을 클릭하면 어느 날짜·코너·메인메뉴와 함께 편성됐는지 상세를 볼 수 있습니다.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[13px]">
+              <thead>
+                <tr>
+                  <th
+                    className="border-b py-2 pr-4 text-right font-medium"
+                    style={{ borderColor: "var(--border-strong)", color: "var(--ink-muted)" }}
+                  >
+                    순위
+                  </th>
+                  <th
+                    className="border-b py-2 pr-4 text-left font-medium"
+                    style={{ borderColor: "var(--border-strong)", color: "var(--ink-muted)" }}
+                  >
+                    코너
+                  </th>
+                  <th
+                    className="border-b py-2 pr-4 text-left font-medium"
+                    style={{ borderColor: "var(--border-strong)", color: "var(--ink-muted)" }}
+                  >
+                    메뉴
+                  </th>
+                  <th
+                    className="border-b py-2 pr-4 text-left font-medium"
+                    style={{ borderColor: "var(--border-strong)", color: "var(--ink-muted)" }}
+                  >
+                    역할
+                  </th>
+                  <SortableHeader
+                    label="횟수"
+                    active={sortKey === "count"}
+                    dir={sortDir}
+                    align="right"
+                    onClick={() => toggleSort("count")}
+                  />
+                  <SortableHeader
+                    label="연결 메인 만족도"
+                    active={sortKey === "satisfaction"}
+                    dir={sortDir}
+                    align="right"
+                    onClick={() => toggleSort("satisfaction")}
+                  />
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRepeatedItems.map((o, i) => {
+                  const itemKey = `${o.corner_name}|${o.menu_name}`;
+                  return (
+                    <tr key={itemKey} className="border-b" style={{ borderColor: "var(--border)" }}>
+                      <td className="py-2 pr-4 text-right">{i + 1}</td>
+                      <td className="py-2 pr-4">{o.corner_name}</td>
+                      <td className="py-2 pr-4">
+                        <button
+                          className="underline"
+                          style={{ color: "var(--accent)" }}
+                          onClick={() => setSelectedItemKey((cur) => (cur === itemKey ? null : itemKey))}
+                        >
+                          {o.menu_name}
+                        </button>
+                      </td>
+                      <td className="py-2 pr-4">{o.menu_role}</td>
+                      <td className="py-2 pr-4 text-right">{o.count}회</td>
+                      <td className="py-2 pr-4 text-right">
+                        {o.avg_main_satisfaction != null ? o.avg_main_satisfaction.toFixed(2) : "-"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
           {repeatedItems.length > REPEATED_PREVIEW_COUNT && (
             <button
               className="mt-2 text-xs underline"
@@ -3284,6 +3450,32 @@ function RepeatedSideDishRankingSection() {
             >
               {showAllRepeated ? "접기" : `전체 ${repeatedItems.length}개 보기`}
             </button>
+          )}
+          {selectedItem && (
+            <div className="mt-3 rounded-xl border p-3" style={{ borderColor: "var(--border)" }}>
+              <p className="mb-2 text-[13px] font-medium">
+                {selectedItem.menu_name} ({selectedItem.corner_name}) — 편성 상세
+              </p>
+              {sideDishDetail.isLoading && <LoadingState />}
+              {sideDishDetail.isError && <ErrorState error={sideDishDetail.error} />}
+              {sideDishDetail.data && sideDishDetail.data.pairings.length === 0 && (
+                <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                  이 기간에 편성 이력이 없습니다.
+                </p>
+              )}
+              {sideDishDetail.data && sideDishDetail.data.pairings.length > 0 && (
+                <ul className="space-y-1 text-[13px]">
+                  {sideDishDetail.data.pairings.map((p, i) => (
+                    <li key={i}>
+                      {weekdayLabel(p.plan_date)} {p.corner_name} — {p.main_menu_name ?? "메인 미배정"}
+                      {p.main_avg_satisfaction != null && (
+                        <span style={{ color: "var(--ink-muted)" }}> (만족도 {p.main_avg_satisfaction.toFixed(2)})</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
         </>
       )}
@@ -3469,9 +3661,11 @@ function MenuPlanPerformanceSection() {
   });
 
   const items = query.data?.items ?? [];
-  const medianPlan = query.data?.median_plan_count ?? 0;
+  // §80: X축을 "편성 횟수"에서 "1회 편성당 식수"로 바꿨다(담당자: "편성 횟수는
+  // 불필요") — 편성 횟수는 축에서 빠지지만 버블 크기로는 계속 보인다.
+  const medianHeadcountPerPlan = query.data?.median_headcount_per_plan ?? 0;
   const medianScore = query.data?.median_satisfaction ?? 0;
-  const maxPerPlan = Math.max(1, ...items.map((r) => r.headcount_per_plan));
+  const maxPlanCount = Math.max(1, ...items.map((r) => r.plan_count));
 
   // 판정별로 시리즈를 나눈다 — 그래야 범례가 생기고, 범례를 눌러 한 분류만
   // 골라 볼 수 있다. 예전엔 시리즈 하나에 색만 달라서 "이 색이 무슨 뜻인지"를
@@ -3481,7 +3675,7 @@ function MenuPlanPerformanceSection() {
     name: action,
     type: "scatter" as const,
     itemStyle: { color: resolveColor(PLANNING_ACTION_COLOR[action] ?? "var(--ink-muted)") },
-    symbolSize: (v: number[]) => 8 + Math.sqrt(v[2] / maxPerPlan) * 22,
+    symbolSize: (v: number[]) => 8 + Math.sqrt(v[2] / maxPlanCount) * 22,
     // 점마다 메뉴명을 상시 표시하고 겹치면 자동으로 비킨다 — 4분면 차트(§42)와
     // 같은 처리라 두 화면의 조작감이 같다.
     // formatter를 안 주면 ECharts가 값(숫자)을 찍는다 — 메뉴명이 나와야 한다.
@@ -3497,13 +3691,17 @@ function MenuPlanPerformanceSection() {
       .filter((r) => r.action === action && r.avg_satisfaction != null)
       .map((r) => ({
         name: r.menu_name,
-        value: [r.plan_count, r.avg_satisfaction as number, r.headcount_per_plan],
+        value: [r.headcount_per_plan, r.avg_satisfaction as number, r.plan_count],
       })),
   })).filter((serie) => serie.data.length > 0);
 
   // 사분면 배경 음영 + 모서리 이름. 중앙값 십자선만 있으면 "어느 쪽이 감편인지"를
   // 매번 머리로 계산해야 한다.
-  const maxPlan = Math.max(medianPlan * 2, ...items.map((r) => r.plan_count), 1);
+  const maxHeadcountPerPlan = Math.max(
+    medianHeadcountPerPlan * 2,
+    ...items.map((r) => r.headcount_per_plan),
+    1,
+  );
   const quadrantMarkArea = {
     silent: true,
     itemStyle: { opacity: 0.06 },
@@ -3515,23 +3713,23 @@ function MenuPlanPerformanceSection() {
       opacity: 0.9,
     },
     data: [
-      // 자주 편성 + 반응 낮음 → 감편
+      // 1회당 식수 많음 + 반응 낮음 → 감편
       [
-        { xAxis: medianPlan, yAxis: 0, itemStyle: { color: resolveColor("var(--critical)") },
-          label: { formatter: "감편 검토\n(자주 내는데 반응 낮음)", position: "insideBottomRight" as const } },
-        { xAxis: maxPlan, yAxis: medianScore },
+        { xAxis: medianHeadcountPerPlan, yAxis: 0, itemStyle: { color: resolveColor("var(--critical)") },
+          label: { formatter: "감편 검토\n(식수 많은데 반응 낮음)", position: "insideBottomRight" as const } },
+        { xAxis: maxHeadcountPerPlan, yAxis: medianScore },
       ],
-      // 드물게 편성 + 반응 높음 → 증편
+      // 1회당 식수 적음 + 반응 높음 → 증편
       [
         { xAxis: 0, yAxis: medianScore, itemStyle: { color: resolveColor("var(--good)") },
-          label: { formatter: "증편 후보\n(드문데 반응 좋음)", position: "insideTopLeft" as const } },
-        { xAxis: medianPlan, yAxis: 5 },
+          label: { formatter: "증편 후보\n(식수 적은데 반응 좋음)", position: "insideTopLeft" as const } },
+        { xAxis: medianHeadcountPerPlan, yAxis: 5 },
       ],
-      // 자주 + 높음 → 주력 유지
+      // 많음 + 높음 → 주력 유지
       [
-        { xAxis: medianPlan, yAxis: medianScore, itemStyle: { color: resolveColor("var(--accent)") },
+        { xAxis: medianHeadcountPerPlan, yAxis: medianScore, itemStyle: { color: resolveColor("var(--accent)") },
           label: { formatter: "주력 유지", position: "insideTopRight" as const } },
-        { xAxis: maxPlan, yAxis: 5 },
+        { xAxis: maxHeadcountPerPlan, yAxis: 5 },
       ],
     ],
   };
@@ -3543,12 +3741,12 @@ function MenuPlanPerformanceSection() {
     tooltip: {
       trigger: "item",
       formatter: (p: { name: string; value: number[]; seriesName: string }) =>
-        `${p.name} · ${p.seriesName}<br/>편성 ${p.value[0]}회 · 만족도 ${p.value[1].toFixed(2)}` +
-        `<br/>1회 편성당 ${p.value[2]}명 (점 크기)`,
+        `${p.name} · ${p.seriesName}<br/>1회 편성당 ${p.value[0]}명 · 만족도 ${p.value[1].toFixed(2)}` +
+        `<br/>편성 ${p.value[2]}회 (점 크기)`,
     },
     xAxis: {
       type: "value",
-      name: "편성 횟수 →",
+      name: "1회 편성당 식수 →",
       nameLocation: "middle",
       nameGap: 28,
       min: 0,
@@ -3579,7 +3777,7 @@ function MenuPlanPerformanceSection() {
           lineStyle: { color: chartTheme.axis, type: "dashed" as const },
           label: { color: chartTheme.text, fontSize: 10, position: "insideEndTop" as const },
           data: [
-            { xAxis: medianPlan, label: { formatter: "편성 중앙값" } },
+            { xAxis: medianHeadcountPerPlan, label: { formatter: "1회당 식수 중앙값" } },
             { yAxis: medianScore, label: { formatter: "만족도 중앙값" } },
           ],
         },
@@ -3593,9 +3791,9 @@ function MenuPlanPerformanceSection() {
   return (
     <Card title="편성 빈도 × 성과 — 다음 주 편성 조정">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        식단표에 <strong>몇 번 올렸는지</strong>(편성 횟수)와 실제 반응(만족도·1회 편성당 식수)을
-        교차합니다. 편성 횟수는 담당자가 직접 통제하는 변수라 다음 주에 바꿀 수 있습니다. 기준선은 그
-        기간 전체의 중앙값이며, 취식 데이터가 메인메뉴 기준이라 <strong>메인메뉴만</strong> 봅니다.
+        <strong>1회 편성당 식수</strong>와 실제 반응(만족도)을 교차합니다 — 점 크기는 편성 횟수입니다.
+        편성 횟수는 담당자가 직접 통제하는 변수라 다음 주에 바꿀 수 있습니다. 기준선은 그 기간 전체의
+        중앙값이며, 취식 데이터가 메인메뉴 기준이라 <strong>메인메뉴만</strong> 봅니다.
       </p>
       <div className="mb-3 flex flex-wrap items-center gap-3">
         <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>

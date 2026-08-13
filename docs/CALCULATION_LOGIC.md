@@ -5479,3 +5479,148 @@ HMR이 못 따라가 깨진 경우다(같은 대화의 "왜 업데이트가 안�
   실제 겹침이 있는 주(2026-08-03~09)에서 요약 배지+요일별 그룹 렌더링
   확인, 날씨 카드 위에 "시뮬레이션" 라벨이 뜸, 에러 바운더리는 임시
   `throw` 주입으로 fallback UI가 실제로 뜨는 것까지 확인 후 원복.
+
+## §80. Home 예측 카드 재설계 + 코너별 분석 단순화 + 부찬 상세/만족도 + 편성분석 축 교체 + VOE AI 브리핑 (2026-08)
+
+담당자가 Home/분석 두 구분으로 8개 항목을 한 번에 피드백했다. 큰 줄기는
+두 가지 — (1) 홈의 "예측" 계열 카드가 오차 리스크가 있어 보이니 실측
+기반으로 바꾸거나 설명을 보강해달라는 것, (2) 분석 탭 여러 화면이
+"이해하기 어렵다"는 것. AskUserQuestion으로 네 갈래를 확정했다: 예상
+식수 카드는 예측 로직을 걷어내고 최근 실측 평균으로 완전히 교체(점유율/
+대기시간 예측 엔진은 그대로 유지), 코너-메뉴 그래프는 요일별 추이 대신
+이번 주 전체 랭킹 가로막대로, 편성분석 X축은 "편성 횟수" 대신 "1회
+편성당 식수"로(만족도는 Y축 유지), VOE AI 브리핑은 Home의 기존 좁은
+요약과 별개로 만족도·VoE 탭에 전체 브리핑 카드를 신설.
+
+### A. "금주 예상 식수" 카드 — 실측 평균 기반 코너-메뉴 랭킹 가로막대
+
+`HomePage.tsx`에서 날씨/메뉴배수 예측 기반의 `forecastOption`/
+`forecastByCornerOption`/`forecastView` 토글을 전부 걷어냈다(점유율·
+대기시간 뷰가 쓰는 `forecastMealType`/`forecastRequested`는 유지 — 이번
+요청은 식수 숫자 자체의 오차 리스크에 한정). 대신 `analysis.py`에
+`GET /weekly-menu/planned-headcount-ranking` 신규 엔드포인트를 추가해,
+`weekly_menu_plan_rule_check`가 이미 쓰던 `_recent_avg_headcount_by_menu`/
+`_HISTORY_WINDOW_DAYS`(180일) 패턴을 그대로 재사용한다 — 이번 주 편성된
+MAIN 슬롯마다 과거 180일 실측 평균 식수를 붙여 내림차순 정렬하고,
+이력 없는 신메뉴(`None`)는 맨 뒤로 보낸다. 프론트는 게이팅 버튼 없이
+바로 조회해 코너-메뉴별 가로막대로 보여준다(`yAxis` category+inverse,
+`xAxis` value) — 냉면·국물류처럼 날씨 영향이 큰 메뉴도 메뉴 단위로
+개별 확인 가능해졌다. 카드 설명 문구를 "날씨·메뉴배수 예측이 아니라
+최근 실측 평균입니다"로 명시했다.
+
+### B. "예상 피크 식수" — 설명 캡션 + 메뉴명 추가
+
+계산 로직(`simulation.py`의 `_forecast_corners`/`compute_peak_share_ratio`)
+자체는 손대지 않고 UI 설명만 보강했다. 오늘 날짜로 스코프한
+`cornerMainMenuByDate` 쿼리를 새로 호출해 최고 혼잡 예상 코너의 오늘
+메인메뉴를 `StatTile`의 `sub` 텍스트에 이어 붙이고, 카드 하단에 공식을
+평문으로 설명하는 캡션("요일별 최근 8회 평균 식수 × 계획 메뉴 인기도
+배수 × 최근 60일 피크타임 점유율로 추정합니다")을 추가했다.
+
+### C. "식수 추이" 차트 — 선 → 누적 막대 + N일 평균
+
+`headcountTrendOption.series`를 `type:"line"`에서 `type:"bar"` +
+`stack:"total"`로 바꿨다(코너별 추이가 이미 쓰던 `stack:"corner"` 패턴과
+동일). 새 로컬 state `trendAvgWindow: 7|14|30`(기본 7)을 추가하고,
+일별 추이일 때만 `SegmentedControl`로 7/14/30일 선택이 가능하게 했다 —
+`SegmentedControl<T extends string>`이 문자열만 받으므로
+`value={String(trendAvgWindow)}` / `onChange={(v) => setTrendAvgWindow(Number(v) as 7|14|30)}`
+로 변환한다. 새 백엔드 호출 없이 이미 가져온 `trendRows`를 프론트에서
+합산해 "최근 N일 평균: {값}명"을 표시한다.
+
+### D. `CornerMetricComparisonSection` — 기본 단일 지표로 단순화
+
+코너마다 지표 2개(듀얼축) 선을 항상 같이 그려 최대 16개 선이 뜨던 걸,
+`showSecondMetric`(기본 `false`) state로 감쌌다. 기본값에서는 오른쪽
+축 선택기를 숨기고 `yAxis`/`series` 모두 왼쪽 지표 하나만 구성해
+코너당 선 1개(최대 8개)로 단순화한다. "두 번째 지표 비교" 체크박스로
+기존 듀얼축 동작을 그대로 켤 수 있다.
+
+### E. `RepeatedSideDishRankingSection` — 클릭 상세 + 만족도 정렬
+
+`menu_combination.py`에 `build_side_combos_for_main_menu`(부찬→메인
+방향)를 뒤집은 `find_main_menu_pairings_for_side_dish`를 추가했다 —
+부찬이 SIDE 슬롯이면 같은 코너의 MAIN만, HEALTH_GARDEN 슬롯이면 §132의
+"건강가든은 코너 무관" 관례대로 같은 (날짜, 끼니)의 모든 코너 MAIN을
+찾는다. 매칭된 각 슬롯의 그날 실제 만족도(`MealLog.taste_score` 평균)를
+붙여 `SideDishPairing` 리스트로 반환하고, `summarize_side_dish_pairings`
+가 `{avg_main_satisfaction, pairing_count}`로 요약한다.
+`weekly_menu_repeated_side_dishes` 응답 각 항목에 `avg_main_satisfaction`을
+추가하고, 신규 엔드포인트 `GET /weekly-menu/side-dish-detail`(메뉴명·
+코너명으로 조회)을 만들었다. 프론트는 기존 `Table` 대신 `SortableHeader`
+를 쓴 raw `<table>`로 바꿔 "횟수"/"연결 메인 만족도" 컬럼 정렬을 넣고,
+부찬 이름을 클릭 가능한 버튼으로 바꿔 클릭 시 날짜·코너·메인메뉴(+만족도)
+상세 목록을 펼친다.
+
+### F. `MenuPlanPerformanceSection` — X축을 "1회 편성당 식수"로 교체
+
+X축만 바꾸고 판정 로직은 그대로 두면 "화면은 식수 축인데 감편/증편
+라벨은 편성 횟수 기준"이라는 불일치가 생긴다 — `menu_plan_analytics.py`의
+`classify_planning_action`이 실제로 `plan_count >= median_plan_count`를
+판정 기준으로 쓰고 있었기 때문이다. 그래서 축 교체의 필연적 귀결로
+판정 기준 자체를 `headcount_per_plan`/`median_headcount_per_plan`으로
+같이 바꿨다(`high_demand = headcount_per_plan >= median_headcount_per_plan`).
+`NO_INTAKE` 판정은 그대로 동작한다 — 취식이 없으면 `headcount_per_plan`도
+0이 되므로. `analysis.py`의 `menu_plan_performance`는
+`median_headcount_per_plan`을 계산해 분류기에 넘기고 응답 필드명도
+`median_plan_count`→`median_headcount_per_plan`으로 바꿨다. 프론트
+산점도는 `value` 순서를 `[headcount_per_plan, avg_satisfaction, plan_count]`
+로 바꾸되 `symbolSize`(버블 크기)는 여전히 `plan_count` 기준으로 남겨
+"편성 횟수는 축에서 뺐지만 정보 자체는 버블 크기로 유지"했다. 사분면
+라벨을 "감편 검토(식수 많은데 반응 낮음)"/"증편 후보(식수 적은데 반응
+좋음)"로, X축 라벨을 "1회 편성당 식수 →"로 갱신했다.
+
+### G. `VoeAnalysisTab` — "이달의 VOE AI 브리핑" 카드
+
+Home의 "개선 필요 포인트" 카드에 이미 있는 VOE 요약(카테고리 1개,
+코멘트 10개 한정)과 별개로, 만족도·VoE 탭에 이번 달 전체 주관식
+코멘트를 다중 테마로 요약하는 새 카드를 만들었다. `cluster_monthly_voe`
+가 이미 계산해둔 `MonthlyVoeCluster`(테마 라벨·키워드·대표 코멘트·건수)
+를 그대로 재사용하고 재임베딩/재군집은 하지 않는다 — `llm_analysis.py`에
+`_collect_voe_briefing_facts`(그 달 클러스터를 건수 내림차순으로 모음),
+`_build_voe_briefing_prompt`(3~4문장 한국어 브리핑 요청, 네이버 리뷰
+AI 브리핑처럼), `_fallback_voe_briefing`(LLM 미설정/실패 시 클러스터를
+"라벨(건수): 대표 코멘트" 불릿으로 나열), `summarize_voe_briefing`을
+기존 `summarize_menu_trend`와 같은 하우스 패턴으로 추가했다. 캐시는
+`KIND_VOE_BRIEFING` kind로 기존 `get_cached`/`save_analysis`를 그대로 쓴다.
+
+`dashboard.py`에 `GET /voe-briefing`(캐시 조회 + 그 달 `MonthlyVoeCluster`
+존재 여부를 `has_clusters`로 같이 반환)과 `POST /voe-briefing/recompute`
+(요약 후 캐시 저장)를 `voe-clusters` 엔드포인트들 옆에 추가했다.
+프론트 카드는 카테고리 카드와 클러스터 카드 사이에 배치하고,
+`recomputeVoeClusters`와 동일한 `useQuery`+`useMutation` 패턴을 쓴다.
+클러스터링이 아직 안 돈 달(`has_clusters === false`)이면 브리핑 텍스트
+유무와 무관하게 "먼저 아래 '월간 VOE 클러스터링'을 계산하세요" 안내만
+보여준다 — 클러스터가 없는 상태에서 재계산을 누르면 폴백 문구("이번 달
+주관식 의견이 없습니다")가 캐시에 저장되는데, 이걸 안내 문구와 나란히
+보여주면 "클러스터링을 먼저 하라면서 왜 결과가 있지"처럼 모순돼 보여서
+`has_clusters`가 true일 때만 브리핑 본문을 렌더링하도록 조건을 좁혔다.
+
+### 검증
+
+- `test_llm_analysis.py`: `_collect_voe_briefing_facts`(건수 내림차순
+  정렬, 클러스터 없을 때 빈 리스트)·`_build_voe_briefing_prompt`·
+  `_fallback_voe_briefing`(클러스터 있을 때/없을 때)·
+  `summarize_voe_briefing`(LLM 미설정 폴백, 클러스터 없으면 LLM 설정
+  여부와 무관하게 폴백)·`KIND_VOE_BRIEFING` 캐시 라운드트립 테스트 추가.
+- `test_api_ingest_and_analysis.py`: `GET /voe-briefing`이 클러스터링
+  전엔 `has_clusters=false`+`briefing=null`을 주는지, `POST
+  /voe-briefing/recompute`가 기존 `MonthlyVoeCluster`를 재임베딩 없이
+  재사용해 요약을 캐시에 저장하는지(`side-dish-detail`/
+  `repeated-side-dishes`/`plan-performance`의 `median_headcount_per_plan`
+  테스트도 이 라운드에서 §80-E/F와 함께 추가) 확인.
+- `pytest -q` 전체 575개 통과.
+- `npx tsc -b`·`npm run build` 타입체크·빌드 통과.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건): (1) 홈 "금주 예상 식수"가 실측 평균 코너-메뉴 가로막대로
+  뜨고 예측 관련 문구가 사라짐, (2) 최고 혼잡 예상 코너 카드에 설명
+  캡션이 뜸(메뉴명은 그날 편성 데이터가 있을 때만 표시되는 데이터
+  의존 동작을 확인), (3) 식수 추이가 누적 막대로 바뀌고 "최근 7일
+  평균: 70명" + 7/14/30일 선택기가 뜸, (4) 코너별 분석이 기본 단일
+  지표(지표 1개 선택 + "두 번째 지표 비교" 체크박스 미체크)로 뜸,
+  (5) 부찬 랭킹 표에서 "연결 메인 만족도" 열이 보이고 항목 클릭 시
+  날짜·코너·메인메뉴 상세가 펼쳐짐, (6) 편성 분석 X축이 "1회 편성당
+  식수 →"로, 사분면 라벨이 "식수 많은데/적은데"로 바뀜, (7) 만족도·
+  VoE 탭에서 클러스터링 계산 전엔 "먼저 아래... 계산하세요" 안내만,
+  클러스터링 후 재계산하면 실제 브리핑 텍스트(LLM 미설정 폴백
+  포함)와 계산 시각이 뜸.

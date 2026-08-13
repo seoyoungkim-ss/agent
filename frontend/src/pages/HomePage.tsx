@@ -10,7 +10,6 @@ import {
   type HeadcountGroupBy,
   type MealType,
   type MenuTrendEntry,
-  type Weather,
 } from "../api/client";
 import {
   Button,
@@ -204,6 +203,8 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   const [trendGroupBy, setTrendGroupBy] = useState<HeadcountGroupBy>("total");
   const [trendCornerIds, setTrendCornerIds] = useState<number[]>([]);
   const [trendDivisions, setTrendDivisions] = useState<Division[]>([]);
+  // §80: "OO 일자간 일평균 식수" 요청 — 일간 단위에서만 의미가 있는 선택창.
+  const [trendAvgWindow, setTrendAvgWindow] = useState<7 | 14 | 30>(7);
   const TREND_LOOKBACK_DAYS: Record<Granularity, number> = { daily: 30, weekly: 84, monthly: 365 };
   const trendPeriodStart = isoDaysAgo(TREND_LOOKBACK_DAYS[trendGranularity]);
   const trendPeriodEnd = isoDaysAgo(0);
@@ -213,41 +214,23 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
     queryFn: () => api.cornerList(),
   });
 
-  // ---- 금주 예상 식수 / 점유율·대기시간 (2026-08 현황 재편) ----
-  // 날씨는 기상청 연동이 없어 사용자가 고른다(협의 결정). 연휴 전후는 백엔드가
-  // 공휴일 캘린더에서 자동 판정해 배수를 적용한다.
-  const [forecastWeather, setForecastWeather] = useState<Weather>("맑음");
-  const [forecastMealType, setForecastMealType] = useState<MealType>("중식");
-  // 사내 행사(전사 워크숍·교육 등)는 시뮬레이션 탭의 what-if에 있던 유일한 실질
-  // 입력이었다. 탭을 없애면서 이 토글만 여기로 흡수했다(2026-08).
-  const [hasCompanyEvent, setHasCompanyEvent] = useState(false);
-  // 이 두 예측은 슬롯·코너·날짜마다 과거 180일을 다시 훑는 구조라 요청 하나가
-  // 수백~수천 SQL이 된다. 백엔드 docstring도 원래 "버튼 클릭 시에만 호출"이라고
-  // 적혀 있었는데, 2026-08 현황 재편 때 홈 진입 즉시 호출로 바뀌면서 화면이
-  // "불러오는 중"에서 멈췄다(실사용 신고). 버튼 뒤로 되돌린다 — 한 번 계산하면
-  // React Query 캐시(main.tsx의 staleTime)로 그 주는 즉시 다시 뜬다.
-  const [forecastRequested, setForecastRequested] = useState(false);
-  // 총계/코너별 보기 — 이미 받아온 응답을 다시 그리는 것뿐이라 재요청이 없다.
-  const [forecastView, setForecastView] = useState<"total" | "corner">("total");
-  const weeklyForecast = useQuery({
-    enabled: forecastRequested,
-    queryKey: [
-      "weekly-congestion-forecast",
-      selectedMonday,
-      saturdayOfSelected,
-      forecastMealType,
-      forecastWeather,
-      hasCompanyEvent,
-    ],
+  // ---- 코너-메뉴별 예상 식수(실측 평균) / 점유율·대기시간 (2026-08 현황 재편) ----
+  // §80: "예상 식수는 오차 리스크가 있을 것 같다"는 담당자 피드백으로 날씨/
+  // 메뉴배수 예측(weeklyCongestionForecast)을 걷어내고, 이번 주 편성된
+  // 코너-메뉴를 최근 실측 평균 식수로 랭킹하는 가벼운 집계로 바꿨다 — 버튼
+  // 게이팅 없이 바로 조회(예측처럼 과거 180일을 슬롯마다 다시 훑지 않음).
+  const plannedHeadcountRanking = useQuery({
+    queryKey: ["weekly-menu-planned-headcount-ranking", selectedMonday, saturdayOfSelected],
     queryFn: () =>
-      api.weeklyCongestionForecast({
-        period_start: selectedMonday,
-        period_end: saturdayOfSelected,
-        meal_type: forecastMealType,
-        weather: forecastWeather,
-        has_company_event: hasCompanyEvent,
-      }),
+      api.weeklyMenuPlannedHeadcountRanking({ period_start: selectedMonday, period_end: saturdayOfSelected }),
   });
+  // 점유율/대기시간 예측은 슬롯·코너·날짜마다 과거 180일을 다시 훑는 구조라
+  // 요청 하나가 수백~수천 SQL이 된다. 백엔드 docstring도 원래 "버튼 클릭
+  // 시에만 호출"이라고 적혀 있었는데, 2026-08 현황 재편 때 홈 진입 즉시
+  // 호출로 바뀌면서 화면이 "불러오는 중"에서 멈췄다(실사용 신고). 버튼
+  // 뒤로 되돌린다 — 한 번 계산하면 React Query 캐시(main.tsx의 staleTime)
+  // 로 그 주는 즉시 다시 뜬다.
+  const [forecastRequested, setForecastRequested] = useState(false);
   // 점유율/대기시간은 주간 식단표 예측 요약을 그대로 재사용한다(백엔드 변경 없음).
   const predictedImpact = useQuery({
     enabled: forecastRequested,
@@ -333,6 +316,15 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       (max, c) => (max === null || c.expected_peak_headcount > max.expected_peak_headcount ? c : max),
       null,
     );
+  // §80: "예상 피크 식수" 카드에 메뉴명을 보여달라는 요청 — 오늘 하루만 스코프한
+  // 가벼운 쿼리(기존 cornerMainMenuByDate 엔드포인트 재사용).
+  const todayMainMenu = useQuery({
+    queryKey: ["corner-main-menu-by-date", today, today],
+    queryFn: () => api.cornerMainMenuByDate({ period_start: today, period_end: today }),
+  });
+  const topCongestedCornerMenuName = todayMainMenu.data?.find(
+    (r) => r.corner_id === topCongestedCorner?.corner_id,
+  )?.menu_name;
 
   // 금주 메뉴 과거 VOE — 이번 주 메인메뉴 중 과거 평가 이력(evaluation_count>0)이
   // 있는 메뉴 수. 이번 주 메뉴 수가 적어(보통 5~15개) 병렬 개별 호출로 v0 구현.
@@ -415,94 +407,39 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
     ],
   };
 
-  // 금주 예상 식수 차트 — 날짜별 총 예상 식수(휴일은 응답에서 이미 빠져 있다).
-  const forecastDays = weeklyForecast.data?.days ?? [];
-  const forecastOption = {
+  // 코너-메뉴별 예상 식수 랭킹 가로막대 — §80: 이번 주 편성된 MAIN 슬롯을
+  // 최근 실측 평균 식수(내림차순, 백엔드가 이미 정렬)로 그린다. 이력 없는
+  // 신메뉴(recent_avg_headcount === null)는 막대 대신 별도 안내 문구로
+  // 뺀다(0으로 그리면 "정말 안 먹힘"과 혼동된다).
+  const plannedHeadcountRows = plannedHeadcountRanking.data?.rows ?? [];
+  const plannedHeadcountBars = plannedHeadcountRows.filter((r) => r.recent_avg_headcount != null);
+  const plannedHeadcountNewMenuCount = plannedHeadcountRows.length - plannedHeadcountBars.length;
+  const plannedHeadcountOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 48, right: 16, top: 16, bottom: 28 },
-    tooltip: {
-      trigger: "axis",
-      formatter: (params: { axisValue?: string; marker: string; value: unknown }[]) => {
-        const date = params[0]?.axisValue ?? "";
-        const day = forecastDays.find((d) => d.target_date === date);
-        const v = params[0]?.value;
-        const lines = [date, `${params[0]?.marker}예상 식수: ${typeof v === "number" ? Math.round(v) : v}명`];
-        if (day && day.holiday_adjacency !== "해당 없음") lines.push(`${day.holiday_adjacency} (배수 ${day.applied_multiplier})`);
-        else if (day && day.applied_multiplier !== 1) lines.push(`날씨 배수 ${day.applied_multiplier}`);
-        return lines.join("<br/>");
-      },
-    },
+    grid: { left: 8, right: 56, top: 8, bottom: 28, containLabel: true },
+    tooltip: { trigger: "axis" as const, axisPointer: { type: "shadow" as const } },
     xAxis: {
-      type: "category",
-      data: forecastDays.map((d) => d.target_date),
-      axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: { color: chartTheme.text, formatter: (v: string) => weekdayLabel(v) },
-      axisTick: { show: false },
-    },
-    yAxis: {
-      type: "value",
-      name: "예상 식수",
+      type: "value" as const,
+      name: "식수(명)",
       axisLabel: { color: chartTheme.text },
       splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    yAxis: {
+      type: "category" as const,
+      inverse: true,
+      data: plannedHeadcountBars.map((r) => `${r.menu_name} (${r.corner_name}, ${weekdayLabel(r.plan_date)})`),
+      axisLabel: { color: chartTheme.text },
+      axisLine: { lineStyle: { color: chartTheme.axis } },
     },
     series: [
       {
-        name: "예상 식수",
-        type: "line" as const,
-        symbol: "circle",
-        symbolSize: 8,
-        lineStyle: { width: 2, color: resolveColor("var(--series-1)") },
-        itemStyle: {
-          // 연휴 전후인 날은 색을 달리해 "왜 낮은지"가 눈에 띄게 한다.
-          color: (p: { dataIndex: number }) =>
-            forecastDays[p.dataIndex]?.holiday_adjacency !== "해당 없음"
-              ? resolveColor("var(--warning)")
-              : resolveColor("var(--series-1)"),
-          borderColor: resolveColor("var(--surface)"),
-          borderWidth: 2,
-        },
-        data: forecastDays.map((d) => d.total_predicted_headcount),
+        name: "최근 실측 평균 식수",
+        type: "bar" as const,
+        itemStyle: { color: resolveColor("var(--series-1)") },
+        label: { show: true, position: "right" as const, color: chartTheme.text, formatter: "{c}명" },
+        data: plannedHeadcountBars.map((r) => Math.round((r.recent_avg_headcount as number) * 10) / 10),
       },
     ],
-  };
-
-  // 코너별 예상 식수 — 백엔드가 날짜마다 corners 배열을 이미 같이 주는데(총계와
-  // 함께) 위 차트가 총계만 쓰고 버리고 있었다. 담당자 요청(2026-08)에 맞춰 그
-  // 배열을 그대로 다시 그린다.
-  //
-  // ⚠️ 새 쿼리 파라미터로 만들면 안 된다. 이 예측은 슬롯·코너·날짜마다 과거 180일을
-  // 다시 훑어서 요청 하나가 수백~수천 SQL이라 "예측 계산하기" 버튼 뒤에 있다(§50).
-  // 토글은 순수 클라이언트 측이라 추가 요청도 지연도 없다.
-  const forecastCornerNames = Array.from(
-    new Set(forecastDays.flatMap((d) => d.corners.map((c) => c.corner_name))),
-  );
-  const forecastByCornerOption = {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    tooltip: { trigger: "axis" as const, axisPointer: { type: "shadow" as const }, formatter: axisTooltipFormatter },
-    legend: { data: forecastCornerNames, textStyle: { color: chartTheme.text }, type: "scroll" as const },
-    grid: { left: 48, right: 16, top: 48, bottom: 32 },
-    xAxis: {
-      type: "category" as const,
-      data: forecastDays.map((d) => d.target_date),
-      axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: { color: chartTheme.text, formatter: (v: string) => weekdayLabel(v) },
-      axisTick: { show: false },
-    },
-    yAxis: {
-      type: "value" as const,
-      name: "예상 식수",
-      axisLabel: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-    },
-    series: forecastCornerNames.map((name, i) => ({
-      name,
-      type: "bar" as const,
-      stack: "corner", // 쌓아서 총계가 위 차트와 같아 보이게 한다
-      itemStyle: { color: resolveColor(`var(--series-${(i % 8) + 1})`) },
-      data: forecastDays.map(
-        (d) => d.corners.find((c) => c.corner_name === name)?.predicted_headcount ?? 0,
-      ),
-    })),
   };
 
   // 툴팁은 시리즈 "이름"(코너명)만 알 수 있는데 main-menu-by-date는 corner_id로
@@ -561,15 +498,26 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       const color = resolveColor(`var(--series-${(i % 8) + 1})`);
       return {
         name: trendSeriesMeta.get(key)!,
-        type: "line" as const,
-        symbol: "circle",
-        symbolSize: 7,
-        lineStyle: { width: 2, color },
-        itemStyle: { color, borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
+        // §80: 담당자 요청으로 선그래프 대신 누적 막대그래프로 표현한다
+        // (forecastByCornerOption에서 이미 쓰던 stack 패턴과 동일).
+        type: "bar" as const,
+        stack: "total",
+        itemStyle: { color },
         data: trendPeriods.map((p) => trendValueBySeries.get(key)?.get(p) ?? 0),
       };
     }),
   };
+
+  // §80: "OO 일자간 일평균 식수" — 일간 단위일 때만 최근 N일 평균을 보여준다
+  // (이미 가져온 trendRows/trendPeriods를 클라이언트에서 합산하는 것뿐이라
+  // 새 백엔드 호출이 필요 없다).
+  const totalHeadcountByPeriod = new Map<string, number>();
+  for (const r of trendRows) totalHeadcountByPeriod.set(r.period, (totalHeadcountByPeriod.get(r.period) ?? 0) + r.headcount);
+  const trendRecentPeriods = trendPeriods.slice(-trendAvgWindow);
+  const trendRecentAvg =
+    trendRecentPeriods.length > 0
+      ? trendRecentPeriods.reduce((sum, p) => sum + (totalHeadcountByPeriod.get(p) ?? 0), 0) / trendRecentPeriods.length
+      : null;
 
   const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${selectedMonday}&end_date=${saturdayOfSelected}${
     classification !== "전체" ? `&classification=${encodeURIComponent(classification)}` : ""
@@ -636,7 +584,9 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
           value={topCongestedCorner?.corner_name ?? "-"}
           sub={
             topCongestedCorner
-              ? `예상 피크 식수 ${Math.round(topCongestedCorner.expected_peak_headcount).toLocaleString()}명`
+              ? `예상 피크 식수 ${Math.round(topCongestedCorner.expected_peak_headcount).toLocaleString()}명${
+                  topCongestedCornerMenuName ? ` · 메뉴: ${topCongestedCornerMenuName}` : ""
+                }`
               : "오늘 데이터 없음"
           }
           tone={topCongestedCorner ? "warning" : undefined}
@@ -648,6 +598,14 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
           onClick={onOpenWeeklyVoe ? () => onOpenWeeklyVoe(selectedMonday) : undefined}
         />
       </div>
+      {topCongestedCorner && (
+        // §80: "예상 피크 식수 로직 설명 추가/보완" 요청 — 수식은 그대로(코드
+        // 변경 없음), 화면에 평문 설명만 보강.
+        <p className="text-xs" style={{ color: "var(--ink-muted)" }}>
+          예상 피크 식수 = 요일별 최근 8회 평균 식수 × 계획 메뉴 인기도 배수 × 최근 60일 피크타임 점유율로
+          추정합니다.
+        </p>
+      )}
 
       <Card title="개선 필요 포인트 — 혼잡도 / 만족도 / VOE / 편성·운영">
         {improvementPoints.isLoading && <LoadingState />}
@@ -819,84 +777,58 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
             이 조건에 해당하는 취식 데이터가 없습니다.
           </p>
         )}
+        {trendGranularity === "daily" && trendRecentAvg != null && (
+          <div className="mb-2 flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            <span>
+              최근 {trendAvgWindow}일 평균: <strong>{Math.round(trendRecentAvg).toLocaleString()}명</strong>
+            </span>
+            <SegmentedControl
+              value={String(trendAvgWindow)}
+              options={[
+                { label: "7일", value: "7" },
+                { label: "14일", value: "14" },
+                { label: "30일", value: "30" },
+              ]}
+              onChange={(v) => setTrendAvgWindow(Number(v) as 7 | 14 | 30)}
+            />
+          </div>
+        )}
         {trendPeriods.length > 0 && <ReactECharts option={headcountTrendOption} style={{ height: 320 }} />}
       </Card>
 
       <Card title="금주 예상 식수 · 점유율 · 대기시간">
         <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          과거 같은 분류(평일/패밀리데이)의 최근 이력에 계획 메뉴 인기도와 날씨·연휴 전후 배수를 곱해
-          추정합니다. 식당이 쉬는 주말·공휴일은 빠집니다. <strong>날씨·연휴 전후 배수는 실측 보정 전
-          가정치</strong>라 방향성 참고용입니다 — 연휴 표본이 쌓이면 보정이 필요합니다.
+          코너-메뉴별 예상 식수는 <strong>날씨·메뉴배수 예측이 아니라 최근 실측 평균</strong>입니다 —
+          이번 주 편성된 메인메뉴가 최근 나갔을 때 실제로 몇 명이 먹었는지를 코너-메뉴 단위로 보여줍니다
+          (냉면·국물류처럼 날씨 영향이 큰 메뉴도 개별로 확인할 수 있습니다).
         </p>
-        {!forecastRequested && (
-          <div
-            className="mb-3 rounded-xl border p-3"
-            style={{ borderColor: "var(--border)" }}
-          >
-            <p className="mb-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-              이 예측은 코너·날짜마다 과거 6개월 이력을 다시 계산하므로 시간이 걸립니다. 조건을 고른 뒤
-              계산을 눌러주세요 — 한 번 계산하면 같은 주는 바로 다시 뜹니다.
-            </p>
-            <Button onClick={() => setForecastRequested(true)}>예측 계산하기</Button>
-          </div>
-        )}
-        <div className="mb-3 flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-            끼니
-            <SegmentedControl
-              value={forecastMealType}
-              options={MEAL_TYPE_OPTIONS.map((m) => ({ label: m, value: m }))}
-              onChange={setForecastMealType}
-            />
-          </label>
-          <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-            날씨
-            <SegmentedControl
-              value={forecastWeather}
-              options={[
-                { label: "맑음", value: "맑음" as Weather },
-                { label: "비", value: "비" as Weather },
-                { label: "폭염", value: "폭염" as Weather },
-                { label: "한파", value: "한파" as Weather },
-              ]}
-              onChange={setForecastWeather}
-            />
-          </label>
-          <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-            <input
-              type="checkbox"
-              checked={hasCompanyEvent}
-              onChange={(e) => setHasCompanyEvent(e.target.checked)}
-            />
-            사내 행사 있음 (식수 −10% 가정)
-          </label>
-        </div>
-        {forecastRequested && weeklyForecast.isLoading && <LoadingState />}
-        {weeklyForecast.isError && <ErrorState error={weeklyForecast.error} />}
-        {weeklyForecast.data && forecastDays.length === 0 && (
+        {plannedHeadcountRanking.isLoading && <LoadingState />}
+        {plannedHeadcountRanking.isError && <ErrorState error={plannedHeadcountRanking.error} />}
+        {plannedHeadcountRanking.data && plannedHeadcountRows.length === 0 && (
           <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            이 주에는 예측할 영업일이 없습니다.
+            이 주에 등록된 주간 식단표가 없습니다.
           </p>
         )}
-        {forecastDays.length > 0 && (
-          <>
-            <div className="mb-2 flex items-center justify-end">
-              <SegmentedControl
-                options={[
-                  { label: "전체 합계", value: "total" },
-                  { label: "코너별", value: "corner" },
-                ]}
-                value={forecastView}
-                onChange={(v) => setForecastView(v as "total" | "corner")}
-              />
-            </div>
-            <ReactECharts
-              option={forecastView === "corner" ? forecastByCornerOption : forecastOption}
-              style={{ height: 260 }}
-              notMerge
-            />
-          </>
+        {plannedHeadcountBars.length > 0 && (
+          <ReactECharts
+            option={plannedHeadcountOption}
+            style={{ height: Math.max(160, plannedHeadcountBars.length * 32) }}
+            notMerge
+          />
         )}
+        {plannedHeadcountNewMenuCount > 0 && (
+          <p className="mt-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+            이력 없는 신메뉴 {plannedHeadcountNewMenuCount}개는 최근 실측 평균이 없어 그래프에서 제외했습니다.
+          </p>
+        )}
+
+        <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+          <p className="mb-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            아래 점유율·대기시간은 별도 예측 모델(주간 식단표 기반, 코너·날짜마다 과거 6개월 이력을
+            다시 계산)이라 시간이 걸립니다 — 계산을 눌러주세요. 한 번 계산하면 같은 주는 바로 다시 뜹니다.
+          </p>
+          {!forecastRequested && <Button onClick={() => setForecastRequested(true)}>점유율·대기시간 계산하기</Button>}
+        </div>
 
         <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
           <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
