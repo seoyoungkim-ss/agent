@@ -2667,6 +2667,35 @@ def test_rotation_flags_menu_replanned_too_soon(client):
     assert items[0]["previous_date"] == (MONDAY - dt.timedelta(days=5)).isoformat()
 
 
+def test_rotation_includes_avg_satisfaction_and_headcount(client):
+    """§81: 메뉴 중복점검 재설계 — Top5/기준 미달 목록에 쓸 만족도·식수 필드."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY, "돈까스", "메인")]},
+        headers=AUTH_HEADERS,
+    )
+    _ingest_meal_log(client, "R1", "맛남", eaten_date=MONDAY, menu_name="돈까스")
+    _ingest_meal_log(client, "R2", "보통", eaten_date=MONDAY, menu_name="돈까스")
+
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    item = next(i for i in data["items"] if i["menu_name"] == "돈까스")
+    assert item["recent_avg_headcount"] == 2.0
+    assert item["avg_satisfaction"] == 4.0  # 맛남=5, 보통=3 평균
+
+
+def test_rotation_headcount_and_satisfaction_null_without_meal_log(client):
+    """취식 기록이 아예 없는 메뉴는 만족도·식수 둘 다 null이어야 한다(0이 아님)."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY, "잡채", "메인")]},
+        headers=AUTH_HEADERS,
+    )
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    item = next(i for i in data["items"] if i["menu_name"] == "잡채")
+    assert item["recent_avg_headcount"] is None
+    assert item["avg_satisfaction"] is None
+
+
 def test_rotation_history_outside_period_is_not_returned_as_item(client):
     """과거 편성은 판정 기준으로만 쓰고 결과 목록엔 안 나와야 한다."""
     client.post(
@@ -3969,6 +3998,65 @@ def test_menu_weather_event_ranking_excludes_micam_hall_corner(client, db_sessio
     rows = resp.json()["rows"]
     assert all(r["menu_name"] != "전골" for r in rows)
     assert any(r["menu_name"] == "김치찌개" for r in rows)
+
+
+def test_menu_weather_correlation_ranking_surfaces_positive_correlation(client, db_session):
+    """§81: 기온이 오를수록 식수가 느는 메뉴를 시딩하면 양의 상관계수로 뜨는지
+    확인 — weather-event-ranking과 달리 연속값이라 6일 모두 다른 기온/식수를 준다."""
+    from app.models.stats import DailyWeather
+
+    days = [MONDAY + dt.timedelta(days=i) for i in range(6)]
+    temps = [10.0, 15.0, 20.0, 25.0, 30.0, 35.0]
+    headcounts = [1, 2, 3, 4, 5, 6]
+    emp_n = 0
+    for d, temp, headcount in zip(days, temps, headcounts):
+        db_session.add(
+            DailyWeather(stat_date=d, had_rain=False, precip_mm=0.0, snow_cm=0.0, max_temp_c=temp, min_temp_c=temp - 8)
+        )
+        for _ in range(headcount):
+            _ingest_meal_log(client, f"T{emp_n}", "맛남", eaten_date=d, menu_name="냉면")
+            emp_n += 1
+    db_session.commit()
+
+    resp = client.get(
+        "/api/analysis/menu-performance/weather-correlation-ranking",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=5)).isoformat(),
+            "metric": "max_temp_c",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["metric"] == "max_temp_c"
+    assert body["metric_label"] == "최고기온(℃)"
+    row = next(r for r in body["rows"] if r["menu_name"] == "냉면")
+    assert row["sample_size"] == 6
+    assert row["correlation"] == 1.0
+    assert body["rows"][0]["menu_name"] == "냉면"  # 상관계수 내림차순 1위
+
+
+def test_menu_weather_correlation_ranking_excludes_low_sample_menu(client, db_session):
+    """§81: min_days 미만인 메뉴는 우연한 상관관계로 보고 응답에서 빠진다."""
+    from app.models.stats import DailyWeather
+
+    days = [MONDAY + dt.timedelta(days=i) for i in range(2)]
+    for i, d in enumerate(days):
+        db_session.add(DailyWeather(stat_date=d, had_rain=False, precip_mm=0.0, max_temp_c=20.0 + i, min_temp_c=10.0))
+        _ingest_meal_log(client, f"L{i}", "맛남", eaten_date=d, menu_name="비빔밥")
+    db_session.commit()
+
+    resp = client.get(
+        "/api/analysis/menu-performance/weather-correlation-ranking",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=1)).isoformat(),
+            "metric": "max_temp_c",
+            "min_days": 5,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert all(r["menu_name"] != "비빔밥" for r in resp.json()["rows"])
 
 
 def test_predicted_impact_includes_weather_reference_when_history_exists(client, db_session):

@@ -5624,3 +5624,150 @@ AI 브리핑처럼), `_fallback_voe_briefing`(LLM 미설정/실패 시 클러스
   VoE 탭에서 클러스터링 계산 전엔 "먼저 아래... 계산하세요" 안내만,
   클러스터링 후 재계산하면 실제 브리핑 텍스트(LLM 미설정 폴백
   포함)와 계산 시각이 뜸.
+
+## §81. 시뮬레이션 탭 분리 + 날씨 상관관계 분석 + 홈 통계 정합 + 식수추이 기본값 + 규칙 하이라이트 + 중복점검 재설계 + NO_INTAKE 접기 (2026-08)
+
+§80 배포 후 담당자가 6개 항목을 다시 피드백했다 — §79~§80에서 이미
+손댄 화면인데 의도가 제대로 전달 안 됐거나 마저 안 바뀐 부분(날씨
+위치, 홈 통계, NO_INTAKE), 기본값/필터 조정(식수추이, 규칙
+하이라이트), 화면 하나를 아예 재설계해달라는 요청(메뉴 중복점검)이
+섞여 있었다. AskUserQuestion으로 세 가지를 확정했다: 온도/강수량
+상관관계 분석은 설명만 하지 말고 이번 라운드에 실제로 구현할 것,
+메뉴 중복점검의 "편성 기준(일)"은 최소 재편성 간격이라 그보다 짧게
+재편성된 경우를 위반으로 보여줄 것, Top5/기준 목록은 메인 메뉴만
+다룰 것(부찬·건강가든은 이번 재설계 대상 밖).
+
+### 날씨 관련 기능을 "시뮬레이션" 탭으로 분리 + 기온/강수량-식수 상관관계 분석
+
+`WeatherCorrelationSection`은 §79까지 `MenuPlanningPage`(메뉴 편성·운영
+탭) 안에 "시뮬레이션" 라벨 `<h2>`로만 시각적으로 구분돼 있었다 — 담당자는
+진짜 별도 탭을 원했다. `App.tsx`의 `Tab` 유니온·`TABS` 배열에
+`"simulation"`/"시뮬레이션"을 추가하고, `AnalysisPage.tsx`에 새
+`export function SimulationPage()`(`<WeatherCorrelationSection />` 하나만
+렌더)를 만들어 `MenuPlanningPage`에서 그 섹션을 뗐다. 2026-08 개편 때
+"시뮬레이션" 탭을 없애고 유일한 고유 기능(사내 행사 토글)을 "금주 예상
+식수" 카드로 흡수했던 결정을 날씨 콘텐츠에 한해서만 되돌리는 것 — 다른
+흡수된 기능까지 복원하는 건 아니다.
+
+같이 담당자가 궁금해한 "기온/강수량이 높은 날 식수가 늘어나는 메뉴"는
+기존 이벤트형 랭킹(비/폭설/폭염/한파, §71/§72 — 임계값을 넘는 날만
+범주화해 평상시와 비교)과 다른 축이라 새로 만들었다. 순수 함수 모듈
+`weather_correlation.py`에 `pearson_correlation(xs, ys) -> float | None`
+(외부 통계 라이브러리 없이 평균/분산으로 직접 계산, 표본 2개 미만이거나
+분산 0이면 None)을 추가하고, `analysis.py`에
+`GET /menu-performance/weather-correlation-ranking` 신규 엔드포인트를
+추가했다 — 기존 `_headcount_by_date_by_menu_bulk`(플레이스홀더 메뉴·
+미캠회관 제외가 이미 내장됨, §71/§76)를 그대로 재사용해 menu_id 기준으로
+집계하고(날씨유형 랭킹과 동일하게 코너 구분 없음), 그 메뉴가 나온 날짜와
+`DailyWeather`의 `max_temp_c`/`precip_mm`을 페어링해 상관계수를 낸다.
+표본이 `min_days`(기본값은 기존 `weather_correlation_low_sample_days`
+설정 재사용) 미만인 메뉴는 응답에서 제외한다. 프론트는
+`WeatherCorrelationSection`에 날씨유형·계절 랭킹과 같은 구조의 새
+하위 블록을 추가해 기온/강수량 탭 버튼 + 상관계수 랭킹 표(기존
+`topMoversAndFallers()` 헬퍼를 `correlation` 필드 기준으로 재사용)를
+보여주고, "상관관계일 뿐 인과관계가 아니다"는 기존 디스클레이머 톤을
+유지했다.
+
+### 홈 통계 정합
+
+§80에서 "금주 예상 식수" 카드(코너-메뉴 랭킹 가로막대)는 실측 평균
+기반으로 새로 만들었지만, 그 위 스탯타일 중 "오늘 예상 총 식수"는
+옛 혼잡도 예측 파이프라인(`congestionForecast`, 오늘 날짜·중식 한정)을
+그대로 쓰고 있었다 — §80의 "예측 대신 실측" 취지와 안 맞았다. 라벨을
+"금주 예상 식수"로 바꾸고 값도 `plannedHeadcountBars`(§80에서 만든,
+null 제외된 코너-메뉴 랭킹 행)의 `recent_avg_headcount` 합계로
+교체했다. "최고 혼잡 예상 코너" 타일은 라벨을 "최고 혼잡 예상
+코너/메뉴"로 바꾸고, §80에서 `sub`에 곁다리로 붙였던 메뉴명을 `value`로
+옮겨 코너·메뉴를 동급으로 표기했다(`sub`는 피크 식수 숫자만 남김).
+"최고 혼잡 예상 코너/메뉴" 타일은 여전히 예측이 맞는 용도(어디가
+붐빌지 미리 보기)라 `congestionForecast` 쿼리 자체는 유지했다.
+
+### 식수 추이 기본값 — 주간·코너별 + 7개 코너 기본 체크
+
+`HomePage.tsx`의 "식수 추이" 차트 기본값을 `trendGranularity: "daily"→
+"weekly"`, `trendGroupBy: "total"→"corner"`로 바꿨다. 코너 필터
+(`trendCornerIds`)는 담당자가 부른 7개 코너 이름(고슬고슬비빈, 모던키친,
+싱푸차이나, 한식사계, 동방식객, 도담찌개, 스냅스낵)을 기본으로 켠 상태로
+시작해야 하는데, 코너 목록은 하드코딩된 마스터 리스트가 없고
+`cornerListQuery`(DB 기반)로만 얻을 수 있어 그 쿼리가 로드된 뒤 이름
+매칭으로 1회만 초기화하는 `useEffect` + `useRef` 플래그를 추가했다(이후
+사용자가 수동으로 코너를 켰다 껐다 해도 이 초기화가 다시 개입하지
+않음). 개발 DB에는 이 7개 이름 중 실제로 존재하는 코너가 없어(운영 DB
+전용 이름으로 추정) 필터가 빈 채로 남는 것까지 Playwright로 확인했다 —
+이름이 매칭 안 되면 조용히 전체 코너로 폴백하는 게 의도된 동작이다.
+
+### 규칙 라벨 클릭 → 해당 주 전체 매치 하이라이트
+
+`WeeklyMenuReviewTab`의 "주간 편성 규칙 검증" 패널은 §78에서 개별 위반
+메뉴 칩을 클릭하면 격자표 셀 하나를 하이라이트하는 기능이 있었다
+(`selectedSlotKey: string | null`, 단일 선택). 담당자는 "각 규칙을
+클릭하면" 이라고 했으므로, 규칙 라벨(예: "면류 (하루 최대 4개)") 자체를
+클릭하면 그 규칙의 이번 주 위반 매치 전체가 동시에 하이라이트되길
+원했다 — 단일 선택으로는 표현할 수 없어 `selectedSlotKeys: Set<string>`
+으로 바꿨다. `selectSlot(key)`는 그대로 단일-키 토글로 동작하고(기존
+칩/셀 클릭 UX 유지), 새 `selectRuleMatches(matches)`가 규칙의
+`violatingMatches`를 키 집합으로 변환해 세팅한다(같은 집합이 이미
+선택돼 있으면 토글 오프). 격자 셀의 `isSelected`는
+`selectedSlotKeys.has(key)`로, 슬롯 상세/편집 패널은
+`selectedSlotKeys.size === 1`일 때만 렌더하고 2개 이상 선택되면
+"N개 슬롯이 격자에서 강조 표시되어 있습니다" 안내만 보여준다.
+
+### 메뉴 중복점검 재설계 — Top5 최단 재편성(메인) + 사용자 기준 미달 목록
+
+`MenuRotationCheckSection`은 경고 있는 모든 (코너, 메뉴) 그룹을
+역할별(메인 / 부찬·건강가든)로 나눠 preview-cap과 함께 보여주는
+방식이었다 — "너무 모든 내용이 다 뜬다"는 재신고를 받았다. 백엔드
+`GET /weekly-menu/rotation`의 `items`는 이미 슬롯 단위로
+`gap_days`(직전 대비 며칠 후)·`avg_interval_days`(평균 주기)를 갖고
+있어 "가장 이르게 재편성된 순" 정렬에 새 집계가 필요 없었다 — 다만
+만족도·식수가 없어 새로 조인했다: `_avg_satisfaction_by_menu`(신규,
+`_recent_avg_headcount_by_menu`와 같은 조회 창을 쓰는 짝 헬퍼,
+`TASTE_SCORE_POINTS` 평균)와 기존 `_recent_avg_headcount_by_menu`를
+호출해 각 `items` 행에 `avg_satisfaction`/`recent_avg_headcount`를
+채웠다.
+
+프론트는 역할 필터를 메인으로 고정(담당자 확인: "메인만" — 통합도
+분리도 아니고 부찬·건강가든은 아예 대상 밖)하고, 재편성 이력이 있는
+(FIRST_TIME이 아닌) 행만 대상으로 (1) `gap_days` 오름차순 Top5를
+"가장 이르게 재편성된 메뉴 Top5"로 기본 표시, (2) "편성 기준(일)" 숫자
+입력이 채워지면 `gap_days < threshold`인 전체 행을 별도 목록으로
+추가 표시(기존 `ROTATION_PREVIEW_COUNT`+"전체 보기" idiom 재사용)한다.
+각 행은 메뉴(코너)·만족도·식수·평균 주기·직전 대비를 보여주고,
+"편성이력 보기" 토글로 같은 (코너, 메뉴)의 전체 편성일 이력을
+드릴다운으로 펼친다(새 API 없이 이미 받은 `items`를 클라이언트에서
+필터링). 기존 `warningsOnly` 토글, 부찬·건강가든 블록,
+`over_frequency`/최근 90일 블록은 이번 재설계 범위 밖이라 제거했다
+(필요해지면 나중에 별도 요청으로 복원).
+
+### 편성빈도×성과 — NO_INTAKE 리스트 접기
+
+`MenuPlanPerformanceSection`의 "편성됐지만 취식 기록이 0인 메뉴" 칩
+목록은 이 파일에서 유일하게 미리보기 상한이 없었다 — 다른 섹션이 이미
+쓰는 "기본 N개 + 전체 보기" 패턴(`MenuRotationCheckSection` 등)을
+그대로 가져와 `NO_INTAKE_PREVIEW_COUNT=12` + `showAllNoIntake` 토글을
+추가했다.
+
+### 검증
+
+- `test_weather_correlation.py`(신규): `pearson_correlation` 유닛
+  테스트 — 완전 양의/음의 상관, 분산 0(None), 표본 2개 미만(None),
+  길이 불일치(None).
+- `test_api_ingest_and_analysis.py`: `weather-correlation-ranking`
+  엔드포인트 — 기온이 오를수록 식수가 느는 메뉴를 시딩해 상관계수
+  1.0으로 나오는지, `min_days` 미만 표본 메뉴가 응답에서 빠지는지.
+  `weekly_menu_rotation`에 `avg_satisfaction`/`recent_avg_headcount`가
+  채워지는지(취식 기록 없으면 0이 아니라 null인지 포함) 확인.
+- `pytest -q` 전체 585개 통과.
+- `npx tsc -b`·`npm run build` 타입체크·빌드 통과.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건): (1) nav에 "시뮬레이션" 탭이 새로 뜨고 날씨 카드+상관관계
+  랭킹이 그 안에서만 보이며 메뉴 편성·운영 탭에는 더 이상 안 보임,
+  (2) 홈 "금주 예상 식수"/"최고 혼잡 예상 코너/메뉴" 타일이 새 라벨과
+  값으로 뜸, (3) 식수 추이 요청이 `granularity=weekly&group_by=corner`
+  로 나가는지 네트워크 요청으로 확인(7개 코너는 이 개발 DB에 없어
+  필터 없이 전체 코너로 폴백 — 의도된 동작), (4) "면류" 규칙 라벨
+  클릭 시 위반 매치 5개 전체가 격자에서 동시에 하이라이트되고 안내
+  문구가 뜸, (5) 메뉴 중복점검이 Top5로 재구성됐고 "편성 기준(일)"에
+  값을 넣으면 기준 미달 목록이 추가로 뜨며 "편성이력 보기"로
+  드릴다운되는지, (6) 편성빈도×성과의 NO_INTAKE 목록이 렌더되는지
+  (이 개발 DB는 8개뿐이라 12개 임계값 아래라 토글 버튼은 안 뜸 — 정상).

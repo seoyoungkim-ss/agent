@@ -127,6 +127,7 @@ from app.services.weekly_menu_review import (
 from app.services.weekly_menu_role_llm import reclassify_weekly_menu_roles
 from app.services.season import Season, classify_season
 from app.services.weather_event import WeatherEvent, classify_weather_event
+from app.services.weather_correlation import pearson_correlation
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -663,6 +664,77 @@ def menu_weather_event_ranking(
         "rows": ranked,
         "extended_fields_missing": extended_fields_missing,
         "actual_metric_label": actual_metric_label,
+    }
+
+
+# §81: 상관관계를 볼 지표와 그 라벨 — 날씨유형 랭킹의 _EVENT_ACTUAL_METRIC과
+# 같은 필드(기온/강수량)를 쓰지만, 여기선 임계값 분류가 아니라 연속값
+# 상관계수를 낸다.
+_CORRELATION_METRIC_LABELS: dict[str, str] = {
+    "max_temp_c": "최고기온(℃)",
+    "precip_mm": "강수량(mm)",
+}
+
+
+@router.get("/menu-performance/weather-correlation-ranking")
+def menu_weather_correlation_ranking(
+    period_start: dt.date,
+    period_end: dt.date,
+    metric: Literal["max_temp_c", "precip_mm"] = "max_temp_c",
+    min_days: int | None = None,
+    meal_type: MealType | None = None,
+    db: Session = Depends(get_db),
+):
+    """§81: "기온/강수량이 높은 날 식수가 늘어나는 메뉴가 있는지" — 메뉴별
+    일별 식수와 그날의 기온/강수량 실측치 사이의 피어슨 상관계수 랭킹.
+
+    기존 weather-event-ranking(§71)/season-ranking(§72)은 임계값을 넘는
+    날만 범주로 묶어 평상시와 비교하는 방식이라, 이건 그와 다른 축이다 —
+    연속값 상관관계라 "기온이 오를수록 계속 오르는 경향"까지 잡을 수
+    있다. `_headcount_by_date_by_menu_bulk`(§71, 플레이스홀더 메뉴·
+    미캠회관 제외가 이미 내장됨)를 그대로 재사용해 menu_id 기준으로
+    집계한다(날씨유형 랭킹과 동일하게 코너 구분은 없음 — meal_log.menu_id
+    자체가 코너 무관하게 실제로 고른 메인메뉴다).
+
+    표본이 min_days일 미만인 메뉴는 우연한 상관관계로 보고 제외한다.
+    """
+    settings = get_settings()
+    if min_days is None:
+        min_days = settings.weather_correlation_low_sample_days
+
+    weather_rows = db.query(DailyWeather).filter(DailyWeather.stat_date.between(period_start, period_end)).all()
+    metric_by_date = {w.stat_date: getattr(w, metric) for w in weather_rows if getattr(w, metric) is not None}
+
+    headcount_by_menu = _headcount_by_date_by_menu_bulk(db, period_start, period_end, meal_type)
+    menu_names = {m.menu_id: m.menu_name for m in db.query(MenuMaster).all()}
+
+    rows = []
+    for menu_id, headcount_by_date in headcount_by_menu.items():
+        paired_dates = [d for d in headcount_by_date if d in metric_by_date]
+        if len(paired_dates) < min_days:
+            continue
+        headcounts = [float(headcount_by_date[d]) for d in paired_dates]
+        metric_values = [float(metric_by_date[d]) for d in paired_dates]
+        correlation = pearson_correlation(metric_values, headcounts)
+        if correlation is None:
+            continue
+        rows.append(
+            {
+                "menu_id": menu_id,
+                "menu_name": menu_names.get(menu_id),
+                "sample_size": len(paired_dates),
+                "correlation": round(correlation, 2),
+            }
+        )
+
+    rows.sort(key=lambda r: r["correlation"], reverse=True)
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "metric": metric,
+        "metric_label": _CORRELATION_METRIC_LABELS[metric],
+        "min_days": min_days,
+        "rows": rows,
     }
 
 
@@ -1756,6 +1828,33 @@ def _recent_avg_headcount_by_menu(
     return {menu_id: statistics.fmean(counts) for menu_id, counts in by_menu.items()}
 
 
+def _avg_satisfaction_by_menu(
+    db: Session, menu_ids: set[int], period_start: dt.date, period_end: dt.date
+) -> dict[int, float]:
+    """§81: 지정된 메뉴들의 평균 만족도(meal_log.taste_score → TASTE_SCORE_POINTS
+    환산 평균) — `_recent_avg_headcount_by_menu`와 같은 조회 창을 쓰는 짝
+    헬퍼. 메뉴 중복점검(weekly_menu_rotation)이 메인/부찬/건강가든을 모두
+    다뤄 menu_plan_performance(MAIN 전용)를 재사용할 수 없어 새로 만든다."""
+    if not menu_ids:
+        return {}
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    rows = (
+        db.query(MealLog.menu_id, MealLog.taste_score)
+        .filter(
+            MealLog.menu_id.in_(menu_ids),
+            MealLog.taste_score.isnot(None),
+            MealLog.eaten_at >= period_start_dt,
+            MealLog.eaten_at < period_end_exclusive,
+        )
+        .all()
+    )
+    by_menu: dict[int, list[int]] = {}
+    for menu_id, taste_score in rows:
+        by_menu.setdefault(menu_id, []).append(TASTE_SCORE_POINTS[taste_score])
+    return {menu_id: statistics.fmean(scores) for menu_id, scores in by_menu.items()}
+
+
 @router.get("/weekly-menu/plan-rule-check")
 def weekly_menu_plan_rule_check(
     period_start: dt.date,
@@ -1994,6 +2093,18 @@ def weekly_menu_rotation(
                 "over_frequency": is_over_frequency(plan_date, menu_dates, role_value),
             }
         )
+
+    # §81: 메뉴 중복점검 재설계 — "가장 이르게 재편성된 메뉴 Top5" 목록에
+    # 만족도·식수도 같이 보여달라는 요청. weekly_menu_rotation은 메인/부찬/
+    # 건강가든을 다 다뤄 menu_plan_performance(MAIN 전용)를 못 쓰므로 여기서
+    # 직접 벌크 조회한다.
+    result_menu_ids = {r["menu_id"] for r in results}
+    avg_headcount_by_menu = _recent_avg_headcount_by_menu(db, result_menu_ids, history_start, period_end)
+    avg_satisfaction_by_menu = _avg_satisfaction_by_menu(db, result_menu_ids, history_start, period_end)
+    for r in results:
+        r["recent_avg_headcount"] = avg_headcount_by_menu.get(r["menu_id"])
+        avg_satisfaction = avg_satisfaction_by_menu.get(r["menu_id"])
+        r["avg_satisfaction"] = round(avg_satisfaction, 2) if avg_satisfaction is not None else None
 
     # 경고부터 위로 — 담당자가 고쳐야 할 것이 먼저 보여야 한다.
     flag_order = {

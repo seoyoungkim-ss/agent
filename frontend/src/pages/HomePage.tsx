@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import {
@@ -199,8 +199,10 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   // 조·중·석식 × 코너 × 회사구분 3축을 한 그래프에서 필터한다. 기간 단위는
   // 조회 범위까지 같이 정한다(일=최근 30일 / 주=최근 12주 / 월=최근 12개월) —
   // 위 요약 카드들의 "선택한 주"와 달리 추이는 더 긴 흐름을 봐야 의미가 있다.
-  const [trendGranularity, setTrendGranularity] = useState<Granularity>("daily");
-  const [trendGroupBy, setTrendGroupBy] = useState<HeadcountGroupBy>("total");
+  // §81: 기본값을 일간·전체합산에서 주간·코너별로 바꿨다 — 담당자가 매번 켜야
+  // 했던 조합을 기본으로 삼는다.
+  const [trendGranularity, setTrendGranularity] = useState<Granularity>("weekly");
+  const [trendGroupBy, setTrendGroupBy] = useState<HeadcountGroupBy>("corner");
   const [trendCornerIds, setTrendCornerIds] = useState<number[]>([]);
   const [trendDivisions, setTrendDivisions] = useState<Division[]>([]);
   // §80: "OO 일자간 일평균 식수" 요청 — 일간 단위에서만 의미가 있는 선택창.
@@ -213,6 +215,30 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
     queryKey: ["corner-list"],
     queryFn: () => api.cornerList(),
   });
+
+  // §81: 담당자가 지정한 7개 코너를 기본으로 켠 상태로 시작한다. 코너 목록은
+  // DB 기반이라(하드코딩된 마스터 리스트 없음) cornerListQuery가 로드된 뒤
+  // 이름으로 매칭해 1회만 세팅한다 — 이후 사용자가 직접 껐다 켰다 해도 이
+  // 초기화가 다시 개입해 되돌리면 안 되므로 ref 플래그로 한 번만 실행한다.
+  const DEFAULT_TREND_CORNER_NAMES = [
+    "고슬고슬비빈",
+    "모던키친",
+    "싱푸차이나",
+    "한식사계",
+    "동방식객",
+    "도담찌개",
+    "스냅스낵",
+  ];
+  const trendCornerFilterInitialized = useRef(false);
+  useEffect(() => {
+    if (trendCornerFilterInitialized.current) return;
+    if (!cornerListQuery.data) return;
+    trendCornerFilterInitialized.current = true;
+    const ids = cornerListQuery.data
+      .filter((c) => DEFAULT_TREND_CORNER_NAMES.includes(c.corner_name))
+      .map((c) => c.corner_id);
+    if (ids.length > 0) setTrendCornerIds(ids);
+  }, [cornerListQuery.data]);
 
   // ---- 코너-메뉴별 예상 식수(실측 평균) / 점유율·대기시간 (2026-08 현황 재편) ----
   // §80: "예상 식수는 오차 리스크가 있을 것 같다"는 담당자 피드백으로 날씨/
@@ -297,17 +323,16 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       api.improvementPoints({ period_start: RECOMPUTE_PERIOD_START, period_end: RECOMPUTE_PERIOD_END }),
   });
 
-  // 오늘 예상 총 식수 / 최고 혼잡 예상 코너 — 기존 혼잡도 예측(congestion-forecast,
-  // 요일별 최근 8회 평균 baseline × 계획 메뉴 인기도 배수)을 재사용한다.
+  // 최고 혼잡 예상 코너/메뉴 — 기존 혼잡도 예측(congestion-forecast, 요일별
+  // 최근 8회 평균 baseline × 계획 메뉴 인기도 배수)을 재사용한다. §81: 이 값
+  // 자체는 예측이라 "금주 예상 식수" 스탯타일에서는 더 이상 안 쓰고(실측
+  // 평균 기반 plannedHeadcountRanking으로 교체), 여기 최고 혼잡 코너/메뉴
+  // 타일에만 남는다 — 이건 "어디가 붐빌지"라 예측이 맞는 용도.
   const today = isoDaysAgo(0);
   const congestionForecast = useQuery({
     queryKey: ["congestion-forecast", today],
     queryFn: () => api.congestionForecast({ target_date: today, meal_type: "중식" }),
   });
-  const totalPredictedHeadcount = (congestionForecast.data?.corners ?? []).reduce(
-    (sum, c) => sum + c.predicted_headcount,
-    0,
-  );
   // Take Out은 착석 취식이 아니라 "혼잡"(줄서서 기다림) 개념과 안 맞아 제외한다
   // (corner_analysis의 exclude_take_out과 같은 이유, 여기선 이 카드 하나만 해당).
   const topCongestedCorner = (congestionForecast.data?.corners ?? [])
@@ -414,6 +439,12 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   const plannedHeadcountRows = plannedHeadcountRanking.data?.rows ?? [];
   const plannedHeadcountBars = plannedHeadcountRows.filter((r) => r.recent_avg_headcount != null);
   const plannedHeadcountNewMenuCount = plannedHeadcountRows.length - plannedHeadcountBars.length;
+  // §81: "오늘 예상 총 식수"(옛 혼잡도 예측 기반) 대신 "금주 예상 식수"
+  // 스탯타일에 쓸 합계 — 위 가로막대와 같은 실측 평균 데이터를 그대로 합산.
+  const weeklyPlannedHeadcountTotal = plannedHeadcountBars.reduce(
+    (sum, r) => sum + (r.recent_avg_headcount as number),
+    0,
+  );
   const plannedHeadcountOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 8, right: 56, top: 8, bottom: 28, containLabel: true },
@@ -573,20 +604,24 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile label="선택한 주의 누적 식수" value={totalHeadcount.toLocaleString()} />
         <StatTile
-          label="오늘 예상 총 식수"
+          label="금주 예상 식수"
           value={
-            congestionForecast.isLoading ? "…" : Math.round(totalPredictedHeadcount).toLocaleString()
+            plannedHeadcountRanking.isLoading ? "…" : Math.round(weeklyPlannedHeadcountTotal).toLocaleString()
           }
-          sub="요일별 최근 이력 + 계획 메뉴 인기도 기반"
+          sub="이번 주 편성된 코너-메뉴 실측 평균 합계"
         />
         <StatTile
-          label="최고 혼잡 예상 코너"
-          value={topCongestedCorner?.corner_name ?? "-"}
+          label="최고 혼잡 예상 코너/메뉴"
+          value={
+            topCongestedCorner
+              ? `${topCongestedCorner.corner_name}${
+                  topCongestedCornerMenuName ? ` · ${topCongestedCornerMenuName}` : ""
+                }`
+              : "-"
+          }
           sub={
             topCongestedCorner
-              ? `예상 피크 식수 ${Math.round(topCongestedCorner.expected_peak_headcount).toLocaleString()}명${
-                  topCongestedCornerMenuName ? ` · 메뉴: ${topCongestedCornerMenuName}` : ""
-                }`
+              ? `예상 피크 식수 ${Math.round(topCongestedCorner.expected_peak_headcount).toLocaleString()}명`
               : "오늘 데이터 없음"
           }
           tone={topCongestedCorner ? "warning" : undefined}

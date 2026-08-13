@@ -258,6 +258,26 @@ export interface MenuWeatherEventRankingResponse {
   actual_metric_label: string | null;
 }
 
+// §81: 메뉴별 일별 식수 × 기온/강수량 상관관계 랭킹. weather-event-ranking과
+// 달리 임계값 범주가 아니라 연속값 상관계수(-1~1)를 낸다.
+export type WeatherCorrelationMetric = "max_temp_c" | "precip_mm";
+
+export interface MenuWeatherCorrelationRow {
+  menu_id: number;
+  menu_name: string | null;
+  sample_size: number;
+  correlation: number;
+}
+
+export interface MenuWeatherCorrelationRankingResponse {
+  period_start: string;
+  period_end: string;
+  metric: WeatherCorrelationMetric;
+  metric_label: string;
+  min_days: number;
+  rows: MenuWeatherCorrelationRow[];
+}
+
 // predicted-impact의 weather_reference — 슬롯 상세에서 그 메인메뉴 하나의
 // 평상시 대비 날씨유형별(평상시 포함, 겪은 유형만) 참고치.
 export interface MenuWeatherReferenceRow {
@@ -430,6 +450,9 @@ export interface MenuRotationRow {
   window_count: number;
   window_max: number;
   over_frequency: boolean;
+  // §81: 메뉴 중복점검 재설계 — Top5/기준 미달 목록에 만족도·식수를 같이 보여준다.
+  avg_satisfaction: number | null;
+  recent_avg_headcount: number | null;
 }
 
 export interface MenuRotationResponse {
@@ -830,6 +853,18 @@ export const api = {
     event: WeatherEvent;
     meal_type?: MealType;
   }) => request<MenuWeatherEventRankingResponse>(`/analysis/menu-performance/weather-event-ranking${qs(params)}`),
+
+  // §81: "기온/강수량이 오를수록 식수가 느는(또는 주는) 메뉴" — 연속값
+  // 상관계수 랭킹. weather-event-ranking과 마찬가지로 참고용 정보 제공까지만.
+  menuWeatherCorrelationRanking: (params: {
+    period_start: string;
+    period_end: string;
+    metric?: WeatherCorrelationMetric;
+    meal_type?: MealType;
+  }) =>
+    request<MenuWeatherCorrelationRankingResponse>(
+      `/analysis/menu-performance/weather-correlation-ranking${qs(params)}`,
+    ),
 
   // §72: 메인메뉴가 그 계절에 전체 기간 평균 대비 식수가 얼마나 달랐는지
   // 랭킹. weatherEventRanking과 같은 원칙(참고용, 부찬 무관) — 비교 기준만

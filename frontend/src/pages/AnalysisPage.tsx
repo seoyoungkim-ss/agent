@@ -15,6 +15,7 @@ import {
   type PredictedNumbersRow,
   type Season,
   type TrendDirection,
+  type WeatherCorrelationMetric,
   type WeatherEvent,
   type WeeklyMenuPlanItem,
   type WeeklyMenuSlot,
@@ -2024,7 +2025,11 @@ function WeeklyMenuReviewTab() {
   const sunday = weeklyAddDays(selectedMonday, 6);
   const weekdayDates = Array.from({ length: 6 }, (_, i) => weeklyAddDays(selectedMonday, i)); // 월~토(일요일 미운영)
 
-  const [selectedSlotKey, setSelectedSlotKey] = useState<string | null>(null);
+  // §81: 규칙 라벨을 클릭하면 그 규칙의 이번 주 위반 매치 전체를 한 번에
+  // 하이라이트해야 해서, 단일 문자열 대신 Set으로 다중 선택을 지원한다 —
+  // 칩/셀 클릭(selectSlot)은 여전히 단일 선택으로 동작한다(그 안에서 Set을
+  // 항상 크기 1로만 채운다).
+  const [selectedSlotKeys, setSelectedSlotKeys] = useState<Set<string>>(new Set());
   const [isEditing, setIsEditing] = useState(false);
   const [showPrediction, setShowPrediction] = useState(false);
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
@@ -2032,7 +2037,20 @@ function WeeklyMenuReviewTab() {
   const [donutDay, setDonutDay] = useState(weekdayDates[0]);
 
   const selectSlot = (key: string) => {
-    setSelectedSlotKey((cur) => (cur === key ? null : key));
+    setSelectedSlotKeys((cur) => (cur.size === 1 && cur.has(key) ? new Set() : new Set([key])));
+    setIsEditing(false);
+    setShowPrediction(false);
+  };
+
+  // §81: 규칙 라벨 클릭 — 그 규칙의 이번 주 위반 매치 전체를 동시에 하이라이트.
+  // 같은 집합이 이미 선택돼 있으면 토글 오프.
+  const selectRuleMatches = (matches: { plan_date: string; corner_id: number }[]) => {
+    const keys = matches.map((m) => `${m.plan_date}_${m.corner_id}`);
+    setSelectedSlotKeys((cur) => {
+      const next = new Set(keys);
+      const same = cur.size === next.size && [...cur].every((k) => next.has(k));
+      return same ? new Set() : next;
+    });
     setIsEditing(false);
     setShowPrediction(false);
   };
@@ -2087,7 +2105,10 @@ function WeeklyMenuReviewTab() {
     .map(([cornerName, items]) => [cornerName, items as WeeklyMenuSlot[]] as const)
     .slice()
     .sort((a, b) => a[0].localeCompare(b[0]));
-  const selectedSlot = slots.find((s) => `${s.plan_date}_${s.corner_id}` === selectedSlotKey) ?? null;
+  // 상세/편집 패널은 슬롯이 정확히 1개 선택됐을 때만 의미가 있다 — 규칙 라벨
+  // 클릭으로 여러 개가 한꺼번에 선택되면 이 패널 대신 격자 하이라이트만 보여준다.
+  const singleSelectedSlotKey = selectedSlotKeys.size === 1 ? [...selectedSlotKeys][0] : null;
+  const selectedSlot = slots.find((s) => `${s.plan_date}_${s.corner_id}` === singleSelectedSlotKey) ?? null;
   const effectiveDonutDay = weekdayDates.includes(donutDay) ? donutDay : weekdayDates[0];
 
   // dataviz 스킬: "색은 순위가 아니라 개체를 따라간다" — corner_id 고정 순서로
@@ -2175,13 +2196,23 @@ function WeeklyMenuReviewTab() {
 
   // §78: 규칙 위반 매치 클릭 시 아래 격자표의 해당 셀을 하이라이트 — 격자 셀
   // 키(`${plan_date}_${corner_id}`, selectSlot 토글)를 그대로 재사용한다.
+  // §81: 규칙 라벨 자체를 클릭하면 그 규칙의 이번 주 위반 매치 전체를 한
+  // 번에 하이라이트한다(selectRuleMatches).
   function renderDailyRuleRow(label: string, results: DailyMenuPlanRuleResult[]) {
     const byDate = new Map(results.map((r) => [r.plan_date, r]));
     const violatingMatches = results.filter((r) => !r.ok).flatMap((r) => r.matches);
     return (
       <div className="mb-2">
         <div className="flex flex-wrap items-center gap-2 text-[13px]">
-          <span className="font-medium">{label}</span>
+          <button
+            className="font-medium underline decoration-dotted disabled:no-underline disabled:cursor-default"
+            style={{ color: violatingMatches.length > 0 ? "var(--accent)" : undefined }}
+            onClick={() => selectRuleMatches(violatingMatches)}
+            disabled={violatingMatches.length === 0}
+            title={violatingMatches.length > 0 ? "클릭하면 이번 주 위반 전체를 격자에서 하이라이트합니다" : undefined}
+          >
+            {label}
+          </button>
           {weekdayDates.slice(0, 5).map((d, i) => {
             const r = byDate.get(d);
             if (!r) {
@@ -2313,7 +2344,7 @@ function WeeklyMenuReviewTab() {
                           );
                         }
                         const key = `${slot.plan_date}_${slot.corner_id}`;
-                        const isSelected = key === selectedSlotKey;
+                        const isSelected = selectedSlotKeys.has(key);
                         const predicted = slot.main ? predictedByPlanId[slot.main.plan_id] : undefined;
                         const share = predicted?.prediction.predicted_share;
                         const heatBgRgb = share != null ? shareToBackgroundRgb(share, maxShare) : undefined;
@@ -2377,9 +2408,16 @@ function WeeklyMenuReviewTab() {
           </div>
         )}
 
+        {selectedSlotKeys.size > 1 && (
+          <p className="mt-4 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            {selectedSlotKeys.size}개 슬롯이 격자에서 강조 표시되어 있습니다. 규칙 라벨을 다시 클릭하면
+            해제됩니다.
+          </p>
+        )}
+
         {selectedSlot &&
           (() => {
-            const key = selectedSlotKey as string;
+            const key = singleSelectedSlotKey as string;
             const dday = daysUntil(selectedSlot.feedback_deadline);
             return (
               <div className="mt-4 rounded-xl border p-3" style={{ borderColor: "var(--border)" }}>
@@ -2914,11 +2952,6 @@ const ROTATION_FLAG_TONE: Record<string, "critical" | "warning" | "accent" | "mu
   "평소보다 이름": "warning",
   오랜만: "accent",
 };
-// 기본값은 "고칠 것만 보기" — 적정/이력 없음까지 다 띄우면 한 주에 수십 줄이라
-// 정작 봐야 할 경고가 묻힌다.
-// "같은 날 중복"(코너 간 같은 날 중복 편성)은 담당자가 볼 필요 없다고 해서
-// 기본 경고에서 뺐다(2026-08). 백엔드 판정은 그대로라 되살리려면 여기만 고치면 된다.
-const ROTATION_WARNING_FLAGS = new Set(["재편성 과다", "평소보다 이름"]);
 
 // 기간 선택 — 식단표 8개월치가 적재돼 PERIOD_START(180일 고정) 너머를 볼 수단이
 // 필요해졌다(2026-08). 기본 6개월인 이유: 적재 이전 구간은 편성 이력이 비어 있어
@@ -2941,123 +2974,172 @@ function usePlanPeriod(defaultDays = "90") {
   };
 }
 
-// 판정 심각도 순위 — 그룹의 "최고 심각도" 판정을 뽑을 때 쓴다. 숫자가 작을수록 심각.
-const ROTATION_FLAG_SEVERITY: Record<string, number> = {
-  "같은 날 중복": 0,
-  "재편성 과다": 1,
-  "평소보다 이름": 2,
-  오랜만: 3,
-  "이력 없음": 4,
-  적정: 5,
-};
-
-interface RotationGroup {
-  key: string;
-  cornerName: string;
-  menuName: string;
-  role: string;
-  occurrences: MenuRotationRow[];
-  hasWarning: boolean;
-  worstFlag: string;
-  worstTone: "critical" | "warning" | "accent" | "muted";
-}
-
-// (코너, 메뉴) 단위로 편성 이력을 묶는다 — "운영 입장에서 알아보기 힘듦" 피드백
-// (2026-08) 대응. 개별 편성일 행이 표 전체(경고종류→날짜 순)에 흩어져 있어
-// 같은 메뉴의 반복 패턴("3/13, 3/23, 4/14, 4/22에 또 나왔다")을 눈으로
-// 대조해야 했다 — 그룹으로 묶어 한 메뉴의 전체 이력을 한 카드에서 보게 한다.
-function buildRotationGroups(items: MenuRotationRow[]): RotationGroup[] {
-  const byKey = new Map<string, MenuRotationRow[]>();
-  for (const r of items) {
-    const key = `${r.corner_id}-${r.menu_id}`;
-    if (!byKey.has(key)) byKey.set(key, []);
-    byKey.get(key)!.push(r);
-  }
-  const groups: RotationGroup[] = [];
-  for (const [key, rows] of byKey) {
-    const occurrences = [...rows].sort((a, b) => a.plan_date.localeCompare(b.plan_date));
-    const worst = [...occurrences].sort(
-      (a, b) => (ROTATION_FLAG_SEVERITY[a.flag] ?? 9) - (ROTATION_FLAG_SEVERITY[b.flag] ?? 9),
-    )[0];
-    const hasWarning = occurrences.some(
-      (r) => ROTATION_WARNING_FLAGS.has(r.flag) || r.over_frequency,
-    );
-    groups.push({
-      key,
-      cornerName: occurrences[0].corner_name,
-      menuName: occurrences[0].menu_name,
-      role: occurrences[0].menu_role,
-      occurrences,
-      hasWarning,
-      worstFlag: worst.flag,
-      worstTone: ROTATION_FLAG_TONE[worst.flag] ?? "muted",
-    });
-  }
-  // 담당자 우선순위: 문제 그룹(경고 있음)이 위로, 그 안에서는 메뉴명 순.
-  groups.sort((a, b) => {
-    if (a.hasWarning !== b.hasWarning) return a.hasWarning ? -1 : 1;
-    return a.menuName.localeCompare(b.menuName);
-  });
-  return groups;
-}
+// §81: 메인메뉴만 다룬다(담당자 확인: "메인만" — 부찬·건강가든은 이번
+// 재설계 대상 밖).
+const ROTATION_MAIN_ROLE = "메인";
 
 /**
  * 메뉴 중복 점검 — "이 메뉴 최근에 또 내보내지 않았나"(회전 이력)만 다룬다.
  * "한 끼 구성 겹침" 점검은 관심사가 달라 `MealClashCheckSection`으로,
  * "자주 반복되는 부찬 랭킹"은 별도 기간·코너 필터를 쓰는 독립 도구라
- * `RepeatedSideDishRankingSection`으로 각각 분리했다 — 예전엔 이 셋이
- * 한 카드 안에 쌓여 있었는데(2026-08 "너무 복잡하게 나타남" 신고로
- * 겹침 점검을 먼저 뗐고, §79에서 "보기 힘듦" 신고로 반복 랭킹도 뗐다),
- * 필터 UI가 여러 세트 겹치면 어디까지가 무슨 기능인지 헷갈린다는 게
- * 반복된 문제였다.
+ * `RepeatedSideDishRankingSection`으로 각각 분리했다.
+ *
+ * §81: "너무 모든 내용이 다 뜬다"는 재신고로, 경고 있는 메뉴를 전부
+ * 나열하던 방식(그룹별 역할 분리 + preview-cap)을 걷어내고 (1) 기간 내
+ * 직전 편성 대비 가장 이르게 재편성된 메인 메뉴 Top5, (2) 담당자가 입력한
+ * "편성 기준(일)"보다 짧게 재편성된 전체 목록, 이 두 가지만 기본으로
+ * 보여준다. 각 항목의 편성이력(그 메뉴·코너의 전체 편성일)은 "이력 보기"로
+ * 펼쳐야 볼 수 있다.
  */
 function MenuRotationCheckSection() {
-  const [warningsOnly, setWarningsOnly] = useState(true);
-
   const [rotationStart, setRotationStart] = useState(PERIOD_START);
   const [rotationEnd, setRotationEnd] = useState(PERIOD_END);
-  const [showAllRotation, setShowAllRotation] = useState(false);
+  const [gapThresholdInput, setGapThresholdInput] = useState("");
+  const [showAllThresholdViolations, setShowAllThresholdViolations] = useState(false);
+  const [expandedMenuKeys, setExpandedMenuKeys] = useState<Set<string>>(new Set());
   const ROTATION_PREVIEW_COUNT = 15;
-  // 한 메뉴가 기간 내내 거의 매일 편성되는 경우(예: 상시 부찬) 그룹 하나의
-  // 이력 표가 수십 행이 될 수 있어, 그룹별로 최근 N건만 먼저 보여준다.
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  const OCCURRENCES_PREVIEW_COUNT = 8;
 
   const rotation = useQuery({
     queryKey: ["weekly-menu-rotation", rotationStart, rotationEnd],
     queryFn: () => api.weeklyMenuRotation({ period_start: rotationStart, period_end: rotationEnd }),
   });
 
-  // 경고는 두 축이다 — 간격(직전 이후 며칠)과 횟수(최근 90일에 몇 번).
-  // "14일은 넘겼지만 최근 90일에 3번"은 간격만 봐선 안 잡힌다.
-  const isRotationWarning = (r: MenuRotationRow) =>
-    ROTATION_WARNING_FLAGS.has(r.flag) || r.over_frequency;
-
-  // 메뉴별로 묶어서 보기(2026-08 "운영 입장에서 알아보기 힘듦" 피드백) — 예전엔
-  // 경고 종류·날짜 순으로만 정렬해 같은 메뉴의 반복 이력이 표 전체에 흩어져
-  // 있었다("이 메뉴가 3/13, 3/23, 4/14, 4/22에 또 나왔다"를 보려면 직접 찾아
-  // 대조해야 했음). (코너, 메뉴) 단위로 모든 편성일을 한 그룹으로 묶고, 그룹
-  // 안에 경고가 하나라도 있으면 그룹 전체를 문제 그룹으로 표시한다.
   const allRotationItems = rotation.data?.items ?? [];
-  const rotationGroups = buildRotationGroups(allRotationItems);
-  const visibleGroups = warningsOnly ? rotationGroups.filter((g) => g.hasWarning) : rotationGroups;
-  const mainGroups = visibleGroups.filter((g) => g.role === "메인");
-  const sideGroups = visibleGroups.filter((g) => g.role !== "메인");
-  // 기간을 넓게 잡으면 메뉴 수가 많아질 수 있어 §61과 같은 미리보기 안전판을 둔다.
-  const rotationHasMore = mainGroups.length > ROTATION_PREVIEW_COUNT || sideGroups.length > ROTATION_PREVIEW_COUNT;
-  const visibleMainGroups = showAllRotation ? mainGroups : mainGroups.slice(0, ROTATION_PREVIEW_COUNT);
-  const visibleSideGroups = showAllRotation ? sideGroups : sideGroups.slice(0, ROTATION_PREVIEW_COUNT);
-  const rotationWarnings = allRotationItems.filter(isRotationWarning).length;
-  const mainWarnings = allRotationItems.filter(
-    (r) => r.menu_role === "메인" && isRotationWarning(r),
-  ).length;
-  const warningMenuCount = rotationGroups.filter((g) => g.hasWarning).length;
+  // 메인메뉴만, 그리고 직전 편성 대비 며칠 후인지(gap_days) 알 수 있는(=
+  // 처음 나온 메뉴가 아닌) 슬롯만 "얼마나 이르게 재편성됐는지" 판단 대상이다.
+  const mainItemsWithGap = allRotationItems.filter(
+    (r) => r.menu_role === ROTATION_MAIN_ROLE && r.gap_days != null,
+  );
+  const top5Soonest = [...mainItemsWithGap]
+    .sort((a, b) => (a.gap_days as number) - (b.gap_days as number))
+    .slice(0, 5);
+
+  const gapThreshold = gapThresholdInput === "" ? null : Number(gapThresholdInput);
+  const hasValidThreshold = gapThreshold != null && !Number.isNaN(gapThreshold) && gapThreshold > 0;
+  const thresholdViolationsAll = hasValidThreshold
+    ? [...mainItemsWithGap]
+        .filter((r) => (r.gap_days as number) < (gapThreshold as number))
+        .sort((a, b) => (a.gap_days as number) - (b.gap_days as number))
+    : [];
+  const visibleThresholdViolations = showAllThresholdViolations
+    ? thresholdViolationsAll
+    : thresholdViolationsAll.slice(0, ROTATION_PREVIEW_COUNT);
+
+  function toggleHistory(key: string) {
+    setExpandedMenuKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function renderRotationRow(r: MenuRotationRow, rank?: number) {
+    const key = `${r.corner_id}-${r.menu_id}`;
+    const isExpanded = expandedMenuKeys.has(key);
+    // 편성이력 — 같은 (코너, 메뉴)의 전체 편성일. 새 API 없이 이미 받은
+    // items에서 클라이언트 필터링만 한다.
+    const history = allRotationItems
+      .filter((h) => h.corner_id === r.corner_id && h.menu_id === r.menu_id)
+      .sort((a, b) => a.plan_date.localeCompare(b.plan_date));
+    return (
+      <div
+        key={`${key}-${r.plan_date}`}
+        className="rounded-xl border p-3"
+        style={{ borderColor: "var(--border)" }}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[13px] font-medium">
+            {rank != null && <span style={{ color: "var(--ink-muted)" }}>{rank}. </span>}
+            {r.menu_name} <span style={{ color: "var(--ink-muted)" }}>({r.corner_name})</span>
+          </div>
+          <Badge tone={ROTATION_FLAG_TONE[r.flag] ?? "muted"} label={r.flag} />
+        </div>
+        <div
+          className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-4"
+          style={{ color: "var(--ink-secondary)" }}
+        >
+          <div>
+            만족도{" "}
+            <span className="font-medium">
+              {r.avg_satisfaction != null ? r.avg_satisfaction.toFixed(2) : "-"}
+            </span>
+          </div>
+          <div>
+            식수{" "}
+            <span className="font-medium">
+              {r.recent_avg_headcount != null ? `${Math.round(r.recent_avg_headcount)}명` : "-"}
+            </span>
+          </div>
+          <div>
+            평균 주기{" "}
+            <span className="font-medium">{r.avg_interval_days != null ? `${r.avg_interval_days}일` : "-"}</span>
+          </div>
+          <div>
+            직전 대비{" "}
+            <span className="font-medium">
+              {r.gap_days}일 후
+              {r.previous_date ? ` (${weekdayLabel(r.previous_date)} → ${weekdayLabel(r.plan_date)})` : ""}
+            </span>
+          </div>
+        </div>
+        <button
+          className="mt-2 text-xs underline"
+          style={{ color: "var(--accent)" }}
+          onClick={() => toggleHistory(key)}
+        >
+          {isExpanded ? "이력 접기" : `편성이력 보기 (${history.length}건)`}
+        </button>
+        {isExpanded && (
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr>
+                  <th className="whitespace-nowrap py-1 pr-4 text-left font-medium" style={{ color: "var(--ink-muted)" }}>
+                    날짜
+                  </th>
+                  <th className="whitespace-nowrap py-1 pr-4 text-left font-medium" style={{ color: "var(--ink-muted)" }}>
+                    판정
+                  </th>
+                  <th className="whitespace-nowrap py-1 pr-4 text-right font-medium" style={{ color: "var(--ink-muted)" }}>
+                    직전 이후
+                  </th>
+                  <th className="whitespace-nowrap py-1 text-right font-medium" style={{ color: "var(--ink-muted)" }}>
+                    평균 주기
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((h, i) => (
+                  <tr key={`${h.plan_date}-${i}`} style={{ borderTop: "1px solid var(--border)" }}>
+                    <td className="whitespace-nowrap py-1 pr-4">{weekdayLabel(h.plan_date)}</td>
+                    <td className="whitespace-nowrap py-1 pr-4">
+                      <Badge tone={ROTATION_FLAG_TONE[h.flag] ?? "muted"} label={h.flag} />
+                    </td>
+                    <td className="whitespace-nowrap py-1 pr-4 text-right">
+                      {h.gap_days == null
+                        ? "-"
+                        : `${h.gap_days}일 전${h.previous_date ? ` (${h.previous_date.slice(5)})` : ""}`}
+                    </td>
+                    <td className="whitespace-nowrap py-1 text-right">
+                      {h.avg_interval_days == null ? "-" : `${h.avg_interval_days}일`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <Card title="메뉴 중복 점검 — 이 메뉴 최근에 또 내보내지 않았나">
       <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-        직전 편성 이후 며칠 지났는지(간격)와 최근 90일 편성 횟수(허용치 초과 시
-        강조)를 함께 봅니다. 메인 과다 편성이 1순위 문제라 위에 둡니다.
+        기간 내 직전 편성 대비 가장 이르게(짧은 간격으로) 재편성된 메인 메뉴 Top5입니다. 아래 "편성
+        기준(일)"을 입력하면 그 기준보다 짧게 재편성된 메인 메뉴 전체를 확인할 수 있습니다(부찬·건강가든은
+        이 화면 대상이 아닙니다).
       </p>
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3082,169 +3164,59 @@ function MenuRotationCheckSection() {
             onChange={(e) => setRotationEnd(e.target.value)}
           />
         </label>
-        <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-          <input type="checkbox" checked={warningsOnly} onChange={(e) => setWarningsOnly(e.target.checked)} />
-          경고만 보기
+        <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          편성 기준(일)
+          <input
+            type="number"
+            min={1}
+            placeholder="예: 21"
+            className="w-28 rounded-md border px-3 py-2 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={gapThresholdInput}
+            onChange={(e) => {
+              setGapThresholdInput(e.target.value);
+              setShowAllThresholdViolations(false);
+            }}
+          />
         </label>
       </div>
-      {rotation.data && (
-        <div className="mb-3">
-          <Badge
-            tone={rotationWarnings > 0 ? "critical" : "muted"}
-            label={`문제 메뉴 ${warningMenuCount}개(경고 ${rotationWarnings}건, 메인 ${mainWarnings}건) / 편성 ${rotation.data.items.length}건`}
-          />
-        </div>
-      )}
       {rotation.isLoading && <LoadingState />}
       {rotation.isError && <ErrorState error={rotation.error} />}
-      {rotation.data && visibleGroups.length === 0 && (
+      {rotation.data && mainItemsWithGap.length === 0 && (
         <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          {rotation.data.items.length === 0
-            ? "이 기간에 등록된 식단표가 없습니다."
-            : "반복 편성 경고가 없습니다."}
+          이 기간에 재편성 이력이 있는 메인 메뉴가 없습니다.
         </p>
       )}
-      {(["메인", "부찬·건강가든"] as const).map((groupLabel) => {
-        const groups = groupLabel === "메인" ? visibleMainGroups : visibleSideGroups;
-        if (groups.length === 0) return null;
-        const isMain = groupLabel === "메인";
-        return (
-          <div key={groupLabel} className="mb-4">
-            <div className="mb-2">
-              {isMain ? (
-                <Badge tone="critical" label={<span className="text-xs font-medium">메인메뉴 (1순위)</span>} />
-              ) : (
-                <span className="text-xs font-medium" style={{ color: "var(--ink-secondary)" }}>
-                  부찬 · 건강가든
-                </span>
+      {top5Soonest.length > 0 && (
+        <div className="mb-4">
+          <h3 className="mb-2 text-[13px] font-semibold">가장 이르게 재편성된 메뉴 Top5</h3>
+          <div className="space-y-3">{top5Soonest.map((r, i) => renderRotationRow(r, i + 1))}</div>
+        </div>
+      )}
+      {hasValidThreshold && (
+        <div>
+          <h3 className="mb-2 text-[13px] font-semibold">
+            편성 기준({gapThreshold}일) 미달 재편성 — {thresholdViolationsAll.length}건
+          </h3>
+          {thresholdViolationsAll.length === 0 ? (
+            <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+              기준보다 짧게 재편성된 메인 메뉴가 없습니다.
+            </p>
+          ) : (
+            <>
+              <div className="space-y-3">{visibleThresholdViolations.map((r) => renderRotationRow(r))}</div>
+              {thresholdViolationsAll.length > ROTATION_PREVIEW_COUNT && (
+                <button
+                  className="mt-2 text-xs underline"
+                  style={{ color: "var(--accent)" }}
+                  onClick={() => setShowAllThresholdViolations((v) => !v)}
+                >
+                  {showAllThresholdViolations ? "접기" : `전체 ${thresholdViolationsAll.length}개 보기`}
+                </button>
               )}
-            </div>
-            <div className="space-y-3">
-              {groups.map((g) => {
-                // 상시 부찬처럼 기간 내내 거의 매일 편성되는 메뉴는 그룹 하나의
-                // 이력이 수십 행이 될 수 있어, 최근 것부터 일부만 먼저 보여준다.
-                const isExpanded = expandedGroups.has(g.key);
-                const visibleOccurrences = isExpanded
-                  ? g.occurrences
-                  : g.occurrences.slice(-OCCURRENCES_PREVIEW_COUNT);
-                const hiddenCount = g.occurrences.length - visibleOccurrences.length;
-                return (
-                <div key={g.key} className="rounded-xl border p-3" style={{ borderColor: "var(--border)" }}>
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-[13px] font-medium">
-                      {g.menuName} <span style={{ color: "var(--ink-muted)" }}>({g.cornerName})</span>
-                    </div>
-                    <div className="flex items-center gap-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-                      <span>{g.occurrences.length}회 편성</span>
-                      {g.hasWarning && <Badge tone={g.worstTone} label={g.worstFlag} />}
-                    </div>
-                  </div>
-                  <div className="mt-2 overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr>
-                          <th
-                            className="whitespace-nowrap py-1 pr-4 text-left font-medium"
-                            style={{ color: "var(--ink-muted)" }}
-                          >
-                            날짜
-                          </th>
-                          <th
-                            className="whitespace-nowrap py-1 pr-4 text-left font-medium"
-                            style={{ color: "var(--ink-muted)" }}
-                          >
-                            판정
-                          </th>
-                          <th
-                            className="whitespace-nowrap py-1 pr-4 text-right font-medium"
-                            style={{ color: "var(--ink-muted)" }}
-                          >
-                            직전 이후
-                          </th>
-                          <th
-                            className="whitespace-nowrap py-1 pr-4 text-right font-medium"
-                            style={{ color: "var(--ink-muted)" }}
-                          >
-                            평균 주기
-                          </th>
-                          <th
-                            className="whitespace-nowrap py-1 text-right font-medium"
-                            style={{ color: "var(--ink-muted)" }}
-                          >
-                            최근 90일
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {hiddenCount > 0 && (
-                          <tr>
-                            <td colSpan={5} className="py-1" style={{ color: "var(--ink-muted)" }}>
-                              최근 {OCCURRENCES_PREVIEW_COUNT}건만 표시 중 (이전 {hiddenCount}건 더 있음)
-                            </td>
-                          </tr>
-                        )}
-                        {visibleOccurrences.map((r, i) => (
-                          <tr key={`${r.plan_date}-${i}`} style={{ borderTop: "1px solid var(--border)" }}>
-                            <td className="whitespace-nowrap py-1 pr-4">{weekdayLabel(r.plan_date)}</td>
-                            <td className="whitespace-nowrap py-1 pr-4">
-                              <Badge tone={ROTATION_FLAG_TONE[r.flag] ?? "muted"} label={r.flag} />
-                            </td>
-                            <td className="whitespace-nowrap py-1 pr-4 text-right">
-                              {r.gap_days == null
-                                ? "-"
-                                : `${r.gap_days}일 전${r.previous_date ? ` (${r.previous_date.slice(5)})` : ""}`}
-                            </td>
-                            <td className="whitespace-nowrap py-1 pr-4 text-right">
-                              {r.avg_interval_days == null ? "-" : `${r.avg_interval_days}일`}
-                            </td>
-                            <td className="whitespace-nowrap py-1 text-right">
-                              {r.over_frequency ? (
-                                <Badge
-                                  tone={isMain ? "critical" : "warning"}
-                                  label={`${r.window_count}/${r.window_max}회`}
-                                />
-                              ) : (
-                                <span style={{ color: "var(--ink-muted)" }}>
-                                  {r.window_count}/{r.window_max}회
-                                </span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {hiddenCount > 0 && (
-                    <button
-                      className="mt-1 text-xs underline"
-                      style={{ color: "var(--accent)" }}
-                      onClick={() =>
-                        setExpandedGroups((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(g.key)) next.delete(g.key);
-                          else next.add(g.key);
-                          return next;
-                        })
-                      }
-                    >
-                      {isExpanded ? "접기" : `이전 ${hiddenCount}건 더 보기`}
-                    </button>
-                  )}
-                </div>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })}
-      {rotationHasMore && (
-        <button
-          className="mb-3 text-xs underline"
-          style={{ color: "var(--accent)" }}
-          onClick={() => setShowAllRotation((v) => !v)}
-        >
-          {showAllRotation ? "접기" : "전체 보기"}
-        </button>
+            </>
+          )}
+        </div>
       )}
     </Card>
   );
@@ -3652,9 +3624,14 @@ const PLANNING_ACTION_COLOR: Record<string, string> = {
  * 아무도 안 먹은 메뉴가 아예 안 나타난다. 이 화면은 weekly_menu_plan 기준이라
  * 그게 보이고, 그게 가장 강한 감편 신호다(2026-08).
  */
+// §81: "편성됐지만 취식 기록이 0인 메뉴" 목록이 이 파일에서 유일하게
+// 미리보기 상한이 없어 길어지면 다 펼쳐졌다 — 다른 섹션과 같은 패턴 적용.
+const NO_INTAKE_PREVIEW_COUNT = 12;
+
 function MenuPlanPerformanceSection() {
   const { days, setDays, periodStart, periodEnd } = usePlanPeriod();
   const chartTheme = useChartTheme();
+  const [showAllNoIntake, setShowAllNoIntake] = useState(false);
   const query = useQuery({
     queryKey: ["menu-plan-performance", periodStart, periodEnd],
     queryFn: () => api.menuPlanPerformance({ period_start: periodStart, period_end: periodEnd }),
@@ -3860,7 +3837,7 @@ function MenuPlanPerformanceSection() {
                 메뉴들입니다. 메뉴명 표기 불일치가 아닌지 먼저 확인하세요.
               </p>
               <div className="flex flex-wrap gap-2">
-                {noIntake.map((r) => (
+                {(showAllNoIntake ? noIntake : noIntake.slice(0, NO_INTAKE_PREVIEW_COUNT)).map((r) => (
                   <span
                     key={r.menu_id}
                     className="rounded-md border px-2 py-1 text-xs"
@@ -3870,6 +3847,15 @@ function MenuPlanPerformanceSection() {
                   </span>
                 ))}
               </div>
+              {noIntake.length > NO_INTAKE_PREVIEW_COUNT && (
+                <button
+                  className="mt-2 text-xs underline"
+                  style={{ color: "var(--accent)" }}
+                  onClick={() => setShowAllNoIntake((v) => !v)}
+                >
+                  {showAllNoIntake ? "접기" : `전체 ${noIntake.length}개 보기`}
+                </button>
+              )}
             </div>
           )}
         </>
@@ -3989,6 +3975,8 @@ export function WeatherCorrelationSection() {
     useState<Set<Classification>>(new Set(CLASSIFICATION_OPTIONS));
   const [showAllWeatherRanking, setShowAllWeatherRanking] = useState(false);
   const [showAllSeasonRanking, setShowAllSeasonRanking] = useState(false);
+  const [correlationMetric, setCorrelationMetric] = useState<WeatherCorrelationMetric>("max_temp_c");
+  const [showAllCorrelationRanking, setShowAllCorrelationRanking] = useState(false);
   const chartTheme = useChartTheme();
 
   const timelineQuery = useQuery({
@@ -4023,6 +4011,23 @@ export function WeatherCorrelationSection() {
   const menuSeasonRows = menuSeasonQuery.data?.rows ?? [];
   const seasonRankingCollapsed = topMoversAndFallers(menuSeasonRows, (r) => r.diff_vs_overall);
   const visibleSeasonRankingRows = showAllSeasonRanking ? menuSeasonRows : seasonRankingCollapsed;
+
+  // §81: "기온/강수량이 오를수록 식수가 느는 메뉴가 있는지" — 연속값 상관계수
+  // 랭킹. correlation 자체가 이미 -1~1 부호 있는 값이라 topMoversAndFallers를
+  // 그대로 재사용해 양의 상관 top5 / 음의 상관 top5로 접는다.
+  const correlationRankingQuery = useQuery({
+    queryKey: ["menu-weather-correlation-ranking", periodStart, periodEnd, correlationMetric],
+    queryFn: () =>
+      api.menuWeatherCorrelationRanking({
+        period_start: periodStart,
+        period_end: periodEnd,
+        metric: correlationMetric,
+        meal_type: "중식",
+      }),
+  });
+  const correlationRows = correlationRankingQuery.data?.rows ?? [];
+  const correlationRankingCollapsed = topMoversAndFallers(correlationRows, (r) => r.correlation);
+  const visibleCorrelationRows = showAllCorrelationRanking ? correlationRows : correlationRankingCollapsed;
 
   const allDays = timelineQuery.data?.days ?? [];
   const daysMissingWeather = timelineQuery.data?.days_missing_weather ?? 0;
@@ -4322,6 +4327,84 @@ export function WeatherCorrelationSection() {
           </>
         )}
       </div>
+
+      {/* §81: "기온/강수량이 높은 날 식수가 늘어나는 메뉴가 있는지" 담당자 질문에
+          대한 답 — 위 두 랭킹(임계값 범주 비교)과 달리 연속값 상관계수를 낸다. */}
+      <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+        <h3 className="text-[14px] font-semibold">기온/강수량 × 식수 상관관계</h3>
+        <p className="mb-3 mt-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          부찬은 대상이 아닙니다 — 메인메뉴의 일별 식수와 그날의 기온(또는 강수량) 사이 상관계수(-1~1)
+          랭킹입니다. 계수가 +1에 가까울수록 그 값이 오를수록 식수도 같이 오르는 경향, -1에 가까울수록
+          반대 경향입니다. 상관관계일 뿐 인과관계가 아니고, 표본이 {correlationRankingQuery.data?.min_days ?? 5}
+          일 미만인 메뉴는 우연한 상관관계로 보고 제외했습니다.
+        </p>
+        <div className="mb-3 flex flex-wrap gap-2">
+          {(
+            [
+              ["max_temp_c", "최고기온"],
+              ["precip_mm", "강수량"],
+            ] as [WeatherCorrelationMetric, string][]
+          ).map(([metricOption, metricLabel]) => (
+            <button
+              key={metricOption}
+              onClick={() => {
+                setCorrelationMetric(metricOption);
+                setShowAllCorrelationRanking(false);
+              }}
+              className="rounded-full border px-3 py-1.5 text-[13px] transition-colors"
+              style={{
+                borderColor: correlationMetric === metricOption ? "var(--accent)" : "var(--border)",
+                background: correlationMetric === metricOption ? "var(--surface-2)" : "var(--surface)",
+                fontWeight: correlationMetric === metricOption ? 600 : 400,
+              }}
+            >
+              {metricLabel}
+            </button>
+          ))}
+        </div>
+
+        {correlationRankingQuery.isLoading && <LoadingState />}
+        {correlationRankingQuery.isError && <ErrorState error={correlationRankingQuery.error} />}
+
+        {correlationRankingQuery.data && correlationRows.length === 0 && (
+          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+            이 기간엔 표본이 충분한 메뉴가 없어 상관관계를 계산할 수 없습니다.
+          </p>
+        )}
+
+        {correlationRows.length > 0 && (
+          <>
+            <Table
+              columns={[
+                { key: "menu_name", label: "메뉴명" },
+                { key: "correlation", label: "상관계수", align: "right" },
+                { key: "sample_size", label: "표본(일)", align: "right" },
+              ]}
+              rows={visibleCorrelationRows.map((r) => ({
+                key: String(r.menu_id),
+                menu_name: r.menu_name ?? "이름 없음",
+                correlation: (
+                  <Badge
+                    label={`${r.correlation > 0 ? "+" : ""}${r.correlation}`}
+                    tone={Math.abs(r.correlation) >= 0.5 ? (r.correlation > 0 ? "good" : "critical") : "muted"}
+                  />
+                ),
+                sample_size: `${r.sample_size}일`,
+              }))}
+              rowKey={(r) => r.key as string}
+            />
+            {correlationRows.length > correlationRankingCollapsed.length && (
+              <button
+                className="mt-2 text-xs underline"
+                style={{ color: "var(--accent)" }}
+                onClick={() => setShowAllCorrelationRanking((v) => !v)}
+              >
+                {showAllCorrelationRanking ? "접기" : `전체 ${correlationRows.length}개 보기`}
+              </button>
+            )}
+          </>
+        )}
+      </div>
     </Card>
   );
 }
@@ -4345,20 +4428,18 @@ export function MenuPlanningPage() {
       <MenuComboSection />
       <MenuRepertoireSection />
       <MenuPairAnalysisSection corners={cornersQuery.data ?? []} />
-      {/* §77: 담당자 요청으로 "현황" 탭에서 이동 — 날씨 배수(v0 가정치)를 실측으로
-          검증하는 참고 화면이라 메뉴 편성 판단과 같은 맥락에 두는 게 낫다는 판단.
-          §79: 이 탭의 다른 카드들과 층위가 다르다는 걸(실측 참고용 "시뮬레이션")
-          표시하려고 라벨 섹션으로 한 번 더 감쌌다 — 새 하위 탭을 만드는 게 아니라
-          시각적 구분만 추가하는 것. */}
-      <div className="border-t pt-6" style={{ borderColor: "var(--border)" }}>
-        <h2
-          className="mb-3 text-[13px] font-semibold uppercase tracking-wide"
-          style={{ color: "var(--ink-muted)" }}
-        >
-          시뮬레이션
-        </h2>
-        <WeatherCorrelationSection />
-      </div>
+    </div>
+  );
+}
+
+/** 시뮬레이션 — 날씨 등 실측 검증/참고용 화면. §77~§79에선 "메뉴 편성·운영"
+ * 탭 안에 라벨 섹션으로만 구분해뒀는데, 담당자가 진짜 별도 탭을 요청해(§81)
+ * 여기로 옮겼다 — 2026-08에 없앴던 "시뮬레이션" 탭을 날씨 콘텐츠 한정으로
+ * 되살린 것(그때 흡수된 "사내 행사" 토글 등 다른 기능은 복원하지 않음). */
+export function SimulationPage() {
+  return (
+    <div className="space-y-6">
+      <WeatherCorrelationSection />
     </div>
   );
 }
