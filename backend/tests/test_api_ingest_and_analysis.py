@@ -1253,6 +1253,50 @@ def test_what_if_uses_quadrant_multiplier_for_planned_menu_with_performance_data
     assert hansik["predicted_headcount"] == 16.8
 
 
+def test_what_if_applies_cloudy_weather_multiplier(client, db_session):
+    for i in range(5):
+        _ingest_meal_log(client, f"D{i}", "맛남", corner_name="한식")
+
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    future_date = MONDAY + dt.timedelta(days=8)
+    resp = client.post(
+        "/api/simulation/what-if",
+        json={"target_date": future_date.isoformat(), "meal_type": "중식", "weather": "흐림"},
+    )
+    assert resp.status_code == 200
+    hansik = next(c for c in resp.json()["corners"] if c["corner_name"] == "한식")
+    assert hansik["baseline_headcount"] == 5.0
+    # §84: 흐림 배수 0.97
+    assert hansik["predicted_headcount"] == round(5.0 * 0.97, 1)
+
+
+def test_what_if_applies_snow_weather_multiplier(client, db_session):
+    for i in range(5):
+        _ingest_meal_log(client, f"S{i}", "맛남", corner_name="한식")
+
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    future_date = MONDAY + dt.timedelta(days=8)
+    resp = client.post(
+        "/api/simulation/what-if",
+        json={"target_date": future_date.isoformat(), "meal_type": "중식", "weather": "눈"},
+    )
+    assert resp.status_code == 200
+    hansik = next(c for c in resp.json()["corners"] if c["corner_name"] == "한식")
+    assert hansik["baseline_headcount"] == 5.0
+    # §84: 눈 배수 0.85
+    assert hansik["predicted_headcount"] == round(5.0 * 0.85, 1)
+
+
 def test_meal_log_ingest_classifies_division_from_company_name(client, db_session):
     _ingest_meal_log(client, "E1001", "맛남", company_name="삼성전자")
     _ingest_meal_log(client, "E1002", "맛남", company_name="삼성SDI")

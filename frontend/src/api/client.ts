@@ -37,7 +37,7 @@ function qs(
 export type MealType = "조식" | "중식" | "석식";
 export type Classification = "평일" | "주말+공휴일" | "패밀리데이";
 export type Quadrant = "인기메뉴" | "숨은강자" | "개선시급" | "퇴출후보" | "표본부족";
-export type Weather = "맑음" | "비" | "폭염" | "한파";
+export type Weather = "맑음" | "흐림" | "비" | "눈" | "폭염" | "한파";
 
 export interface WeeklySummaryDay {
   date: string;

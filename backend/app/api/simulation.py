@@ -110,15 +110,23 @@ def _menu_popularity_multiplier(db: Session, corner_id: int, menu_id: int) -> fl
 
 class Weather(str, Enum):
     SUNNY = "맑음"
+    CLOUDY = "흐림"
     RAIN = "비"
+    SNOW = "눈"
     HEATWAVE = "폭염"
     COLDWAVE = "한파"
 
 
 # PRD 7.1: 날씨에 따른 식수 변화 v0 휴리스틱. 실측 데이터가 쌓이면 회귀모델로 교체 필요.
+# 흐림/눈(§84, 2026-08)도 방향성만 맞춘 v0 값, 실측 근거 없음 — 표본이 쌓이면 보정 필요.
+# 흐림은 맑음과 비의 중간(아직 비가 안 와 이동은 자유롭지만 나들이·외부식당 유인이
+# 살짝 줄어든다는 가정), 눈은 비보다 낮게(적설로 통근이 비보다 더 지연되고 재택/
+# 단축근무가 걸리는 경우도 있어 감소폭이 크다고 봤다).
 _WEATHER_MULTIPLIER = {
     Weather.SUNNY: 1.00,
+    Weather.CLOUDY: 0.97,
     Weather.RAIN: 0.90,
+    Weather.SNOW: 0.85,
     Weather.HEATWAVE: 0.95,
     Weather.COLDWAVE: 0.95,
 }

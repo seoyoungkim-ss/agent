@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import clsx from "clsx";
@@ -14,6 +14,7 @@ import {
   type PredictedNumbersRow,
   type Season,
   type TrendDirection,
+  type Weather,
   type WeatherCorrelationMetric,
   type WeatherEvent,
   type WeeklyMenuPlanItem,
@@ -3581,7 +3582,141 @@ const MENU_WEATHER_EVENT_TABS: WeatherEvent[] = ["비", "폭설", "폭염", "한
 // 음식 패턴을 훑어보는 멘탈모델. 날씨유형과 별개 블록(비교 기준이 다름).
 const MENU_SEASON_TABS: Season[] = ["봄", "여름", "가을", "겨울"];
 
-export function WeatherCorrelationSection() {
+// §84: 시나리오 선택기 6종(맑음/흐림/비/눈/폭염/한파) — 백엔드 Weather enum과
+// 순서를 맞춘다.
+const SCENARIO_WEATHER_OPTIONS: Weather[] = ["맑음", "흐림", "비", "눈", "폭염", "한파"];
+const SCENARIO_MEAL_TYPES: MealType[] = ["조식", "중식", "석식"];
+
+// §84: 랭킹 블록(WeatherCorrelationSection)의 WeatherEvent 분류는 과거 실측
+// 이벤트(비/폭설/폭염/한파) 전용이라 시나리오의 "맑음"/"흐림"과 대응하는 항목이
+// 없다 — 그 둘을 고르면 랭킹 탭은 동기화하지 않는다(Partial이라 자연히 처리됨).
+const WEATHER_TO_EVENT: Partial<Record<Weather, WeatherEvent>> = {
+  비: "비",
+  폭염: "폭염",
+  한파: "한파",
+  눈: "폭설", // §84: Weather의 "눈"과 WeatherEvent의 "폭설"만 이름이 다르다
+};
+
+/** §84: 기존 고아 상태였던 POST /simulation/what-if 예측 엔진을 재사용해
+ * 날씨 시나리오별 예상 식수를 보여준다. 선택한 날씨를 onWeatherChange로 부모에
+ * 올려 아래 실측 랭킹 탭과 단방향 동기화한다. */
+function WeatherScenarioForecastSection({ onWeatherChange }: { onWeatherChange?: (weather: Weather) => void }) {
+  const [targetDate, setTargetDate] = useState(PERIOD_END);
+  const [mealType, setMealType] = useState<MealType>("중식");
+  const [selectedWeather, setSelectedWeather] = useState<Weather>("맑음");
+  const [showCornerBreakdown, setShowCornerBreakdown] = useState(false);
+  const chartTheme = useChartTheme();
+
+  useEffect(() => {
+    onWeatherChange?.(selectedWeather);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWeather]);
+
+  const whatIfQuery = useQuery({
+    queryKey: ["what-if-scenario", targetDate, mealType, selectedWeather],
+    queryFn: () => api.whatIf({ target_date: targetDate, meal_type: mealType, weather: selectedWeather }),
+  });
+
+  const corners = whatIfQuery.data?.corners ?? [];
+  const predictedSum = corners.reduce((sum, c) => sum + c.predicted_headcount, 0);
+  const baselineSum = corners.reduce((sum, c) => sum + c.baseline_headcount, 0);
+  const pctDiff = baselineSum > 0 ? ((predictedSum - baselineSum) / baselineSum) * 100 : null;
+  const pctArrow = pctDiff == null ? "→" : pctDiff > 0.5 ? "↑" : pctDiff < -0.5 ? "↓" : "→";
+
+  const sortedCorners = [...corners].sort((a, b) => b.predicted_headcount - a.predicted_headcount);
+  const cornerBreakdownOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 8, right: 56, top: 8, bottom: 28, containLabel: true },
+    tooltip: { trigger: "axis" as const, axisPointer: { type: "shadow" as const } },
+    xAxis: {
+      type: "value" as const,
+      name: "식수(명)",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    yAxis: {
+      type: "category" as const,
+      inverse: true,
+      data: sortedCorners.map((c) => c.corner_name),
+      axisLabel: { color: chartTheme.text },
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+    },
+    series: [
+      {
+        name: "예상 식수",
+        type: "bar" as const,
+        itemStyle: { color: resolveColor("var(--series-1)") },
+        label: { show: true, position: "right" as const, color: chartTheme.text, formatter: "{c}명" },
+        data: sortedCorners.map((c) => Math.round(c.predicted_headcount * 10) / 10),
+      },
+    ],
+  };
+
+  return (
+    <Card title="날씨 시나리오 예측">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        날씨·끼니·날짜를 골라 예상 식수를 시뮬레이션합니다. 최근 8회 같은 분류·끼니 평균("평시")에
+        날씨별 v0 배수를 곱한 추정치입니다 — 실측 데이터가 쌓이면 정교화가 필요합니다.
+      </p>
+      <div className="mb-4 flex flex-wrap items-end gap-4">
+        <div className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          날씨
+          <SegmentedControl
+            value={selectedWeather}
+            options={SCENARIO_WEATHER_OPTIONS.map((w) => ({ label: w, value: w }))}
+            onChange={setSelectedWeather}
+          />
+        </div>
+        <div className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          끼니
+          <SegmentedControl
+            value={mealType}
+            options={SCENARIO_MEAL_TYPES.map((m) => ({ label: m, value: m }))}
+            onChange={setMealType}
+          />
+        </div>
+        <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          날짜
+          <input
+            type="date"
+            className="rounded-md border px-3 py-2 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={targetDate}
+            onChange={(e) => setTargetDate(e.target.value)}
+          />
+        </label>
+      </div>
+
+      {whatIfQuery.isLoading && <LoadingState />}
+      {whatIfQuery.isError && <ErrorState error={whatIfQuery.error} />}
+
+      {whatIfQuery.data && (
+        <>
+          <StatTile
+            label="예상 총 식수"
+            value={`${Math.round(predictedSum).toLocaleString()}명`}
+            sub={pctDiff == null ? "평시 데이터 없음" : `평시 대비 ${pctArrow} ${Math.abs(pctDiff).toFixed(1)}%`}
+          />
+          <button
+            className="mt-3 text-xs underline"
+            style={{ color: "var(--accent)" }}
+            onClick={() => setShowCornerBreakdown((v) => !v)}
+          >
+            {showCornerBreakdown ? "코너별 예측 접기" : "코너별 예측 보기"}
+          </button>
+          {showCornerBreakdown && sortedCorners.length > 0 && (
+            <ReactECharts
+              option={cornerBreakdownOption}
+              style={{ height: Math.max(160, sortedCorners.length * 32), marginTop: 12 }}
+            />
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: WeatherEvent } = {}) {
   const [periodStart, setPeriodStart] = useState(PERIOD_START);
   const [periodEnd, setPeriodEnd] = useState(PERIOD_END);
   const [selectedEvent, setSelectedEvent] = useState<WeatherEvent>("비");
@@ -3590,6 +3725,17 @@ export function WeatherCorrelationSection() {
   const [showAllSeasonRanking, setShowAllSeasonRanking] = useState(false);
   const [correlationMetric, setCorrelationMetric] = useState<WeatherCorrelationMetric>("max_temp_c");
   const [showAllCorrelationRanking, setShowAllCorrelationRanking] = useState(false);
+
+  // §84: 위 시나리오 선택기(WeatherScenarioForecastSection)가 넘긴 날씨를 이
+  // 랭킹 탭에도 반영 — 대응하는 WeatherEvent가 없는 "맑음"/"흐림"을 고르면
+  // syncedEvent가 undefined라 아무 일도 안 하고 현재 탭을 유지한다.
+  useEffect(() => {
+    if (syncedEvent) {
+      setSelectedEvent(syncedEvent);
+      setShowAllWeatherRanking(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncedEvent]);
 
   const menuRankingQuery = useQuery({
     queryKey: ["menu-weather-event-ranking", periodStart, periodEnd, selectedEvent],
@@ -3732,7 +3878,7 @@ export function WeatherCorrelationSection() {
                     <Badge label="표본 부족" tone="muted" />
                   ) : (
                     <Badge
-                      label={`${r.diff_vs_normal > 0 ? "+" : ""}${r.diff_vs_normal}명`}
+                      label={`${r.diff_vs_normal > 0 ? "↑+" : r.diff_vs_normal < 0 ? "↓" : "→"}${r.diff_vs_normal}명`}
                       tone={Math.abs(r.diff_vs_normal) >= 3 ? (r.diff_vs_normal > 0 ? "good" : "critical") : "muted"}
                     />
                   ),
@@ -3812,7 +3958,7 @@ export function WeatherCorrelationSection() {
                     <Badge label="표본 부족" tone="muted" />
                   ) : (
                     <Badge
-                      label={`${r.diff_vs_overall > 0 ? "+" : ""}${r.diff_vs_overall}명`}
+                      label={`${r.diff_vs_overall > 0 ? "↑+" : r.diff_vs_overall < 0 ? "↓" : "→"}${r.diff_vs_overall}명`}
                       tone={Math.abs(r.diff_vs_overall) >= 3 ? (r.diff_vs_overall > 0 ? "good" : "critical") : "muted"}
                     />
                   ),
@@ -3890,7 +4036,7 @@ export function WeatherCorrelationSection() {
                 menu_name: r.menu_name ?? "이름 없음",
                 correlation: (
                   <Badge
-                    label={`${r.correlation > 0 ? "+" : ""}${r.correlation}`}
+                    label={`${r.correlation > 0 ? "↑+" : r.correlation < 0 ? "↓" : "→"}${r.correlation}`}
                     tone={Math.abs(r.correlation) >= 0.5 ? (r.correlation > 0 ? "good" : "critical") : "muted"}
                   />
                 ),
@@ -3930,14 +4076,18 @@ export function MenuPlanningPage() {
   );
 }
 
-/** 시뮬레이션 — 날씨 등 실측 검증/참고용 화면. §77~§79에선 "메뉴 편성·운영"
- * 탭 안에 라벨 섹션으로만 구분해뒀는데, 담당자가 진짜 별도 탭을 요청해(§81)
- * 여기로 옮겼다 — 2026-08에 없앴던 "시뮬레이션" 탭을 날씨 콘텐츠 한정으로
- * 되살린 것(그때 흡수된 "사내 행사" 토글 등 다른 기능은 복원하지 않음). */
+/** 시뮬레이션 — 날씨 예측(시나리오 what-if) + 실측 검증/참고 화면. §77~§79에선
+ * "메뉴 편성·운영" 탭 안에 라벨 섹션으로만 구분해뒀는데, 담당자가 진짜 별도
+ * 탭을 요청해(§81) 여기로 옮겼다 — 2026-08에 없앴던 "시뮬레이션" 탭을 날씨
+ * 콘텐츠 한정으로 되살린 것(그때 흡수된 "사내 행사" 토글 등 다른 기능은
+ * 복원하지 않음). §84에서 고아 상태였던 what-if 예측 엔진을 시나리오 선택기로
+ * 배선하고, 선택한 날씨를 아래 실측 랭킹 탭과 단방향으로 동기화한다. */
 export function SimulationPage() {
+  const [selectedWeather, setSelectedWeather] = useState<Weather>("맑음");
   return (
     <div className="space-y-6">
-      <WeatherCorrelationSection />
+      <WeatherScenarioForecastSection onWeatherChange={setSelectedWeather} />
+      <WeatherCorrelationSection syncedEvent={WEATHER_TO_EVENT[selectedWeather]} />
     </div>
   );
 }
