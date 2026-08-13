@@ -325,59 +325,6 @@ def headcount_trend(
     ]
 
 
-@router.get("/weather-headcount-timeline")
-def weather_headcount_timeline(
-    period_start: dt.date,
-    period_end: dt.date,
-    db: Session = Depends(get_db),
-):
-    """PRD 7.1 확장(2026-08, §75): 날짜별 실측 식수·강수량 원자료(과거엔 강수여부×
-    평일/주말+공휴일/패밀리데이로 미리 평균 낸 교차표를 줬으나, "이 막대가 뭘
-    비교하는 건지 모르겠다"는 피드백에 따라 가공 없이 날짜 하나하나를 그대로
-    반환하는 방식으로 바꿨다 — 평일/주말+공휴일 구분이 필요하면 프론트가
-    `classification` 값으로 직접 체크박스 필터링한다.
-
-    담당자 가설("비 오면 외부 식사가 막혀 오히려 식수가 늘 수 있다")을
-    `simulation.py`의 v0 감(`_WEATHER_MULTIPLIER[RAIN]=0.90`, 반대 가정)과 별개로
-    과거 데이터로 검증하기 위한 참고용 화면 — 이 결과가 그 배수를 자동으로
-    바꾸지 않는다.
-    """
-    weather_rows = (
-        db.query(DailyWeather).filter(DailyWeather.stat_date.between(period_start, period_end)).all()
-    )
-    weather_by_date = {w.stat_date: w for w in weather_rows}
-
-    corner_rows, _ = _load_corner_stats(db, period_start, period_end, classification=None)
-    headcount_by_date: dict[dt.date, int] = {}
-    for row in corner_rows:
-        headcount_by_date[row.stat_date] = headcount_by_date.get(row.stat_date, 0) + row.headcount
-
-    classification_by_date = get_holiday_service(db).classify_range(period_start, period_end)
-
-    days = []
-    days_missing_weather = 0
-    for target_date, headcount in sorted(headcount_by_date.items()):
-        classification = classification_by_date.get(target_date)
-        if classification is None:
-            continue
-        weather = weather_by_date.get(target_date)
-        if weather is None:
-            days_missing_weather += 1
-        days.append(
-            {
-                "stat_date": target_date.isoformat(),
-                "classification": classification.value,
-                "headcount": headcount,
-                "precip_mm": weather.precip_mm if weather else None,
-            }
-        )
-
-    return {
-        "days": days,
-        "days_missing_weather": days_missing_weather,
-    }
-
-
 def _weather_event_by_date(
     db: Session, period_start: dt.date, period_end: dt.date
 ) -> tuple[dict[dt.date, WeatherEvent], dict[dt.date, DailyWeather], bool]:

@@ -43,6 +43,11 @@ function isoDaysAgo(days: number): string {
 const PERIOD_END = isoDaysAgo(0);
 const PERIOD_START = isoDaysAgo(180); // PRD: 취식 데이터 6개월 누적 기준
 
+// §83: 메뉴 중복 점검(재편성 간격 / 부찬 반복)은 6개월 전체보다 최근 한 달이
+// 기본으로 더 유용하다는 피드백 — 이 두 패널만 30일 기본 기간을 쓴다.
+const DUPLICATION_CHECK_PERIOD_START = isoDaysAgo(30);
+const DUPLICATION_CHECK_PERIOD_END = isoDaysAgo(0);
+
 // 마우스를 올리면 나오는 숫자(차트 툴팁)는 표(.toFixed(2))와 자릿수를 맞춰
 // 소수점 2자리까지만 보여준다 — axis-trigger 툴팁은 포맷터가 없으면 원본 값을
 // 그대로 보여줘 자릿수가 길어질 수 있어 이 헬퍼로 통일한다.
@@ -2650,8 +2655,8 @@ const ROTATION_MAIN_ROLE = "메인";
  * 펼쳐야 볼 수 있다.
  */
 function RotationCheckPanel() {
-  const [rotationStart, setRotationStart] = useState(PERIOD_START);
-  const [rotationEnd, setRotationEnd] = useState(PERIOD_END);
+  const [rotationStart, setRotationStart] = useState(DUPLICATION_CHECK_PERIOD_START);
+  const [rotationEnd, setRotationEnd] = useState(DUPLICATION_CHECK_PERIOD_END);
   const [gapThresholdInput, setGapThresholdInput] = useState("");
   const [showAllThresholdViolations, setShowAllThresholdViolations] = useState(false);
   const [expandedMenuKeys, setExpandedMenuKeys] = useState<Set<string>>(new Set());
@@ -2889,8 +2894,8 @@ function RotationCheckPanel() {
  * 합쳐지면서 카드 래퍼만 벗겨냈다(원래 이름 `RepeatedSideDishRankingSection`).
  */
 function RepeatedSideDishPanel() {
-  const [repeatStart, setRepeatStart] = useState(PERIOD_START);
-  const [repeatEnd, setRepeatEnd] = useState(PERIOD_END);
+  const [repeatStart, setRepeatStart] = useState(DUPLICATION_CHECK_PERIOD_START);
+  const [repeatEnd, setRepeatEnd] = useState(DUPLICATION_CHECK_PERIOD_END);
   const [repeatCornerId, setRepeatCornerId] = useState<number | null>(null);
   const [showAllRepeated, setShowAllRepeated] = useState(false);
   const REPEATED_PREVIEW_COUNT = 20;
@@ -3554,21 +3559,6 @@ function MenuPlanPerformanceSection() {
   );
 }
 
-/**
- * PRD 7.1 확장(2026-08, §75): 날짜별 실측 식수 × 강수량 타임라인. 담당자
- * 가설("비 오면 외부 식사가 막혀 오히려 식수가 늘 수 있다")을 "금주 예상
- * 식수" 카드의 v0 감(날씨 배수 0.9, 반대 가정)과 별개로 실데이터로 검증하기
- * 위한 참고용 화면 — 여기 결과가 그 배수를 자동으로 바꾸지 않는다.
- *
- * §71~74엔 강수여부×분류 교차표 막대그래프였으나 "이 막대가 뭘 비교하는
- * 건지 모르겠다"는 피드백(2026-08)에 따라 가공 없는 일별 타임라인으로
- * 바꿨다 — 평일/주말+공휴일은 기저 식수 자체가 크게 달라(주말은 원래
- * 인원이 훨씬 적음) 교차표로 미리 평균 내면 뭘 비교하는지 알기 어려웠는데,
- * 날짜별 원자료 + 체크박스 필터면 "그날 실제 무슨 일이 있었는지"를 그대로
- * 보여줘 설명이 거의 필요 없다.
- */
-const CLASSIFICATION_OPTIONS: Classification[] = ["평일", "주말+공휴일", "패밀리데이"];
-
 // §75: 랭킹 표를 기본 top5 상승/top5 하락만 보여주고 나머지는 펼치기로 미룬다
 // — 날씨유형·계절 랭킹 둘 다 같은 헬퍼로 일관되게 처리한다. 기존 |diff|
 // 내림차순 정렬(rows)은 그대로 두고, 접힌 상태에서 보여줄 부분집합만 뽑는다.
@@ -3596,18 +3586,10 @@ export function WeatherCorrelationSection() {
   const [periodEnd, setPeriodEnd] = useState(PERIOD_END);
   const [selectedEvent, setSelectedEvent] = useState<WeatherEvent>("비");
   const [selectedSeason, setSelectedSeason] = useState<Season>("여름");
-  const [visibleClassifications, setVisibleClassifications] =
-    useState<Set<Classification>>(new Set(CLASSIFICATION_OPTIONS));
   const [showAllWeatherRanking, setShowAllWeatherRanking] = useState(false);
   const [showAllSeasonRanking, setShowAllSeasonRanking] = useState(false);
   const [correlationMetric, setCorrelationMetric] = useState<WeatherCorrelationMetric>("max_temp_c");
   const [showAllCorrelationRanking, setShowAllCorrelationRanking] = useState(false);
-  const chartTheme = useChartTheme();
-
-  const timelineQuery = useQuery({
-    queryKey: ["weather-headcount-timeline", periodStart, periodEnd],
-    queryFn: () => api.weatherHeadcountTimeline({ period_start: periodStart, period_end: periodEnd }),
-  });
 
   const menuRankingQuery = useQuery({
     queryKey: ["menu-weather-event-ranking", periodStart, periodEnd, selectedEvent],
@@ -3654,71 +3636,11 @@ export function WeatherCorrelationSection() {
   const correlationRankingCollapsed = topMoversAndFallers(correlationRows, (r) => r.correlation);
   const visibleCorrelationRows = showAllCorrelationRanking ? correlationRows : correlationRankingCollapsed;
 
-  const allDays = timelineQuery.data?.days ?? [];
-  const daysMissingWeather = timelineQuery.data?.days_missing_weather ?? 0;
-  const visibleDays = allDays.filter((d) => visibleClassifications.has(d.classification));
-
-  const timelineOption = {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 56, right: 56, top: 44, bottom: 56 },
-    legend: { top: 0, textStyle: { color: chartTheme.text } },
-    tooltip: { trigger: "axis" as const, axisPointer: { type: "shadow" as const } },
-    xAxis: {
-      type: "category" as const,
-      data: visibleDays.map((d) => d.stat_date),
-      axisLabel: { color: chartTheme.text, rotate: 45 },
-      axisLine: { lineStyle: { color: chartTheme.axis } },
-    },
-    yAxis: [
-      {
-        type: "value" as const,
-        name: "식수",
-        axisLabel: { color: chartTheme.text },
-        splitLine: { lineStyle: { color: chartTheme.grid } },
-      },
-      {
-        type: "value" as const,
-        name: "강수량(mm)",
-        axisLabel: { color: chartTheme.text },
-        splitLine: { show: false },
-      },
-    ],
-    series: [
-      {
-        name: "식수",
-        type: "bar" as const,
-        yAxisIndex: 0,
-        itemStyle: { color: resolveColor("var(--series-1)") },
-        data: visibleDays.map((d) => d.headcount),
-      },
-      {
-        name: "강수량(mm)",
-        type: "line" as const,
-        yAxisIndex: 1,
-        symbol: "circle",
-        symbolSize: 6,
-        lineStyle: { width: 2, color: resolveColor("var(--series-2)") },
-        itemStyle: { color: resolveColor("var(--series-2)") },
-        data: visibleDays.map((d) => d.precip_mm),
-      },
-    ],
-  };
-
-  function toggleClassification(cls: Classification) {
-    setVisibleClassifications((prev) => {
-      const next = new Set(prev);
-      if (next.has(cls)) next.delete(cls);
-      else next.add(cls);
-      return next;
-    });
-  }
-
   return (
-    <Card title="날씨에 따른 식수 변화 — 과거 실측 현황">
+    <Card title="날씨·계절별 메뉴 식수 랭킹">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        위 "금주 예상 식수" 카드의 날씨 배수는 실측 근거 없는 가정치입니다. 여기는 기상청 ASOS
-        일자료(과거 실측 강수)와 그 날짜의 실제 식수를 나란히 보여주는 참고용 화면입니다 — 이 결과가
-        위 예측 배수를 자동으로 바꾸지는 않습니다.
+        날씨·계절에 따라 실제로 어떤 메인메뉴의 식수가 늘거나 줄었는지 과거 실측 데이터로 봅니다 —
+        아래 기간을 골라 날씨유형/계절/기온·강수량 상관관계 랭킹을 확인하세요.
       </p>
       <div className="mb-3 flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3744,48 +3666,6 @@ export function WeatherCorrelationSection() {
           />
         </label>
       </div>
-      <div className="mb-3 flex flex-wrap gap-4">
-        {CLASSIFICATION_OPTIONS.map((cls) => (
-          <label
-            key={cls}
-            className="flex items-center gap-1.5 text-[13px]"
-            style={{ color: "var(--ink-secondary)" }}
-          >
-            <input
-              type="checkbox"
-              checked={visibleClassifications.has(cls)}
-              onChange={() => toggleClassification(cls)}
-            />
-            {cls}
-          </label>
-        ))}
-      </div>
-
-      {timelineQuery.isLoading && <LoadingState />}
-      {timelineQuery.isError && <ErrorState error={timelineQuery.error} />}
-
-      {timelineQuery.data && visibleDays.length === 0 && (
-        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          {allDays.length === 0
-            ? "날씨 데이터가 없습니다. 기상청 연동(KMA_WEATHER_* 환경변수)을 설정하거나 CSV로 가져오세요(scripts/import_weather_csv.py)."
-            : "선택한 분류에 해당하는 날짜가 없습니다 — 위 체크박스를 조정해 보세요."}
-        </p>
-      )}
-
-      {visibleDays.length > 0 && (
-        <>
-          {daysMissingWeather > 0 && (
-            <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-              이 기간 중 {daysMissingWeather}일은 날씨 데이터가 없어 강수량이 비어 있습니다.
-            </p>
-          )}
-          <ReactECharts option={timelineOption} style={{ height: 320 }} />
-          <p className="mt-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-            상관관계이며 인과관계가 아닙니다. 식수는 계절·요일과도 얽혀 있어 이 그래프만으로 결론
-            내리지 마세요.
-          </p>
-        </>
-      )}
 
       <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
         <h3 className="text-[14px] font-semibold">메인메뉴 × 날씨유형 인기 랭킹 (중식 기준)</h3>

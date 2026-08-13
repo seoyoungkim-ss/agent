@@ -5893,3 +5893,111 @@ export function MenuPlanningPage() {
   삭제된 세 엔드포인트(`/menu-plan/repertoire`, `/menu-pairs/top`,
   `/corners/{id}/core-layer-menu-pairs`)를 직접 호출하면 404가, 살아있는
   `/corners/core-layer-summary`는 200이 나오는지 — 전부 확인됨.
+
+## §83. 코너 필터 기본값 / 홈 스탯타일 2개 교체 / 메뉴 중복점검 30일 기본값 / 날씨 시뮬레이션 정리 (2026-08)
+
+§82 배포 후 담당자가 작은 피드백 4건을 한 번에 요청했다 — 서로 다른
+화면(HomePage.tsx 2건, AnalysisPage.tsx 2건)을 건드리지만 각각
+독립적이라 한 라운드로 묶어 처리했다. AskUserQuestion으로 애매한 부분
+3곳을 확정했다: "최고 혼잡 예상 코너/메뉴" 타일 대체안은 "실측 기준
+최고 식수 코너/메뉴"(§80/§81의 예측→실측 전환 기조와 같은 방향, 이미
+로드된 데이터 재사용), 날씨 시뮬레이션 강수량 타임라인은 §82와 같은
+방식으로 프론트+백엔드 완전 삭제, 메뉴 중복점검 30일 기본값은 재편성
+점검+부찬 반복 랭킹 두 탭 모두 적용.
+
+담당자가 요청한 "날씨별로 취식 많았던 메뉴"는 조사 결과 이미
+`WeatherCorrelationSection`에 "메인메뉴 × 날씨유형 인기 랭킹"
+블록(§71/§76)으로 존재했다 — 신규 기능은 필요 없었고, 강수량 타임라인
+차트만 지우면 됐다.
+
+### 1. 식수 추이 코너 필터 기본값에서 스냅스낵 제외
+
+`HomePage.tsx`의 `DEFAULT_TREND_CORNER_NAMES`(§81에서 지정한 7개 코너)
+에서 "스냅스낵" 한 줄만 삭제 — 6개 코너만 기본 체크된다. 1회성 초기화
+`useEffect`와 체크박스 UI는 배열 길이에 무관하게 동작해 손대지 않았다.
+
+### 2. 홈 스탯타일 2개 교체
+
+**"금주 예상 식수" → "최근 7일 식수"**: 선택한 주(`selectedMonday`)
+스코프의 실측 평균 합계(`plannedHeadcountRanking` 기반) 대신, 어느
+주를 보고 있든 안 바뀌는 "오늘 기준 트레일링 7일 실측 식수 합계"
+스냅샷으로 바꿨다. 새 쿼리 `recentHeadcountQuery`가 `api.weeklySummary`
+를 분류/끼니 필터 없이 `isoDaysAgo(6)`~`isoDaysAgo(0)` 범위로 호출한다
+(둘 다 optional 파라미터라 생략하면 백엔드가 전체 합산). 이 타일의
+유일한 소비자였던 `weeklyPlannedHeadcountTotal` 파생값은 삭제했지만,
+`plannedHeadcountRanking`과 그 파생값들(`plannedHeadcountBars` 등)은
+아래 타일과 기존 "코너-메뉴별 예상 식수 랭킹" 가로막대가 계속 쓰므로
+그대로 유지했다.
+
+**"최고 혼잡 예상 코너/메뉴" → "최고 식수 코너/메뉴"**: 요일별 평균×
+메뉴배수×피크점유율 예측(`congestionForecast`) 대신, 바로 아래 랭킹
+막대그래프와 같은 실측 데이터를 재사용한다 — 백엔드가 이미
+`recent_avg_headcount` 내림차순으로 정렬해 주므로
+`plannedHeadcountBars[0]`이 곧 최고 식수 행이다. 새 API 호출 없이
+기존 데이터만 재사용해 구현했다. `congestionForecast`/
+`topCongestedCorner`/`todayMainMenu`/`topCongestedCornerMenuName`과 옛
+"예상 피크 식수 = ..." 공식 설명 각주는 이 타일에서만 쓰였다는 걸
+`HomePage.tsx` 안에서 grep으로 확인 후 삭제했다.
+
+**주의**: `api.congestionForecast`가 부르는 백엔드
+`GET /simulation/congestion-forecast`는 Agent 채팅 그라운딩
+(`chat_grounding.py`)이 `from app.api.simulation import congestion_forecast`
+로 직접 import해서 쓴다 — 이번 변경은 `HomePage.tsx` 안의 이 타일
+전용 사용부만 지우는 것으로 한정했고, `client.ts`의 함수·타입과 백엔드
+엔드포인트는 그대로 뒀다.
+
+### 3. 메뉴 중복 점검 기본 기간 — 180일 → 30일
+
+`AnalysisPage.tsx`의 공유 상수 `PERIOD_START`/`PERIOD_END`(180일, 파일
+전역 수십 곳이 참조)는 그대로 두고, 새 상수
+`DUPLICATION_CHECK_PERIOD_START`/`_END`(`isoDaysAgo(30)`/`isoDaysAgo(0)`)
+를 추가해 `RotationCheckPanel`(재편성 점검)과
+`RepeatedSideDishPanel`(부찬 반복 랭킹)의 초기 `useState`만 이 상수로
+바꿨다. `MealClashPanel`(한 끼 겹침, 이미 월요일 기준 주 단위
+네비게이터)은 이번 요청 대상이 아니라 그대로 뒀다.
+
+### 4. 날씨 시뮬레이션 — 강수량 타임라인 완전 삭제
+
+`WeatherCorrelationSection`은 하나의 `<Card>`가 타임라인 차트 블록과
+날씨유형/계절/상관관계 랭킹 블록 3개를 형제 요소로 감싸고 있었다 —
+Card 래퍼는 유지하고 타임라인 관련 조각만 지웠다: `timelineQuery`
+(`api.weatherHeadcountTimeline`), `visibleClassifications`/
+`CLASSIFICATION_OPTIONS`/`toggleClassification`(타임라인 전용 분류
+체크박스 필터), `timelineOption` ECharts 옵션, 로딩/에러/빈상태/차트
+렌더 JSX. `periodStart`/`periodEnd` state와 그 날짜 입력은 날씨유형/
+계절/상관관계 랭킹 세 블록이 공유하므로 그대로 남겼다. 카드
+제목("날씨에 따른 식수 변화 — 과거 실측 현황" → "날씨·계절별 메뉴
+식수 랭킹")과 인트로 문구도 남은 3개 랭킹 블록에 맞게 재작성했다.
+
+백엔드는 `GET /analysis/weather-headcount-timeline`
+(`weather_headcount_timeline`) 엔드포인트를 지웠다 — `_load_corner_stats`
+/`get_holiday_service`는 다른 두 엔드포인트도 쓰는 공유 헬퍼라 그대로
+뒀고, 이 엔드포인트 전용 헬퍼는 원래 없어(공유 헬퍼+인라인 로직만으로
+구성) 함수 하나만 지우면 끝났다. 테스트도
+`test_weather_headcount_timeline_returns_daily_rows`/
+`test_weather_headcount_timeline_returns_empty_days_without_meal_log`
+2개만 지우고, 같은 파일의 다른 날씨 테스트가 쓰는 `_seed_menu_rain_vs_normal`
+헬퍼는 그대로 뒀다. `client.ts`의 `weatherHeadcountTimeline` 함수와
+`WeatherHeadcountTimelineDay`/`WeatherHeadcountTimelineResponse` 타입도
+지웠다.
+
+## 검증
+
+- `pytest -q` — 556개 통과(§82의 558개에서 타임라인 테스트 2개 삭제).
+- `npx tsc -b`·`npm run build` — 클린(미사용 import 없음).
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건, 기존 `StatTile` 컴포넌트의 `borderColor`/`borderLeftColor`
+  shorthand 충돌 경고 1건은 `tone` prop을 쓰는 모든 타일에 이미 있던
+  기존 이슈로 이번 변경과 무관함을 확인): (1) 홈 "최근 7일 식수"가
+  주 네비게이터(이전 주 버튼)를 눌러도 값이 그대로인지, "최고 식수
+  코너/메뉴"는 주가 바뀌면 랭킹 막대그래프 1위와 함께 바뀌는지, 옛
+  "예상 피크 식수 =" 각주가 사라졌는지, (2) 메뉴 중복 점검의 "재편성
+  점검"·"부찬 반복 랭킹" 두 탭 모두 날짜 입력이 2026-07-14~2026-08-13
+  (오늘 기준 정확히 30일)로 뜨고, "한 끼 겹침" 탭은 그대로 주 단위
+  네비게이터인지, (3) 시뮬레이션 탭에 강수량 차트(canvas 0개)·분류
+  체크박스가 없고 날짜 입력은 남아있으며 날씨유형/계절/상관관계 랭킹
+  3개 블록이 정상 동작하는지, (4) `DEFAULT_TREND_CORNER_NAMES`에서
+  스냅스낵이 빠졌는지는 소스 grep으로 확인(이 개발 DB의 실제 코너
+  명칭이 §81 하드코딩 목록과 애초에 하나도 안 겹쳐 화면상 체크 상태로
+  직접 확인은 안 됐지만, 코드 변경 자체는 검증됨).
+- 문서화 후 커밋·푸시.

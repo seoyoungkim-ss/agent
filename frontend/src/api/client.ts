@@ -218,20 +218,6 @@ export interface HeadcountTrendRow {
   headcount: number;
 }
 
-// §75: 날짜별 원자료(가공된 교차표 아님) — 평일/주말+공휴일/패밀리데이 구분은
-// classification 값으로 프론트에서 체크박스 필터링한다.
-export interface WeatherHeadcountTimelineDay {
-  stat_date: string;
-  classification: Classification;
-  headcount: number;
-  precip_mm: number | null;
-}
-
-export interface WeatherHeadcountTimelineResponse {
-  days: WeatherHeadcountTimelineDay[];
-  days_missing_weather: number;
-}
-
 // §71: 메인메뉴 × 날씨유형(비/폭설/폭염/한파) 인기 랭킹. 부찬은 대상이 아니다.
 export type WeatherEvent = "비" | "폭설" | "폭염" | "한파";
 
@@ -790,15 +776,9 @@ export const api = {
     classification?: Classification;
   }) => request<HeadcountTrendRow[]>(`/analysis/headcount-trend${qs(params)}`),
 
-  // PRD 7.1 확장(2026-08, §75): 날짜별 실측 식수·강수량 원자료 — "비가 오면
-  // 식수가 준다"는 기존 시뮬레이션 감(v0)을 실데이터로 검증하기 위한 참고용
-  // 화면. 이 결과가 배수를 자동으로 바꾸지 않는다.
-  weatherHeadcountTimeline: (params: { period_start: string; period_end: string }) =>
-    request<WeatherHeadcountTimelineResponse>(`/analysis/weather-headcount-timeline${qs(params)}`),
-
   // §71: 메인메뉴가 지정한 날씨유형(비/폭설/폭염/한파)의 날 평상시 대비 식수가
   // 얼마나 달랐는지 랭킹. 부찬은 대상이 아니다 — 이 결과가 시뮬레이션 배수나
-  // 주간 식단표 예측치를 자동으로 바꾸지 않는다(weatherHeadcountTimeline과 동일 원칙).
+  // 주간 식단표 예측치를 자동으로 바꾸지 않는다.
   menuWeatherEventRanking: (params: {
     period_start: string;
     period_end: string;
