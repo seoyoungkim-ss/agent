@@ -35,6 +35,7 @@ import {
   quadrantColor,
   useChartTheme,
 } from "../components/ui";
+import { CornerLogo } from "../components/CornerLogo";
 
 function isoDaysAgo(days: number): string {
   const d = new Date();
@@ -275,7 +276,9 @@ export function CornerMetricComparisonSection() {
               <tbody>
                 {sortedCornerRows.map((c) => (
                   <tr key={c.corner_name} className="border-b" style={{ borderColor: "var(--border)" }}>
-                    <td className="py-2 pr-4">{c.corner_name}</td>
+                    <td className="py-2 pr-4">
+                      <CornerLogo cornerName={c.corner_name} />
+                    </td>
                     <td className="py-2 pr-4 text-right">{avgHeadcount(c)?.toLocaleString() ?? "-"}</td>
                     <td className="py-2 pr-4 text-right">{c.avg_taste_score?.toFixed(2) ?? "-"}</td>
                     <td className="py-2 pr-4 text-right">{c.avg_peak_throughput_per_min?.toFixed(2) ?? "-"}</td>
@@ -1097,7 +1100,7 @@ function MenuComboSection() {
           options={[
             { label: "전체", value: "" },
             ...(cornersQuery.data ?? []).map((c) => ({
-              label: c.corner_name,
+              label: <CornerLogo cornerName={c.corner_name} height={14} />,
               value: String(c.corner_id),
             })),
           ]}
@@ -2813,7 +2816,7 @@ function RepeatedSideDishPanel() {
             options={[
               { label: "전체", value: "" },
               ...(repeatCorners.data ?? []).map((c) => ({
-                label: c.corner_name,
+                label: <CornerLogo cornerName={c.corner_name} height={14} />,
                 value: String(c.corner_id),
               })),
             ]}
@@ -2883,7 +2886,9 @@ function RepeatedSideDishPanel() {
                   return (
                     <tr key={itemKey} className="border-b" style={{ borderColor: "var(--border)" }}>
                       <td className="py-2 pr-4 text-right">{i + 1}</td>
-                      <td className="py-2 pr-4">{o.corner_name}</td>
+                      <td className="py-2 pr-4">
+                        <CornerLogo cornerName={o.corner_name} />
+                      </td>
                       <td className="py-2 pr-4">
                         <button
                           className="underline"

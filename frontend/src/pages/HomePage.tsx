@@ -24,6 +24,7 @@ import {
 } from "../components/ui";
 import { CornerMetricComparisonSection } from "./AnalysisPage";
 import { addDays, isoDaysAgo, mondayOf } from "../lib/week";
+import { CornerLogo } from "../components/CornerLogo";
 
 // 니치 코너(Take Out/미캠회관/그린미트)를 범례에서 기본 숨기던 규칙은 제거됐다
 // (2026-08 현황 재편) — 통합 추이 차트에 명시적인 "코너 필터"가 생겨, 숨겨진
@@ -658,7 +659,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
                     color: active ? "var(--ink)" : "var(--ink-secondary)",
                   }}
                 >
-                  {c.corner_name}
+                  <CornerLogo cornerName={c.corner_name} height={14} />
                 </button>
               );
             })}
@@ -776,7 +777,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
                 {cornerMealTypeHeadcountQuery.data.take_in.map((row) => (
                   <tr key={row.corner_id}>
                     <td className="border px-2 py-1.5" style={{ borderColor: "var(--border)" }}>
-                      {row.corner_name}
+                      <CornerLogo cornerName={row.corner_name} />
                     </td>
                     {MEAL_TYPE_OPTIONS.map((mt) => {
                       const cell = row.meals[mt];
@@ -808,7 +809,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
                       className="border px-2 py-1.5 font-medium"
                       style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
                     >
-                      {cornerMealTypeHeadcountQuery.data.take_out.corner_name}
+                      <CornerLogo cornerName={cornerMealTypeHeadcountQuery.data.take_out.corner_name} />
                     </td>
                     {MEAL_TYPE_OPTIONS.map((mt) => {
                       const cell = cornerMealTypeHeadcountQuery.data!.take_out!.meals[mt];

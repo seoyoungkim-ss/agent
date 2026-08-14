@@ -7382,3 +7382,80 @@ const [trendPeriodEnd, setTrendPeriodEnd] = useState(() => isoDaysAgo(0));
 - `npx tsc -b` + `npx vite build` 클린.
 - 위 Playwright 확인 — 콘솔 에러 0건.
 - 문서화(§96) 후 커밋·푸시.
+
+# §97. 코너명 텍스트를 로고 이미지로 교체 (7개 코너) (2026-08)
+
+## Context
+
+담당자 요청: 코너별로 텍스트로 보이던 코너명을 로고 이미지로 표기해
+달라는 것. 총 7개 코너(고슬고슬비빈/도담찌개/한식사계/동방식객/모던키친/
+싱푸차이나/Take Out)의 투명 배경 PNG 로고를 전달받았다. AskUserQuestion으로
+범위를 확정했다: (1) "눈에 띄는 곳 위주" — 필터/토글 칩, 코너명이 칸 전체
+내용인 표 셀, 코너 선택 탭만 적용하고 ECharts 범례/축/툴팁이나 "메뉴명
+(코너명)" 결합 문자열은 제외(전자는 카테고리 라벨에 `<img>`를 넣을 수 없고,
+후자는 로고화하면 어색해짐), (2) 로고만 표시(텍스트 병기 없음, `title`
+호버로 이름 확인), (3) 로고 없는 코너는 지금처럼 텍스트 유지, 나중에 로고가
+더 오면 매핑 한 줄만 추가.
+
+조사 결과 `corner_name`을 렌더링하는 공용 컴포넌트가 없었고(40여 곳이
+`HomePage.tsx`/`AnalysisPage.tsx`에 개별 흩어짐), 백엔드 `CornerMaster`에도
+로고 필드가 없어 — 순수 프론트엔드 정적 매핑으로 처리했다(백엔드 변경 없음).
+
+## 설계
+
+`frontend/src/assets/corner-logos/`에 7개 PNG를 ASCII 파일명으로 저장
+(한글 파일명의 번들러 인코딩 이슈 회피). 신규
+`frontend/src/components/CornerLogo.tsx`가 `corner_name → 이미지` 매핑
+(`CORNER_LOGOS`)과 `<CornerLogo cornerName={...} height={18} />` 컴포넌트를
+제공 — 매핑에 없는 이름이면 자동으로 `{cornerName}` 텍스트를 그대로
+반환(폴백). 로고 PNG 원본이 검정/갈색 등 진한 잉크색 텍스트라 다크모드
+표면색과 대비가 떨어질 수 있어, 테마 무관하게 항상 흰 배경(`#ffffff`) 작은
+배지 안에 그린다(PNG 자체 색은 바꿀 수 없으니 배경을 고정하는 방식으로
+대응) — `title={cornerName}` 속성으로 호버 시 이름 확인 가능.
+
+`frontend/src/components/ui.tsx`의 `SegmentedControl<T>` 옵션 타입을
+`{ label: string; value: T }[]` → `{ label: ReactNode; value: T }[]`로
+넓혀 코너 선택 탭에도 로고를 넣을 수 있게 했다(문자열은 `ReactNode`에
+포함되므로 기존 14곳의 호출부는 전혀 영향 없음).
+
+적용한 6곳: `HomePage.tsx`의 "코너 필터" 토글 버튼, "코너별 조식/중식/석식
+식수 현황" 표의 코너명 칸(Take Out 합계 행 포함), `AnalysisPage.tsx`의
+"코너별 분석 — 지표 비교" 표, "자주 반복되는 부찬 랭킹" 표, 그리고 두 개의
+코너 선택 `SegmentedControl`(부찬 조합 코너 선택 / 반복 편성 코너 선택,
+`"전체"` 옵션은 로고가 없어 텍스트 그대로).
+
+## 손대지 않은 것 (교차 확인)
+
+- `frontend/src/api/client.ts`의 `corner_name` 타입 필드 — 렌더링 지점이
+  아니라 그대로.
+- `HomePage.tsx`의 `DEFAULT_TREND_CORNER_NAMES`, `AnalysisPage.tsx`의
+  `UNASSIGNED_CORNER` — 업무 로직, 표시와 무관.
+- `backend/app/services/corner_aliases.py`의 `CORNER_DISPLAY_ORDER` —
+  코너 정렬은 여전히 corner_name 문자열 기준, 로고 매핑과 독립.
+- `backend/app/models/master.py`의 `CornerMaster` — 스키마 변경 없음.
+- ECharts 범례/축/툴팁, "메뉴명 (코너명)" 결합 문자열, 인라인 "(코너명)"
+  각주 — 이번 범위 밖.
+- 나머지 14곳의 `SegmentedControl` 호출부 — `label` 타입만 넓어질 뿐
+  기존 문자열 전달 그대로 유효.
+
+## 테스트
+
+- 백엔드 변경이 없으므로 `pytest` 재실행 불필요.
+- `npx tsc -b` + `npx vite build` — 7개 PNG 에셋이 정상적으로 번들에
+  포함되는지 확인(각각 3.7~27.8KB로 dist에 나타남).
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔 에러
+  0건, 라이트/다크 두 프리퍼런스): 개발 DB에는 실제 운영 코너명 대신
+  플레이스홀더 이름(한식/그린미트/일품 등, 기존에 문서화된 샌드박스
+  한계)이 들어있어 7개 중 "Take Out" 하나만 실측 검증 가능했다 — "코너
+  필터" 칩, "코너별 조식/중식/석식 식수 현황" 표, "부찬 조합별 만족도"·
+  "부찬 반복 랭킹"의 코너 선택 탭 전부에서 Take Out만 로고("take me
+  out" 손글씨체)로, 나머지 코너는 여전히 텍스트로 정상 표시됐다. 다크모드에서
+  로고가 흰 배지 위에 얹혀 검정 잉크 텍스트가 선명하게 읽혔다(대비 확인
+  완료). 나머지 6개 로고는 코드 경로가 Take Out과 완전히 동일한 매핑 조회
+  +폴백 구조라 별도 확인 없이도 동일하게 동작함이 보장된다.
+
+## 검증
+
+- `npx tsc -b` + `npx vite build` 클린.
+- 위 Playwright 확인 — 콘솔 에러 0건, 라이트/다크 모두 확인.
+- 문서화(§97) 후 커밋·푸시.

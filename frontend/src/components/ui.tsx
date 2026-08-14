@@ -157,7 +157,7 @@ export function SegmentedControl<T extends string>({
   onChange,
 }: {
   value: T;
-  options: { label: string; value: T }[];
+  options: { label: ReactNode; value: T }[];
   onChange: (v: T) => void;
 }) {
   return (
