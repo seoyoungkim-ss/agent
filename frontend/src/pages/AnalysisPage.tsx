@@ -1577,13 +1577,32 @@ function WeeklyMenuReviewTab() {
     );
   }
 
-  function renderDailyRuleRow(ruleNumber: number, label: string, results: DailyMenuPlanRuleResult[]) {
+  function renderDailyRuleRow(
+    ruleNumber: number,
+    label: string,
+    results: DailyMenuPlanRuleResult[],
+    opts?: { highlightFullDayOnViolation?: boolean }
+  ) {
     const byDate = new Map(results.map((r) => [r.plan_date, r]));
-    const violatingMatches = results.filter((r) => !r.ok).flatMap((r) => r.matches);
+    const violatingDays = results.filter((r) => !r.ok);
+    const realMatches = violatingDays.flatMap((r) => r.matches);
+    // "해장 최소 1개"처럼 위반이 특정 메뉴의 존재가 아니라 부재라서 matches가
+    // 항상 비어있는 규칙은(그날 해장 메뉴가 0개라 predicate에 걸리는 슬롯
+    // 자체가 없음), 실제 matches 대신 그날 전체 슬롯을 하이라이트 대상으로
+    // 써야 클릭했을 때 뭔가 강조된다 — 안 그러면 칩이 항상 "위반 없음"으로
+    // 보여 클릭이 아예 안 먹는 것처럼 보인다(요일 배지는 빨갛게 뜨는데 칩은
+    // 초록/비활성인 모순도 같이 해결됨).
+    const highlightMatches = opts?.highlightFullDayOnViolation
+      ? violatingDays.flatMap((r) =>
+          slots
+            .filter((s) => s.plan_date === r.plan_date)
+            .map((s) => ({ plan_date: s.plan_date, corner_id: s.corner_id }))
+        )
+      : realMatches;
     return (
       <div className="mb-2">
         <div className="flex flex-wrap items-center gap-2 text-[13px]">
-          {renderRuleChip(ruleNumber, label, violatingMatches)}
+          {renderRuleChip(ruleNumber, label, highlightMatches)}
           {weekdayDates.slice(0, 5).map((d, i) => {
             const r = byDate.get(d);
             if (!r) {
@@ -1598,9 +1617,9 @@ function WeeklyMenuReviewTab() {
             );
           })}
         </div>
-        {violatingMatches.length > 0 && (
+        {realMatches.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1.5">
-            {violatingMatches.map((m, i) =>
+            {realMatches.map((m, i) =>
               renderMatchChip(m, `${m.menu_name}(${m.corner_name}, ${m.plan_date.slice(5)})`, i)
             )}
           </div>
@@ -1640,7 +1659,9 @@ function WeeklyMenuReviewTab() {
         {ruleCheckQuery.data && (
           <div className="mb-4 rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
             <h3 className="mb-2 text-[13px] font-semibold">주간 편성 규칙 검증 (주중, 요일별)</h3>
-            {renderDailyRuleRow(1, "해장 메뉴 (하루 최소 1개)", ruleCheckQuery.data.hangover)}
+            {renderDailyRuleRow(1, "해장 메뉴 (하루 최소 1개)", ruleCheckQuery.data.hangover, {
+              highlightFullDayOnViolation: true,
+            })}
             {renderDailyRuleRow(2, "면류 (하루 최대 4개)", ruleCheckQuery.data.noodle)}
             {renderDailyRuleRow(3, "매운(빨간국물) (하루 최대 4개)", ruleCheckQuery.data.spicy_red_broth)}
             <div className="mt-2 flex items-center gap-2 text-[13px]">
