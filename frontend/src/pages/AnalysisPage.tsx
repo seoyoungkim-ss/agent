@@ -216,9 +216,15 @@ export function CornerMetricComparisonSection() {
             </Button>
           </div>
         </div>
-        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        <p className="mb-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
           {weekMonday} ~ {weekSaturday} 중 선택한 분류에 해당하는 날짜의 일평균입니다.
         </p>
+        {classification === "전체" && (
+          <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+            토요일·공휴일처럼 식수가 적은 날도 함께 평균에 들어가, 전체 값이 평일만의
+            평균보다 낮게 나올 수 있습니다 — 오류가 아니라 날짜를 섞어 낸 평균입니다.
+          </p>
+        )}
         {query.isLoading && <LoadingState />}
         {query.isError && <ErrorState error={query.error} />}
         {query.data && query.data.length === 0 && (
