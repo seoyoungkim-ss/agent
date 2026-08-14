@@ -6,9 +6,11 @@ from app.services.menu_rotation import (
     average_interval_days,
     classify_rotation,
     count_in_window,
+    find_overdue_menus,
     find_overused_menus,
     is_over_frequency,
     max_in_window_for_role,
+    rank_by_shortest_cycle,
 )
 
 
@@ -268,3 +270,74 @@ def test_build_corner_menu_dates_keeps_same_day_duplicate_for_clash_detection():
     )
     assert dates2[("한식", "포기김치")] == [d(1)]
     assert dates2[("분식", "포기김치")] == [d(1)]
+
+
+# ---------------------------------------------------------------------------
+# §86: 편성 빈도 × 성과 — 편성 주기가 짧은 메뉴 / 나올 때가 됐는데 안 나온 메뉴
+# ---------------------------------------------------------------------------
+
+
+def test_rank_by_shortest_cycle_excludes_single_occurrence():
+    dates_by_corner_menu = {
+        ("한식", "김치"): [d(1), d(8)],  # 평균 7일
+        ("한식", "돈까스"): [d(1), d(31)],  # 평균 30일
+        ("한식", "제육볶음"): [d(1)],  # 이력 1회뿐 — 평균 낼 수 없어 제외
+    }
+    result = rank_by_shortest_cycle(dates_by_corner_menu)
+    assert [(r.corner_name, r.menu_name) for r in result] == [("한식", "김치"), ("한식", "돈까스")]
+
+
+def test_rank_by_shortest_cycle_reports_avg_interval_and_last_date():
+    dates_by_corner_menu = {("한식", "김치"): [d(1), d(8), d(15)]}  # 평균 7일
+    result = rank_by_shortest_cycle(dates_by_corner_menu)
+    assert len(result) == 1
+    r = result[0]
+    assert r.avg_interval_days == 7.0
+    assert r.occurrence_count == 3
+    assert r.last_date == d(15)
+
+
+def test_rank_by_shortest_cycle_sorts_ascending_by_interval():
+    dates_by_corner_menu = {
+        ("한식", "돈까스"): [d(1), d(31)],  # 평균 30일
+        ("한식", "김치"): [d(1), d(8)],  # 평균 7일
+    }
+    result = rank_by_shortest_cycle(dates_by_corner_menu)
+    assert [r.menu_name for r in result] == ["김치", "돈까스"]
+
+
+def test_find_overdue_menus_excludes_menus_within_normal_range():
+    """평균 주기의 ratio배 이내로 안 나온 건 아직 오랜만이 아니다."""
+    dates_by_corner_menu = {("한식", "비빔밥"): [d(1), d(15)]}  # 평균 14일
+    as_of = d(20)  # 마지막 등장 이후 5일 — 평균의 2배(28일)에 한참 못 미침
+    assert find_overdue_menus(dates_by_corner_menu, as_of) == []
+
+
+def test_find_overdue_menus_flags_menu_far_beyond_average_cycle():
+    dates_by_corner_menu = {("한식", "김치"): [d(1), d(15)]}  # 평균 14일
+    as_of = d(100)  # 마지막 등장(d(15)) 이후 85일 — 평균의 2배(28일)를 훌쩍 넘음
+    result = find_overdue_menus(dates_by_corner_menu, as_of)
+    assert len(result) == 1
+    r = result[0]
+    assert r.corner_name == "한식"
+    assert r.menu_name == "김치"
+    assert r.avg_interval_days == 14.0
+    assert r.last_date == d(15)
+    assert r.days_since_last == 85
+
+
+def test_find_overdue_menus_excludes_single_occurrence():
+    """이력이 1회뿐이면 평균 주기를 낼 수 없어 판단 근거가 없다."""
+    dates_by_corner_menu = {("한식", "단무지"): [d(1)]}
+    assert find_overdue_menus(dates_by_corner_menu, d(100)) == []
+
+
+def test_find_overdue_menus_sorts_most_overdue_first():
+    dates_by_corner_menu = {
+        # 평균 20일, 마지막 이후 70일 → 3.5배
+        ("한식", "짜장면"): [d(10), d(30)],
+        # 평균 10일, 마지막 이후 60일 → 6배(더 오래됨)
+        ("한식", "라면"): [d(30), d(40)],
+    }
+    result = find_overdue_menus(dates_by_corner_menu, d(100))
+    assert [r.menu_name for r in result] == ["라면", "짜장면"]

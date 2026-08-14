@@ -6242,3 +6242,234 @@ const WEATHER_TO_EVENT: Partial<Record<Weather, WeatherEvent>> = {
   헤더 클릭 시 오름/내림차순 정렬과 화살표(▲/▼) 표시가 정상 동작함을
   스크린샷으로 확인.
 - 문서화 후 커밋·푸시.
+
+# §86. VOE 클러스터링 버그 수정 + 규칙 하이라이트 확장 + 코너별 분석 주간평균 + 메뉴 하이라이트 키워드 태그 + 편성빈도 재설계 (2026-08)
+
+## Context
+
+담당자가 5가지를 요청했다: (1) 월간 VOE 클러스터링이 "502 client error
+404 not found"를 낸다는 버그 신고, (2) 메뉴편성·운영 탭의 주간 편성
+규칙 검증에서 각 규칙을 클릭하면 주간 식단표에 해당 슬롯이 음영
+처리되게, (3) 현황(HomePage)의 "코너별 분석 — 지표 비교" 표를
+기본적으로 숨기지 말고 처음부터 보이게, "누적 식수" 대신 "주간 평균
+식수"(평일 기준 — 주말에 운영 안 하는 코너가 있어서), (4) "메뉴
+하이라이트"의 LLM 원인 설명에서 키워드를 태그처럼 뽑아 보여주기,
+(5) "편성 빈도 × 성과"가 만족도·VoE 탭의 "메뉴별 분석"과 겹쳐 보이니
+편성 주기 자체가 짧은 메뉴 / 나올 때가 됐는데 안 나온 메뉴 위주로
+바꿔달라.
+
+## 1. VOE 클러스터링 502/404 버그 — 임베딩 API → LLM 채팅 그룹핑
+
+`backend/app/services/voe_clustering.py`의 `cluster_monthly_voe`가
+사내 LLM 게이트웨이의 `POST {base_url}/embeddings`를 호출했는데,
+게이트웨이가 그 경로에 404를 돌려주고 `dashboard.py`의
+`recompute_voe_clusters`가 그 예외를 502로 감싸 보여준 것이 원인이었다
+(`llm_client.py` 자체 주석에도 "임베딩 경로는 아직 실제로 확인된 적
+없음"이라고 남아 있었다 — `/chat/completions`만 실사용에서 검증됨).
+정확한 임베딩 경로를 확인하려 했으나 담당자도 지금 알 수 없다고 해서,
+**임베딩 API 자체를 아예 안 쓰는 방향으로 전환**했다 — 이미 검증된
+`chat_complete()` 하나로 LLM이 코멘트를 직접 그룹핑하게 한다(K-means
+임베딩 클러스터링 → LLM 직접 그룹핑 요청).
+
+`cluster_monthly_voe`는 이제 그 달 코멘트를 최대 `max_comments=150`개
+샘플링해 번호를 매기고, `_build_cluster_prompt`로 "라벨/키워드/
+대표코멘트/번호(콤마 분리)" 델리미터 텍스트 형식을 요청하는 프롬프트를
+만들어 `chat_complete()`를 한 번 호출한다. `_parse_cluster_response`가
+응답을 빈 줄 기준 블록으로 나눠 각 블록을 파싱하고, 번호 목록에서
+범위(1~len(sample))를 벗어나거나 숫자가 아닌 토큰은 버린다. 유효한
+번호가 하나도 없는 블록은 건너뛰고, 클러스터가 하나도 안 파싱되면
+`ValueError`를 던진다(기존 502 감싸기 계약은 그대로 유지 — 실패 원인이
+임베딩에서 채팅으로 바뀔 뿐).
+
+`llm_client.py`의 `embed()`/`_mock_embedding()`은 지우지 않았다 —
+범용 클라이언트 API로 남겨둔다(이번 문제의 원인은 메서드가 아니라 그
+메서드를 부르던 유일한 호출부였다). 대신 `_mock_chat_stream`에 분기를
+하나 추가했다 — 프롬프트에 "번호:"와 "대표코멘트:"가 둘 다 있으면(=
+클러스터링 프롬프트 형식이면) `_mock_cluster_reply`로 항목 전체를
+클러스터 하나로 묶어 파싱 가능한 모의 응답을 만든다. 이게 없으면
+사내 LLM 미설정 환경(로컬/이 리포의 테스트 DB)에서 클러스터링이 항상
+"파싱 실패"로 죽어, 예전(임베딩+KMeans는 모의 임베딩으로도 항상
+성공)보다 오히려 배선 검증이 어려워지는 역행이었다.
+
+## 2. 규칙 하이라이트 — "저조 식수 재편성" 규칙까지 확장
+
+해장/면류/매운(빨간국물) 3개 규칙은 §78에서 이미 클릭 하이라이트가
+완전히 구현·검증돼 있었다 — 버그가 아니었다. 4번째 규칙인 "최근 저조
+식수(200식 이하) 재편성"만 위반 항목(`LowHeadcountViolation`)이
+메뉴 단위로 집계돼 `plan_date`/`corner_id`가 없어 그리드 키를 못
+만들었다.
+
+`backend/app/api/analysis.py`의 `weekly_menu_plan_rule_check`에서
+`low_headcount_violations` 생성 루프를 확장했다 — 위반으로 판정된
+각 (menu_id, menu_name, corner_name)에 대해 이미 가져온 `plan_rows`를
+다시 훑어, 같은 menu_id·corner_name·`MenuRole.MAIN`인 행들을
+`matches: [{plan_date, corner_id, corner_name, menu_name}]`로 붙인다
+(새 쿼리 없음, `_daily_rule_payload`의 `matches`와 같은 shape).
+
+프론트(`AnalysisPage.tsx`, `WeeklyMenuReviewTab`)에서 "최근 저조
+식수(200식 이하) 재편성" 라벨 자체를 클릭 가능한 버튼으로 바꿔
+`selectRuleMatches(모든 위반의 matches 합침)`을 호출하게 했다(§81에서
+만든 토글 메커니즘 그대로 재사용). 위반 목록도 각 매치마다 개별
+클릭 버튼(`selectSlot`)으로 바꿔, 개별 슬롯 하나만 골라 하이라이트할
+수도 있게 했다.
+
+## 3. 코너별 분석 — 표 항상 표시 + "주간 평균 식수"(평일×5)
+
+**백엔드** — `corner_analysis`의 코너별 결과 dict에 `"day_count":
+len({s.stat_date for s in stats})`을 한 줄 추가했다(이미 그 루프
+안에서 `stats`를 순회 중이라 새 쿼리 불필요).
+
+**프론트** — `CornerMetricComparisonSection`(`AnalysisPage.tsx`):
+`classification` state 기본값을 `"전체"` → `"평일"`로 바꾸고(다른
+분류도 SegmentedControl로 계속 볼 수 있음), `showCornerTable` 상태와
+"표로 보기"/"표 숨기기" 토글 버튼을 지워 표를 조건 없이 항상
+렌더한다. "누적 식수" 컬럼을 "주간 평균 식수"로 바꿨다 — `weeklyAvg =
+day_count > 0 ? round(headcount_total / day_count * 5) : null`("이
+코너가 평일 페이스를 유지한다면 한 주에 낼 식수" 추정치). 정렬 키의
+"headcount" 분기도 이 값 기준으로 바꿨다.
+
+## 4. 메뉴 하이라이트 — LLM 키워드 태그
+
+`backend/app/models/stats.py`의 `LlmAnalysisCache`에 `keywords:
+ARRAY(String(64))`(nullable) 컬럼을 추가했다(`MonthlyVoeCluster.keywords`와
+동일 패턴, planning_notice는 채우지 않음) — Alembic 마이그레이션
+`9a3f7c1e2b6d`.
+
+`llm_analysis.py`의 `_build_menu_trend_prompt`에 "설명 뒤 마지막 줄에
+핵심 원인 관련 키워드 2~4개를 '키워드: 키워드1, 키워드2' 형식으로
+덧붙이세요(원인을 특정하기 어려우면 생략)"를 추가했다. 새 함수
+`_parse_menu_trend_response(response) -> (요약, 키워드)`가 "키워드:"로
+시작하는 줄만 분리해 콤마로 쪼개고, 나머지 줄을 요약 본문으로
+합친다(`voe_clustering._parse_cluster_response`와 같은 델리미터 텍스트
+파싱 스타일). `summarize_menu_trend`의 반환 타입을 `str` →
+`tuple[str, list[str]]`로 바꾸고, `_fallback_menu_trend_summary`(미설정
+폴백)는 키워드 없이 `[]`를 반환한다. 유일한 호출부인
+`refresh_llm_analyses`에서 `summary, keywords = await
+summarize_menu_trend(...)`로 받아 `save_analysis(..., keywords=keywords)`로
+저장한다. `save_analysis`에 `keywords: list[str] | None = None` 선택
+인자를 추가했다(기존 두 호출부 — planning_notice/voe_briefing —는
+영향 없음).
+
+`dashboard.py`의 `_trend_cause`가 `cause_keywords: cached.keywords or
+[]`도 같이 반환하도록 확장했다. `client.ts`의 `MenuTrendEntry`에
+`cause_keywords?: string[]` 추가, `HomePage.tsx`의 `MenuTrendList`가
+원인 설명 문단 아래에 작은 pill 스타일 span(`rounded-full border`,
+`var(--surface-2)` 배경)으로 키워드를 나열한다. 로컬(LLM 미설정)
+환경은 폴백이 항상 빈 키워드를 주므로, 개발 DB에 키워드가 채워진 캐시
+행을 수동 삽입해 칩 렌더링 자체를 Playwright로 시각 확인했다.
+
+## 5. 편성 빈도 × 성과 — 편성 주기 짧은 메뉴 + 나올 때 됐는데 안 나온 메뉴
+
+기존 산점도(1회 편성당 식수 × 만족도, 감편/증편/주력/현행 4분류)는
+만족도·VoE 탭의 "메뉴별 분석" 4분면(취식 데이터 기준 만족도×수요)과
+개념이 겹쳐 보인다는 지적이었다. 완전히 지우고 두 리스트로 교체했다.
+
+**주의**: 이 둘은 `RotationCheckPanel`("재편성 점검" 탭)의 인스턴스
+단위 `gap_days`(이번 재편성이 얼마나 일렀나)와는 다른, **메뉴 단위**
+질문이다. 특히 "나올 때가 됐는데 안 나온 메뉴"는 `weekly_menu_rotation`의
+기존 `items` 루프(조회 기간 안에서 실제로 재편성된 행만 순회)로는
+구조적으로 잡을 수 없다 — 그 기간에 아예 재편성이 안 된 메뉴가
+대상이라서다.
+
+`backend/app/services/menu_rotation.py`에 순수 함수 2개를 추가했다:
+
+- `rank_by_shortest_cycle(dates_by_corner_menu, *, min_occurrences=2)` —
+  `(코너, 메뉴) -> 날짜 목록` 딕셔너리를 받아, 이력이 `min_occurrences`회
+  미만인 메뉴(평균 주기 계산 불가)는 빼고 `average_interval_days`
+  오름차순으로 `ShortCycleMenu(corner_name, menu_name,
+  avg_interval_days, occurrence_count, last_date)` 리스트를 낸다.
+- `find_overdue_menus(dates_by_corner_menu, as_of, *, min_occurrences=2,
+  ratio=LONG_ABSENT_RATIO)` — 마지막 등장 이후 경과일이 평균 주기 ×
+  ratio(기존 `LONG_ABSENT_RATIO=2.0` 재사용)를 넘는 메뉴를
+  `OverdueMenu(corner_name, menu_name, avg_interval_days, last_date,
+  days_since_last)`로, "얼마나 오래됐는지"(경과일/평균주기) 내림차순
+  정렬해 낸다.
+
+`weekly_menu_rotation` 엔드포인트에서 이미 가져온 `all_planned`을
+`menu_role == "메인"`으로 필터링해 `main_planned`을 만들고,
+`build_corner_menu_dates(main_planned)`로 MAIN 전용
+`dates_by_corner_menu_main`을 별도로 빌드한다(부찬·건강가든까지 섞인
+기존 `dates_by_corner_menu`와는 별개 — 이 화면은 원래도 MAIN
+전용이었다). 응답에 `shortest_cycle_menus`(상위 10개)와
+`overdue_menus`를 새 필드로 추가했다(기존 `items`/`overused`는
+그대로 — `RotationCheckPanel`이 계속 씀).
+
+프론트 `MenuPlanPerformanceSection`을 `api.menuPlanPerformance` →
+`api.weeklyMenuRotation`으로 교체했다. 산점도 ECharts 옵션, 사분면
+markArea/markLine, "편성 조정 후보"/"취식 기록 없음" 표는 전부 지우고,
+"편성 주기가 짧은 메뉴"와 "나올 때가 됐는데 안 나온 메뉴"(기본
+`OVERDUE_PREVIEW_COUNT=12`개 + "전체 보기") 두 개의 단순 표로
+교체했다.
+
+**풀스택 고아 정리**: `api.menuPlanPerformance`/`PlanPerformanceRow`/
+`PlanPerformanceResponse`/`PlanningAction`(client.ts),
+`GET /analysis/menu-plan/performance` 엔드포인트,
+`backend/app/services/menu_plan_analytics.py` 전체 파일(`classify_planning_action`/
+`median_or_zero`/`DEFAULT_MIN_EVALUATIONS` — grep으로 이 엔드포인트
+말고 다른 호출부가 없음을 확인), `tests/test_menu_plan_analytics.py`,
+`test_api_ingest_and_analysis.py`의 관련 테스트 5개를 전부 삭제했다.
+
+이 엔드포인트를 지우면서 걸린 교차 참조 하나: `dashboard.py`의
+`_collect_planning_facts`(홈 화면 "개선 필요 포인트"의 편성 축)가
+`menu_plan_performance`를 호출해 "편성됐지만 취식 기록 0인 메뉴"
+목록을 얻고 있었다. 새 헬퍼 `_no_intake_main_menus(db, period_start,
+period_end)`를 `dashboard.py`에 추가해 MAIN 역할 편성 메뉴 중 그
+기간 취식 기록이 하나도 없는 메뉴를 직접 계산하도록 바꿨다(같은
+결과를 얻는 더 가벼운 전용 쿼리 — `menu_plan_performance`가 계산하던
+편성횟수/만족도/4분류/매칭진단은 이 축엔 필요 없었다).
+
+## 손대지 않은 것 (교차 확인)
+
+- `RotationCheckPanel`("재편성 점검" 탭)과 그 `items`/`overused` —
+  그대로 유지, 새 두 리스트는 별개 필드로만 얹었다.
+- 만족도·VoE 탭의 `MenuQuadrantTab`(4분면, 취식 데이터 기준
+  만족도×수요) — 변경 없음.
+- `llm_client.py`의 `embed()`/`_mock_embedding()`/`chat_stream`/
+  `chat_complete` — 그대로 둠, VOE 클러스터링만 이 메서드 호출을 끊음.
+- 해장/면류/매운(빨간국물) 3개 규칙의 기존 하이라이트 로직
+  (`selectRuleMatches`/그리드 키) — 이미 동작해 재사용만 함.
+- `_apply_classification_filter`/`DayClassification`/휴일 서비스 —
+  새 분류 개념 추가 없이 재사용만.
+- `menu_name.py`의 `pair_likely_same_menu` — `menu_plan_performance`
+  삭제로 그 안의 유일한 호출부는 없어졌지만, 자체 유닛 테스트가 있는
+  범용 문자열 매칭 유틸리티라 지우지 않음(`embed()`와 같은 성격).
+
+## 테스트
+
+- `backend/tests/test_voe_clustering.py` — chat 기반으로 재작성.
+  `_parse_cluster_response`의 범위 밖/숫자 아닌 번호 무시, 빈 그룹
+  스킵, 응답 파싱 실패 시 `ValueError`, 502 계약(이제 `chat_complete`
+  실패를 모킹)까지 8개 테스트.
+- `backend/tests/test_llm_analysis.py` — `summarize_menu_trend`가
+  튜플을 반환하도록 갱신, 키워드 줄 파싱/키워드 없는 응답 테스트 추가.
+- `backend/tests/test_menu_rotation.py` — `rank_by_shortest_cycle`/
+  `find_overdue_menus` 유닛 테스트 6개(단일 이력 제외, 평균 주기·
+  최근 편성일 정확성, 오름차순/최다 경과 순 정렬).
+- `backend/tests/test_api_ingest_and_analysis.py` — 저조 식수 위반의
+  `matches` 필드, `corners` 응답의 `day_count`, `weekly-menu/rotation`
+  응답의 `shortest_cycle_menus`/`overdue_menus` 검증 추가, 삭제된
+  `menu-plan/performance` 관련 테스트 5개 제거.
+- `pytest -q` — 557개 통과.
+- `npx tsc -b`·`npm run build` — 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB(`weekly_menu_plan`
+  251건, 2026-06-01~08-11) + PostgreSQL(로컬)로 검증(콘솔 에러
+  0건): (1) VOE 클러스터링 "이번 달 재계산"이 모의 응답 모드에서도
+  502 없이 200으로 성공(`clusters_created: 1`), (2) 저조 식수 재편성
+  규칙 라벨 클릭 시 3개 슬롯이 격자에서 동시 하이라이트되고 안내
+  문구("3개 슬롯이...")가 뜸(스크린샷 확인), (3) 코너별 분석 표가
+  토글 없이 바로 뜨고 기본 분류가 "평일"이며 "주간 평균 식수" 컬럼
+  숫자가 그럴듯함(한식 174명/5일×5=174명), (4) 메뉴 하이라이트에
+  키워드가 있는 캐시 행을 DB에 수동 삽입해 pill 스타일 태그(`양념`,
+  `짠맛`)가 정상 렌더됨을 확인, (5) "편성 빈도 × 성과 — 편성 주기
+  점검" 카드에 산점도 대신 "편성 주기가 짧은 메뉴"/"나올 때가 됐는데
+  안 나온 메뉴" 두 표가 뜨고, 삭제된 `GET /menu-plan/performance`
+  직접 호출 시 404 확인.
+- Alembic 마이그레이션(`9a3f7c1e2b6d`)을 로컬 개발 DB에 적용
+  확인(`llm_analysis_cache.keywords` 컬럼 생성).
+
+## 검증
+
+- `pytest -q` 전체 회귀(557개 통과).
+- `npm run build` 타입체크.
+- 위 Playwright 확인.
+- 문서화 후 커밋·푸시.

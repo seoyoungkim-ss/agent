@@ -66,6 +66,7 @@ def save_analysis(
     period_end: dt.date,
     summary: str,
     facts: dict,
+    keywords: list[str] | None = None,
 ) -> LlmAnalysisCache:
     row = LlmAnalysisCache(
         kind=kind,
@@ -73,6 +74,7 @@ def save_analysis(
         period_start=period_start,
         period_end=period_end,
         summary=summary,
+        keywords=keywords,
         facts_json=json.dumps(facts, ensure_ascii=False, default=str),
     )
     db.add(row)
@@ -170,7 +172,9 @@ def _build_menu_trend_prompt(facts: dict) -> str:
         "위 사실만 근거로 만족도가 왜 변했는지 한국어 두 문장 이내로 설명하세요. "
         "직원 코멘트가 있다면 그 내용을 우선 근거로 삼으세요. "
         "사실에 없는 내용은 절대 지어내지 마세요. 근거가 부족하면 "
-        "'뚜렷한 원인을 특정하기 어렵다'고 쓰세요."
+        "'뚜렷한 원인을 특정하기 어렵다'고 쓰세요. "
+        "설명 뒤 마지막 줄에 핵심 원인 관련 키워드 2~4개를 "
+        "'키워드: 키워드1, 키워드2' 형식으로 덧붙이세요(원인을 특정하기 어려우면 생략)."
     )
     return "\n".join(lines)
 
@@ -195,18 +199,34 @@ def _fallback_menu_trend_summary(facts: dict) -> str:
     return " ".join(parts)
 
 
-async def summarize_menu_trend(llm_client: InternalLLMClient, facts: dict) -> str:
-    """사실 dict → 한국어 설명. 실패해도 예외를 올리지 않는다."""
+def _parse_menu_trend_response(response: str) -> tuple[str, list[str]]:
+    """§86: 원인 설명 본문과 마지막 줄의 '키워드: ...'을 분리한다 —
+    _summarize_cluster(voe_clustering.py)와 같은 델리미터 텍스트 파싱 스타일."""
+    lines = response.strip().splitlines()
+    keywords: list[str] = []
+    body_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("키워드:"):
+            keywords = [k.strip() for k in stripped.split(":", 1)[1].split(",") if k.strip()]
+        else:
+            body_lines.append(line)
+    return "\n".join(body_lines).strip(), keywords
+
+
+async def summarize_menu_trend(llm_client: InternalLLMClient, facts: dict) -> tuple[str, list[str]]:
+    """사실 dict → (한국어 설명, 핵심 키워드). 실패해도 예외를 올리지 않는다."""
     if not llm_client.is_configured:
-        return _fallback_menu_trend_summary(facts)
+        return _fallback_menu_trend_summary(facts), []
     try:
-        summary = await llm_client.chat_complete(
+        response = await llm_client.chat_complete(
             [{"role": "user", "content": _build_menu_trend_prompt(facts)}]
         )
-        return summary.strip() or _fallback_menu_trend_summary(facts)
+        summary, keywords = _parse_menu_trend_response(response)
+        return (summary or _fallback_menu_trend_summary(facts)), keywords
     except Exception:
         logger.exception("메뉴 만족도 변화 원인 분석 실패 — 폴백 문구로 대체")
-        return _fallback_menu_trend_summary(facts)
+        return _fallback_menu_trend_summary(facts), []
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +384,7 @@ async def refresh_llm_analyses(
                 "prior_comments": _recent_comments_for_menu(db, menu_id, prior_week_date),
                 "recent_comments": _recent_comments_for_menu(db, menu_id, recent_week_date),
             }
-            summary = await summarize_menu_trend(llm_client, facts)
+            summary, keywords = await summarize_menu_trend(llm_client, facts)
             save_analysis(
                 db,
                 kind=KIND_MENU_TREND,
@@ -373,6 +393,7 @@ async def refresh_llm_analyses(
                 period_end=period_end,
                 summary=summary,
                 facts=facts,
+                keywords=keywords,
             )
             counts["menu_trend"] += 1
     except Exception:

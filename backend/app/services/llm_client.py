@@ -80,13 +80,28 @@ class InternalLLMClient:
 
     async def _mock_chat_stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-        reply = (
-            "[사내 LLM 미설정 — 모의 응답] "
-            f"'{last_user}' 에 대한 답변을 사내 LLM API 연동 후 실제로 제공할 수 있습니다. "
-            "INTERNAL_LLM_BASE_URL을 .env에 설정하세요(인증이 필요하면 INTERNAL_LLM_API_KEY도)."
-        )
+        if "번호:" in last_user and "대표코멘트:" in last_user:
+            # voe_clustering.py의 클러스터링 프롬프트 형식 — 배선 검증용으로 받은
+            # 항목 전체를 클러스터 하나로 묶어 파싱 가능한 모의 응답을 만든다.
+            reply = self._mock_cluster_reply(last_user)
+        else:
+            reply = (
+                "[사내 LLM 미설정 — 모의 응답] "
+                f"'{last_user}' 에 대한 답변을 사내 LLM API 연동 후 실제로 제공할 수 있습니다. "
+                "INTERNAL_LLM_BASE_URL을 .env에 설정하세요(인증이 필요하면 INTERNAL_LLM_API_KEY도)."
+            )
         for word in reply.split(" "):
             yield word + " "
+
+    def _mock_cluster_reply(self, prompt: str) -> str:
+        import re
+
+        items = re.findall(r"^(\d+)\.\s+(.*)$", prompt, flags=re.MULTILINE)
+        if not items:
+            return "라벨: 모의 클러스터\n키워드: 모의, 응답\n대표코멘트: 모의 응답\n번호: 1"
+        numbers = ",".join(idx for idx, _ in items)
+        representative = items[0][1]
+        return f"라벨: 모의 클러스터\n키워드: 모의, 응답\n대표코멘트: {representative}\n번호: {numbers}"
 
     def _mock_embedding(self, text: str) -> list[float]:
         # 재현 가능한 더미 임베딩(해시 기반) — 실제 의미 유사도는 없음, 배선 검증용.

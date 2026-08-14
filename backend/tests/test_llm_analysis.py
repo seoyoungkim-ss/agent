@@ -109,9 +109,10 @@ def test_saved_facts_are_round_trippable(db_session):
 @pytest.mark.asyncio
 async def test_menu_trend_falls_back_when_llm_not_configured():
     client = InternalLLMClient(Settings(internal_llm_base_url=""))
-    summary = await summarize_menu_trend(client, _facts())
+    summary, keywords = await summarize_menu_trend(client, _facts())
     assert "4.03" in summary and "4.27" in summary
     assert "미설정" in summary  # 모의 응답이 아니라 폴백임이 드러나야 한다
+    assert keywords == []
 
 
 @pytest.mark.asyncio
@@ -123,8 +124,36 @@ async def test_menu_trend_falls_back_when_llm_call_raises(monkeypatch):
         raise ConnectionError("사내 LLM 도달 불가")
 
     monkeypatch.setattr(client, "chat_complete", _boom)
-    summary = await summarize_menu_trend(client, _facts())
+    summary, keywords = await summarize_menu_trend(client, _facts())
     assert "4.03" in summary
+    assert keywords == []
+
+
+@pytest.mark.asyncio
+async def test_menu_trend_parses_keywords_from_last_line(monkeypatch):
+    client = InternalLLMClient(Settings(internal_llm_base_url="http://unreachable.invalid"))
+
+    async def _fake_reply(*_args, **_kwargs):
+        return "짠맛이 강해졌다는 의견이 많았습니다.\n키워드: 짠맛, 간, 양"
+
+    monkeypatch.setattr(client, "chat_complete", _fake_reply)
+    summary, keywords = await summarize_menu_trend(client, _facts())
+    assert "짠맛이 강해졌다" in summary
+    assert "키워드:" not in summary
+    assert keywords == ["짠맛", "간", "양"]
+
+
+@pytest.mark.asyncio
+async def test_menu_trend_keywords_empty_when_response_has_no_keyword_line(monkeypatch):
+    client = InternalLLMClient(Settings(internal_llm_base_url="http://unreachable.invalid"))
+
+    async def _fake_reply(*_args, **_kwargs):
+        return "뚜렷한 원인을 특정하기 어렵습니다."
+
+    monkeypatch.setattr(client, "chat_complete", _fake_reply)
+    summary, keywords = await summarize_menu_trend(client, _facts())
+    assert "특정하기 어렵습니다" in summary
+    assert keywords == []
 
 
 @pytest.mark.asyncio

@@ -114,6 +114,19 @@ function MenuTrendList({ rows, tone }: { rows: MenuTrendEntry[]; tone: "good" | 
               {r.cause}
             </p>
           ) : null}
+          {r.cause_keywords && r.cause_keywords.length > 0 ? (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {r.cause_keywords.map((k) => (
+                <span
+                  key={k}
+                  className="rounded-full border px-2 py-0.5 text-[11px]"
+                  style={{ borderColor: "var(--border)", background: "var(--surface-2)", color: "var(--ink-muted)" }}
+                >
+                  {k}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       ))}
     </div>

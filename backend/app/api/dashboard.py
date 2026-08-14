@@ -55,8 +55,40 @@ def _trend_cause(db: Session, menu_id: int) -> dict:
         return {}
     return {
         "cause": cached.summary,
+        "cause_keywords": cached.keywords or [],
         "cause_computed_at": cached.created_at.isoformat(),
     }
+
+
+def _no_intake_main_menus(db: Session, period_start: dt.date, period_end: dt.date) -> list[dict]:
+    """§86: 편성됐지만(MAIN) 그 기간 취식 기록이 0인 메뉴 — 예전엔
+    menu_plan_performance의 action == "취식 기록 없음" 항목을 재사용했지만,
+    그 엔드포인트가 편성 빈도×성과 재설계로 삭제돼 여기서 직접 계산한다.
+    """
+    plan_rows = (
+        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name)
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .filter(
+            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
+            WeeklyMenuPlan.plan_date.between(period_start, period_end),
+        )
+        .all()
+    )
+    plan_name_by_id = {menu_id: menu_name for menu_id, menu_name in plan_rows}
+    if not plan_name_by_id:
+        return []
+
+    log_start = dt.datetime.combine(period_start, dt.time())
+    log_end = dt.datetime.combine(period_end, dt.time()) + dt.timedelta(days=1)
+    logged_ids = {
+        menu_id
+        for (menu_id,) in db.query(MealLog.menu_id)
+        .filter(MealLog.eaten_at >= log_start, MealLog.eaten_at < log_end, MealLog.menu_id.in_(plan_name_by_id))
+        .distinct()
+        .all()
+    }
+    no_intake_ids = set(plan_name_by_id) - logged_ids
+    return [{"menu_name": plan_name_by_id[mid]} for mid in sorted(no_intake_ids, key=lambda mid: plan_name_by_id[mid])]
 
 
 def _collect_planning_facts(db: Session, period_start: dt.date, period_end: dt.date) -> list[str]:
@@ -64,22 +96,17 @@ def _collect_planning_facts(db: Session, period_start: dt.date, period_end: dt.d
 
     지연 임포트: analysis.py가 dashboard.py를 참조하지 않도록 호출 시점에 가져온다.
     """
-    from app.api.analysis import (
-        menu_plan_performance,
-        weekly_menu_combination_check,
-        weekly_menu_rotation,
-    )
+    from app.api.analysis import weekly_menu_combination_check, weekly_menu_rotation
 
     rotation = weekly_menu_rotation(period_start=period_start, period_end=period_end, db=db)
     clash = weekly_menu_combination_check(period_start=period_start, period_end=period_end, db=db)
-    performance = menu_plan_performance(period_start=period_start, period_end=period_end, db=db)
 
     clash_slots = [
         s
         for s in clash["slots"]
         if s["ingredient_clashes"] or s["vector_clashes"]
     ]
-    no_intake = [i for i in performance["items"] if i["action"] == "취식 기록 없음"]
+    no_intake = _no_intake_main_menus(db, period_start, period_end)
     return collect_planning_issues(
         overused=rotation["overused"],
         no_intake_menus=no_intake,
@@ -378,7 +405,7 @@ async def recompute_voe_by_category(period: dt.date, db: Session = Depends(get_d
 
 @router.post("/voe-clusters/recompute")
 async def recompute_voe_clusters(period: dt.date, db: Session = Depends(get_db)):
-    """그 달의 VOE 코멘트를 사내 LLM 임베딩+KMeans로 다시 클러스터링한다.
+    """그 달의 VOE 코멘트를 사내 LLM 채팅 그룹핑으로 다시 클러스터링한다.
 
     매달 새벽 스케줄러(app/scheduler.py)가 지난달치를 자동으로 돌리지만,
     voe-by-category/recompute와 마찬가지로 이번 달 데이터를 화면에서 바로
@@ -390,12 +417,12 @@ async def recompute_voe_clusters(period: dt.date, db: Session = Depends(get_db))
     try:
         clusters_created = await cluster_monthly_voe(db, period.replace(day=1), client)
     except Exception as exc:
-        # 이 경로는 사내 LLM 임베딩 게이트웨이 호출을 포함해 외부 의존성이
+        # 이 경로는 사내 LLM 채팅 게이트웨이 호출을 포함해 외부 의존성이
         # 많다 — 원인 불명 500 대신 어떤 예외였는지 detail에 남겨 디버깅
         # 가능하게 한다(2026-07, 500 에러 신고 조사 중 추가).
         raise HTTPException(
             status_code=502,
-            detail=f"VOE 클러스터링 실패(사내 LLM 임베딩/응답 오류 가능성): {exc}",
+            detail=f"VOE 클러스터링 실패(사내 LLM 채팅 응답 오류 가능성): {exc}",
         ) from exc
     return {"clusters_created": clusters_created}
 

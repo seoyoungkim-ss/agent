@@ -89,6 +89,7 @@ export interface CornerAnalysisRow {
   corner_name: string;
   is_diet_corner: boolean;
   headcount_total: number;
+  day_count: number;
   avg_taste_score: number | null;
   avg_peak_throughput_per_min: number | null;
 }
@@ -109,6 +110,7 @@ export interface MenuTrendEntry {
   prior_evaluation_count: number;
   // 새벽 배치가 미리 계산해 둔 만족도 변화 원인. 배치 전이거나 대상이 아니면 없다.
   cause?: string;
+  cause_keywords?: string[];
   cause_computed_at?: string;
 }
 
@@ -399,6 +401,22 @@ export interface MenuRotationRow {
   recent_avg_headcount: number | null;
 }
 
+export interface ShortCycleMenuRow {
+  corner_name: string;
+  menu_name: string;
+  avg_interval_days: number;
+  occurrence_count: number;
+  last_date: string;
+}
+
+export interface OverdueMenuRow {
+  corner_name: string;
+  menu_name: string;
+  avg_interval_days: number;
+  last_date: string;
+  days_since_last: number;
+}
+
 export interface MenuRotationResponse {
   period_start: string;
   period_end: string;
@@ -407,6 +425,10 @@ export interface MenuRotationResponse {
   rotation_window_days: number;
   items: MenuRotationRow[];
   overused: { menu_name: string; menu_role: string; count: number; dates: string[] }[];
+  // §86: 편성 빈도 × 성과 화면 전용 — MAIN 메뉴만, 메뉴 단위 랭킹(위 items는
+  // 인스턴스/슬롯 단위).
+  shortest_cycle_menus: ShortCycleMenuRow[];
+  overdue_menus: OverdueMenuRow[];
 }
 
 // 자주 반복되는 부찬 랭킹 — 담당자가 고른 임의 기간 하나로 코너 안 고유 날짜
@@ -503,6 +525,7 @@ export interface LowHeadcountViolation {
   menu_name: string;
   corner_name: string;
   recent_avg_headcount: number;
+  matches: MenuPlanRuleMatch[];
 }
 
 export interface WeeklyMenuPlanRuleCheckResponse {
@@ -549,34 +572,6 @@ export interface ComboSpreadResponse {
   corner_id: number | null;
   min_day_count: number;
   items: ComboSpreadRow[];
-}
-
-export type PlanningAction =
-  | "감편 검토"
-  | "증편 후보"
-  | "주력 유지"
-  | "현행 유지"
-  | "표본 부족"
-  | "취식 기록 없음";
-
-export interface PlanPerformanceRow {
-  menu_id: number;
-  menu_name: string;
-  plan_count: number;
-  total_headcount: number;
-  headcount_per_plan: number;
-  evaluation_count: number;
-  avg_satisfaction: number | null;
-  action: PlanningAction;
-}
-
-export interface PlanPerformanceResponse {
-  period_start: string;
-  period_end: string;
-  median_headcount_per_plan: number;
-  median_satisfaction: number;
-  items: PlanPerformanceRow[];
-  matching: { matched: number; plan_only: string[]; log_only: string[] };
 }
 
 export interface WeeklyMenuFeedbackRow {
@@ -867,13 +862,6 @@ export const api = {
     top_n?: number;
     corner_id?: number;
   }) => request<ComboSpreadResponse>(`/analysis/menu-combinations/spread-ranking${qs(params)}`),
-
-  menuPlanPerformance: (params: {
-    period_start: string;
-    period_end: string;
-    meal_type?: MealType;
-    corner_id?: number;
-  }) => request<PlanPerformanceResponse>(`/analysis/menu-plan/performance${qs(params)}`),
 
   weeklyMenuRotation: (params: { period_start: string; period_end: string; lookback_days?: number }) =>
     request<MenuRotationResponse>(`/analysis/weekly-menu/rotation${qs(params)}`),

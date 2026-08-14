@@ -59,7 +59,6 @@ from app.services.master_data import (
     TAKE_OUT_CORNER_NAME,
     find_menu_by_name,
 )
-from app.services.menu_name import pair_likely_same_menu
 from app.services.menu_performance import (
     classify_menu_loyalty,
     classify_menu_quadrant,
@@ -90,10 +89,6 @@ from app.services.weekly_menu_prediction import (
     compute_predicted_numbers_for_period,
 )
 from app.services.menu_clash import find_ingredient_clashes, find_vector_clashes
-from app.services.menu_plan_analytics import (
-    classify_planning_action,
-    median_or_zero,
-)
 from app.services.menu_plan_rules import (
     MenuPlanSlotItem,
     check_hangover_rule,
@@ -107,9 +102,11 @@ from app.services.menu_rotation import (
     classify_rotation,
     build_corner_menu_dates,
     count_in_window,
+    find_overdue_menus,
     find_overused_menus,
     is_over_frequency,
     max_in_window_for_role,
+    rank_by_shortest_cycle,
 )
 from app.services.weekly_menu_review import (
     add_feedback,
@@ -824,6 +821,10 @@ def corner_analysis(
                 "corner_name": corner.corner_name if corner else None,
                 "is_diet_corner": corner.is_diet_corner if corner else None,
                 "headcount_total": sum(s.headcount for s in stats),
+                # §86: 코너별 "주간 평균 식수"(평일 하루 평균 × 5)를 프론트에서
+                # 계산하려면 며칠치인지가 필요하다 — 이미 순회 중인 stats에서
+                # 고유 날짜 수만 세면 되므로 새 쿼리 불필요.
+                "day_count": len({s.stat_date for s in stats}),
                 "avg_taste_score": statistics.fmean(scores) if scores else None,
                 "avg_peak_throughput_per_min": statistics.fmean(throughputs) if throughputs else None,
             }
@@ -1701,8 +1702,27 @@ def weekly_menu_plan_rule_check(
         if avg is None:
             continue
         if avg <= 200:
+            # §86: 규칙 라벨 클릭 시 격자표 하이라이트를 위해 이 위반이 실제로
+            # 어느 요일·코너 슬롯에서 나왔는지 plan_rows를 다시 훑어 붙인다
+            # (main_candidates는 메뉴 단위로 dedupe돼 있어 plan_date/slot 정보가
+            # 없다 — 새 쿼리 없이 이미 가져온 plan_rows를 재사용).
+            matches = [
+                {
+                    "plan_date": plan_date.isoformat(),
+                    "corner_id": corner_id,
+                    "corner_name": c_name,
+                    "menu_name": m_name,
+                }
+                for m_id, menu_role, plan_date, corner_id, m_name, c_name in plan_rows
+                if m_id == menu_id and c_name == corner_name and menu_role == MenuRole.MAIN
+            ]
             low_headcount_violations.append(
-                {"menu_name": menu_name, "corner_name": corner_name, "recent_avg_headcount": round(avg, 1)}
+                {
+                    "menu_name": menu_name,
+                    "corner_name": corner_name,
+                    "recent_avg_headcount": round(avg, 1),
+                    "matches": matches,
+                }
             )
     low_headcount_violations.sort(key=lambda v: v["recent_avg_headcount"])
 
@@ -1901,6 +1921,15 @@ def weekly_menu_rotation(
     results.sort(key=lambda r: (flag_order.get(r["flag"], 9), r["plan_date"], r["corner_name"]))
 
     overused = find_overused_menus(planned_in_period)
+
+    # §86: "편성 빈도 × 성과"용 MAIN 전용 랭킹 — 이 화면은 처음부터 MAIN 메뉴만
+    # 다뤘으므로(기존 menu-plan/performance 엔드포인트도 MAIN 전용이었다), 부찬/
+    # 건강가든까지 섞인 위 dates_by_corner_menu와는 별개로 다시 빌드한다.
+    main_planned = [p for p in all_planned if p[3] == "메인"]
+    dates_by_corner_menu_main = build_corner_menu_dates(main_planned)
+    shortest_cycle_menus = rank_by_shortest_cycle(dates_by_corner_menu_main)[:10]
+    overdue_menus = find_overdue_menus(dates_by_corner_menu_main, as_of=period_end)
+
     return {
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
@@ -1917,6 +1946,26 @@ def weekly_menu_rotation(
                 "dates": [d.isoformat() for d in o.dates],
             }
             for o in overused
+        ],
+        "shortest_cycle_menus": [
+            {
+                "corner_name": s.corner_name,
+                "menu_name": s.menu_name,
+                "avg_interval_days": round(s.avg_interval_days, 1),
+                "occurrence_count": s.occurrence_count,
+                "last_date": s.last_date.isoformat(),
+            }
+            for s in shortest_cycle_menus
+        ],
+        "overdue_menus": [
+            {
+                "corner_name": o.corner_name,
+                "menu_name": o.menu_name,
+                "avg_interval_days": round(o.avg_interval_days, 1),
+                "last_date": o.last_date.isoformat(),
+                "days_since_last": o.days_since_last,
+            }
+            for o in overdue_menus
         ],
     }
 
@@ -2171,145 +2220,6 @@ def menu_affinity(
             status_code=404, detail=f"'{menu_name}' 메뉴의 취식 기록이 이 기간에 없습니다."
         )
     return [{"menu_name": r.menu_name, "co_count": r.co_count, "lift": r.lift} for r in results]
-
-
-@router.get("/menu-plan/performance")
-def menu_plan_performance(
-    period_start: dt.date,
-    period_end: dt.date,
-    meal_type: MealType | None = None,
-    corner_id: int | None = None,
-    db: Session = Depends(get_db),
-):
-    """편성 횟수 × 반응 — "다음 주 뭘 빼고 뭘 넣을까"에 답한다 (2026-08).
-
-    **메인메뉴만 본다.** 맛평가·취식 데이터는 그 사람이 고른 **메인** 기준이고
-    부찬은 취식 기록에 따로 안 남는다(담당자 확인) — 부찬을 넣으면 전부 취식 0이
-    되어 무의미하다.
-
-    기존 4분면(`/menu-performance`)과 결정적으로 다른 점: 저쪽 X축은 `meal_log`의
-    취식 발생 일수라 **편성했는데 아무도 안 먹은 메뉴가 아예 안 나타난다.**
-    여기선 `weekly_menu_plan` 기준이라 그게 보이고, 그게 가장 강한 감편 신호다.
-
-    응답의 `matching`은 식단표 메뉴명과 취식기록 메뉴명이 실제로 이어졌는지를
-    보여준다. 표기가 달라 매칭이 안 된 메뉴가 "아무도 안 먹은 메뉴"로 둔갑해
-    감편 리스트를 오염시키는 걸 담당자가 직접 걸러낼 수 있어야 한다.
-    """
-    plan_filters = [
-        WeeklyMenuPlan.menu_role == MenuRole.MAIN,
-        WeeklyMenuPlan.plan_date.between(period_start, period_end),
-    ]
-    if meal_type is not None:
-        plan_filters.append(WeeklyMenuPlan.meal_type == meal_type)
-    if corner_id is not None:
-        plan_filters.append(WeeklyMenuPlan.corner_id == corner_id)
-
-    plan_rows = (
-        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name, WeeklyMenuPlan.plan_date)
-        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
-        .filter(*plan_filters)
-        .all()
-    )
-    plan_count: dict[int, int] = {}
-    plan_name: dict[int, str] = {}
-    for menu_id, menu_name, _plan_date in plan_rows:
-        plan_count[menu_id] = plan_count.get(menu_id, 0) + 1
-        plan_name[menu_id] = menu_name
-
-    log_start = dt.datetime.combine(period_start, dt.time())
-    log_end = dt.datetime.combine(period_end, dt.time()) + dt.timedelta(days=1)
-    log_filters = [MealLog.eaten_at >= log_start, MealLog.eaten_at < log_end]
-    if meal_type is not None:
-        log_filters.append(MealLog.meal_type == meal_type)
-    if corner_id is not None:
-        log_filters.append(MealLog.corner_id == corner_id)
-    log_rows = (
-        db.query(MealLog.menu_id, MealLog.taste_score).filter(*log_filters).all()
-    )
-    headcount: dict[int, int] = {}
-    scores: dict[int, list[float]] = {}
-    for menu_id, taste_score in log_rows:
-        if menu_id is None:
-            continue
-        headcount[menu_id] = headcount.get(menu_id, 0) + 1
-        if taste_score is not None:
-            scores.setdefault(menu_id, []).append(TASTE_SCORE_POINTS[taste_score])
-
-    # §80: 기준선을 편성 횟수 대신 "1회 편성당 식수"의 그 기간 전체 중앙값으로
-    # 바꿨다(기존 4분면(aggregation.py)과 같은 "전체 중앙값 기준" 방식은 유지).
-    headcount_per_plan_by_menu = {
-        menu_id: (headcount.get(menu_id, 0) / count if count else 0.0) for menu_id, count in plan_count.items()
-    }
-    median_headcount_per_plan = median_or_zero(list(headcount_per_plan_by_menu.values()))
-    satisfaction_values = [
-        statistics.fmean(v) for v in scores.values() if v
-    ]
-    median_satisfaction = median_or_zero(satisfaction_values)
-
-    items = []
-    for menu_id, count in plan_count.items():
-        menu_scores = scores.get(menu_id, [])
-        avg_satisfaction = statistics.fmean(menu_scores) if menu_scores else None
-        total_headcount = headcount.get(menu_id, 0)
-        headcount_per_plan = headcount_per_plan_by_menu[menu_id]
-        action = classify_planning_action(
-            headcount_per_plan,
-            avg_satisfaction,
-            len(menu_scores),
-            total_headcount,
-            median_headcount_per_plan=median_headcount_per_plan,
-            median_satisfaction=median_satisfaction,
-        )
-        items.append(
-            {
-                "menu_id": menu_id,
-                "menu_name": plan_name[menu_id],
-                "plan_count": count,
-                "total_headcount": total_headcount,
-                "headcount_per_plan": round(headcount_per_plan, 1),
-                "evaluation_count": len(menu_scores),
-                "avg_satisfaction": round(avg_satisfaction, 2) if avg_satisfaction is not None else None,
-                "action": action.value,
-            }
-        )
-    items.sort(key=lambda r: (-r["headcount_per_plan"], r["menu_name"]))
-
-    # 매칭 진단 — 식단표 MAIN과 취식기록이 실제로 이어졌는지
-    planned_ids = set(plan_count)
-    logged_ids = {mid for mid in headcount if headcount[mid] > 0}
-    plan_only_ids = planned_ids - logged_ids
-    log_only_ids = logged_ids - planned_ids
-    log_only_names = {
-        m.menu_id: m.menu_name
-        for m in db.query(MenuMaster).filter(MenuMaster.menu_id.in_(log_only_ids)).all()
-    } if log_only_ids else {}
-
-    plan_only = sorted(plan_name[mid] for mid in plan_only_ids)
-    log_only = sorted(log_only_names.values())
-
-    # 표기만 달라 갈라진 짝을 미리 짚어준다(2026-08). 담당자가 두 목록을 눈으로
-    # 대조해 "연어파피요트"와 "연어 파피요트"를 찾아내야 했다 — 정규화하면 같아지는
-    # 이름끼리는 기계가 찾아주는 게 맞다.
-    likely_pairs = pair_likely_same_menu(plan_only, log_only)
-
-    return {
-        "period_start": period_start.isoformat(),
-        "period_end": period_end.isoformat(),
-        "median_headcount_per_plan": round(median_headcount_per_plan, 1),
-        "median_satisfaction": round(median_satisfaction, 2),
-        "items": items,
-        "matching": {
-            "matched": len(planned_ids & logged_ids),
-            # 편성됐는데 취식 0 — "진짜 아무도 안 먹음"과 "메뉴명이 안 맞아
-            # 매칭 실패"가 섞여 있으므로 목록째 넘겨 담당자가 판단하게 한다.
-            "plan_only": plan_only,
-            # 취식은 있는데 그 기간 식단표에 MAIN으로 없는 메뉴
-            "log_only": log_only,
-            # 양쪽에 있으면서 정규화하면 같아지는 짝 — 이름 표기 차이로 갈라진
-            # 것이고, merge_duplicate_menus로 합칠 수 있다.
-            "likely_same_menu": likely_pairs,
-        },
-    }
 
 
 @router.get("/menu-combinations/spread-ranking")

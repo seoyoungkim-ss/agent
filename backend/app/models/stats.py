@@ -212,6 +212,9 @@ class LlmAnalysisCache(Base):
     period_start: Mapped[dt.date] = mapped_column(Date)
     period_end: Mapped[dt.date] = mapped_column(Date)
     summary: Mapped[str] = mapped_column(Text)
+    # §86: menu_trend 원인 설명에서 핵심 키워드만 뽑아 태그로 보여주기 위한 컬럼
+    # (MonthlyVoeCluster.keywords와 동일 패턴). planning_notice는 채우지 않는다.
+    keywords: Mapped[list[str] | None] = mapped_column(ARRAY(String(64)), nullable=True)
     # LLM에 넘긴 사실 — 나중에 "왜 이런 설명이 나왔나"를 검증할 수 있게 남긴다.
     facts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow, index=True)

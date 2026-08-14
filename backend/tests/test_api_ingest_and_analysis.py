@@ -925,6 +925,28 @@ def test_corner_analysis_requires_daily_stats(client, db_session):
     assert hansik["headcount_total"] == 1
 
 
+def test_corner_analysis_reports_day_count_for_weekly_average(client, db_session):
+    """§86: 코너별 분석 "주간 평균 식수"(평일 하루 평균 × 5)를 프론트에서 내려면
+    코너별로 며칠치 통계인지가 필요하다."""
+    from app.services.aggregation import aggregate_daily_stats
+
+    _ingest_weekly_menu(client)
+    tuesday = MONDAY + dt.timedelta(days=1)
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY)
+    _ingest_meal_log(client, "E2", "맛남", eaten_date=tuesday)
+    aggregate_daily_stats(db_session, MONDAY)
+    aggregate_daily_stats(db_session, tuesday)
+
+    resp = client.get(
+        "/api/analysis/corners",
+        params={"period_start": MONDAY.isoformat(), "period_end": tuesday.isoformat()},
+    )
+    assert resp.status_code == 200
+    hansik = next(r for r in resp.json() if r["corner_name"] == "한식")
+    assert hansik["day_count"] == 2
+    assert hansik["headcount_total"] == 2
+
+
 def test_corner_analysis_merges_take_out_aliases_and_excludes_on_request(client, db_session):
     from app.services.aggregation import aggregate_daily_stats
 
@@ -2958,120 +2980,6 @@ def test_spread_ranking_skips_menus_with_single_scored_combo(client):
     assert [i["menu_name"] for i in resp.json()["items"]] == []
 
 
-def _plan_performance(client, **params):
-    resp = client.get("/api/analysis/menu-plan/performance", params=params)
-    assert resp.status_code == 200, resp.text
-    return resp.json()
-
-
-def test_plan_performance_shows_menus_that_were_planned_but_never_eaten(client):
-    """기존 4분면과의 결정적 차이 — 편성만 되고 취식 0인 메뉴가 보여야 한다.
-
-    /menu-performance의 X축은 meal_log의 취식 발생 일수라 이런 메뉴는 아예
-    나타나지 않는다. 그게 가장 강한 감편 신호인데 안 보이는 게 문제였다.
-    """
-    client.post(
-        "/api/ingest/weekly-menu",
-        json={
-            "rows": [
-                _plan_row(MONDAY, "제육볶음", "메인"),
-                _plan_row(MONDAY + dt.timedelta(days=1), "아무도안먹은메뉴", "메인"),
-            ]
-        },
-        headers=AUTH_HEADERS,
-    )
-    _ingest_meal_log(client, "E1", "맛남", corner_name="한식", menu_name="제육볶음")
-
-    data = _plan_performance(
-        client,
-        period_start=MONDAY.isoformat(),
-        period_end=(MONDAY + dt.timedelta(days=5)).isoformat(),
-    )
-    by_name = {i["menu_name"]: i for i in data["items"]}
-    assert "아무도안먹은메뉴" in by_name
-    assert by_name["아무도안먹은메뉴"]["total_headcount"] == 0
-    assert by_name["아무도안먹은메뉴"]["action"] == "취식 기록 없음"
-    # 매칭 진단에도 잡혀야 한다 — 이름 불일치인지 담당자가 확인할 수 있게
-    assert "아무도안먹은메뉴" in data["matching"]["plan_only"]
-    assert data["matching"]["matched"] == 1
-
-
-def test_plan_performance_excludes_side_dishes(client):
-    """취식 데이터가 메인 기준이라 부찬을 넣으면 전부 취식 0이 되어 무의미하다."""
-    client.post(
-        "/api/ingest/weekly-menu",
-        json={
-            "rows": [
-                _plan_row(MONDAY, "제육볶음", "메인"),
-                _plan_row(MONDAY, "계란후라이", "부찬"),
-            ]
-        },
-        headers=AUTH_HEADERS,
-    )
-    data = _plan_performance(
-        client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat()
-    )
-    assert [i["menu_name"] for i in data["items"]] == ["제육볶음"]
-
-
-def test_plan_performance_counts_plan_appearances_not_intake_days(client):
-    """편성 횟수는 식단표 기준 — 같은 날 여러 명이 먹어도 1회 편성이다."""
-    client.post(
-        "/api/ingest/weekly-menu",
-        json={
-            "rows": [
-                _plan_row(MONDAY, "돈까스", "메인"),
-                _plan_row(MONDAY + dt.timedelta(days=2), "돈까스", "메인"),
-            ]
-        },
-        headers=AUTH_HEADERS,
-    )
-    for i in range(4):
-        _ingest_meal_log(client, f"E{i}", "맛남", corner_name="한식", menu_name="돈까스")
-
-    data = _plan_performance(
-        client,
-        period_start=MONDAY.isoformat(),
-        period_end=(MONDAY + dt.timedelta(days=5)).isoformat(),
-    )
-    row = next(i for i in data["items"] if i["menu_name"] == "돈까스")
-    assert row["plan_count"] == 2  # 편성 2회
-    assert row["total_headcount"] == 4  # 취식 4건
-    assert row["headcount_per_plan"] == 2.0
-
-
-def test_plan_performance_response_exposes_median_headcount_per_plan(client):
-    """§80: X축이 '편성 횟수'에서 '1회 편성당 식수'로 바뀌면서 중앙값 필드명도
-    median_plan_count → median_headcount_per_plan으로 바뀌었다."""
-    client.post(
-        "/api/ingest/weekly-menu",
-        json={"rows": [_plan_row(MONDAY, "제육볶음", "메인")]},
-        headers=AUTH_HEADERS,
-    )
-    _ingest_meal_log(client, "E1", "맛남", corner_name="한식", menu_name="제육볶음")
-
-    data = _plan_performance(
-        client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat()
-    )
-    assert "median_headcount_per_plan" in data
-    assert "median_plan_count" not in data
-
-
-def test_plan_performance_reports_log_only_menus(client):
-    """취식은 있는데 그 기간 식단표에 MAIN으로 없는 메뉴도 알려준다."""
-    client.post(
-        "/api/ingest/weekly-menu",
-        json={"rows": [_plan_row(MONDAY, "제육볶음", "메인")]},
-        headers=AUTH_HEADERS,
-    )
-    _ingest_meal_log(client, "E1", "맛남", corner_name="한식", menu_name="식단표에없는메뉴")
-
-    data = _plan_performance(
-        client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat()
-    )
-    assert "식단표에없는메뉴" in data["matching"]["log_only"]
-
-
 def test_request_scoped_caches_do_not_leak_across_requests(client):
     """성능용 세션 캐시(db.info)가 요청 경계를 넘어 오래된 값을 주면 안 된다.
 
@@ -3253,6 +3161,43 @@ def test_rotation_frequency_threshold_is_looser_for_side_dishes(client):
     assert item["window_count"] == 3
     assert item["window_max"] == 6
     assert item["over_frequency"] is False
+
+
+def test_weekly_menu_rotation_reports_shortest_cycle_menus(client):
+    """§86: 편성 빈도×성과 재설계 — 메인메뉴 중 평균 편성 주기가 짧은 순으로
+    랭킹한 shortest_cycle_menus가 응답에 있어야 한다."""
+    rows = [
+        _plan_row(MONDAY - dt.timedelta(days=14), "새우까스", "메인"),
+        _plan_row(MONDAY - dt.timedelta(days=7), "새우까스", "메인"),
+        _plan_row(MONDAY, "새우까스", "메인"),  # 평균 7일 주기
+        _plan_row(MONDAY - dt.timedelta(days=60), "갈비탕", "메인"),
+        _plan_row(MONDAY, "갈비탕", "메인"),  # 평균 60일 주기
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    names = [r["menu_name"] for r in data["shortest_cycle_menus"]]
+    assert names.index("새우까스") < names.index("갈비탕")
+    shortest = next(r for r in data["shortest_cycle_menus"] if r["menu_name"] == "새우까스")
+    assert shortest["avg_interval_days"] == 7.0
+    assert shortest["occurrence_count"] == 3
+
+
+def test_weekly_menu_rotation_reports_overdue_menus(client):
+    """§86: 평균 주기 대비 한참 안 나온(나올 때가 됐는데 안 나온) 메뉴는
+    이 기간에 재편성된 행이 하나도 없어도 overdue_menus에 잡혀야 한다 —
+    items(요일별 재편성 판정)는 이 기간에 재편성된 행만 훑기 때문에 이 메뉴를
+    구조적으로 담을 수 없다."""
+    rows = [
+        _plan_row(MONDAY - dt.timedelta(days=120), "오래된메뉴", "메인"),
+        _plan_row(MONDAY - dt.timedelta(days=100), "오래된메뉴", "메인"),  # 평균 20일 주기
+    ]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
+    assert "오래된메뉴" not in {i["menu_name"] for i in data["items"]}
+    overdue = next(r for r in data["overdue_menus"] if r["menu_name"] == "오래된메뉴")
+    assert overdue["avg_interval_days"] == 20.0
+    assert overdue["days_since_last"] == 100
+    assert overdue["last_date"] == (MONDAY - dt.timedelta(days=100)).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -3944,6 +3889,34 @@ def test_weekly_menu_plan_rule_check_flags_low_headcount_reuse_except_exempt_cor
     names = {v["menu_name"] for v in body["low_headcount_reuse"]["violations"]}
     assert "고기전골" in names
     assert "미캠전골" not in names
+
+
+def test_weekly_menu_plan_rule_check_low_headcount_violations_carry_grid_matches(client):
+    """§86: 저조 식수 재편성 위반을 클릭하면 주간 식단표 격자에서 그 슬롯을
+    하이라이트할 수 있어야 한다 — 위반 항목마다 plan_date/corner_id가 붙은
+    matches 목록이 있어야 한다."""
+    history_end = MONDAY - dt.timedelta(days=1)
+    history_days = [history_end - dt.timedelta(days=i) for i in range(5)]
+    for i, d in enumerate(history_days):
+        _ingest_meal_log(client, f"L{i}", "맛남", eaten_date=d, menu_name="고기전골", corner_name="한식")
+
+    rows = [_plan_row(MONDAY, "고기전골", "메인", corner_name="한식")]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/plan-rule-check",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=4)).isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    violations = resp.json()["low_headcount_reuse"]["violations"]
+    target = next(v for v in violations if v["menu_name"] == "고기전골")
+    assert len(target["matches"]) == 1
+    match = target["matches"][0]
+    assert match["plan_date"] == MONDAY.isoformat()
+    assert match["corner_name"] == "한식"
+    assert match["menu_name"] == "고기전골"
+    assert isinstance(match["corner_id"], int)
 
 
 def test_recompute_llm_analyses_populates_menu_highlight_cause(client):

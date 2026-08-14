@@ -5,6 +5,7 @@ import clsx from "clsx";
 import {
   api,
   type Classification,
+  type CornerAnalysisRow,
   type DailyMenuPlanRuleResult,
   type MealType,
   type MenuFoodVectorRow,
@@ -127,8 +128,10 @@ function useLightTextOn(bgRgb: [number, number, number] | undefined): boolean {
 // 현황(HomePage)으로 옮겼다. 그래서 탭이 아니라 export되는 섹션 컴포넌트다.
 // §85: 추이 그래프(지표 선택형 듀얼축)는 지우고 표만 남긴다 — 컬럼별 정렬 가능.
 export function CornerMetricComparisonSection() {
-  const [classification, setClassification] = useState<Classification | "전체">("전체");
-  const [showCornerTable, setShowCornerTable] = useState(false);
+  // §86: 주말에 운영 안 하는 코너가 있어 "평일 기준"이 기본이 더 유용하다는
+  // 피드백 — 기본값만 평일로 바꾸고, 다른 분류도 SegmentedControl로 볼 수 있게
+  // 그대로 둔다.
+  const [classification, setClassification] = useState<Classification | "전체">("평일");
   const [sortKey, setSortKey] = useState<"corner" | "headcount" | "score" | "throughput">("headcount");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   function toggleSort(key: typeof sortKey) {
@@ -153,12 +156,18 @@ export function CornerMetricComparisonSection() {
     onSuccess: () => query.refetch(),
   });
 
+  // §86: "누적 식수" 대신 "이 코너가 평일 페이스를 유지한다면 한 주에 낼
+  // 식수" 추정치(평일 하루 평균 × 5)를 보여준다 — day_count는 조회 기간·
+  // classification 필터가 이미 적용된 뒤의 실제 통계 일수다.
+  const weeklyAvg = (row: CornerAnalysisRow) =>
+    row.day_count > 0 ? Math.round((row.headcount_total / row.day_count) * 5) : null;
+
   const sortedCornerRows = [...(query.data ?? [])].sort((a, b) => {
     const dir = sortDir === "asc" ? 1 : -1;
     if (sortKey === "corner") return a.corner_name.localeCompare(b.corner_name) * dir;
     const metricValue = (row: typeof a) =>
       sortKey === "headcount"
-        ? row.headcount_total
+        ? (weeklyAvg(row) ?? -Infinity)
         : sortKey === "score"
           ? (row.avg_taste_score ?? -Infinity)
           : (row.avg_peak_throughput_per_min ?? -Infinity);
@@ -194,57 +203,50 @@ export function CornerMetricComparisonSection() {
           </div>
         )}
         {query.data && query.data.length > 0 && (
-          <div className="mt-4">
-            <Button variant="secondary" onClick={() => setShowCornerTable((v) => !v)}>
-              {showCornerTable ? "표 숨기기" : "표로 보기"}
-            </Button>
-            {showCornerTable && (
-              <div className="mt-3 overflow-x-auto">
-                <table className="w-full text-[13px]" style={{ color: "var(--ink)" }}>
-                  <thead>
-                    <tr>
-                      <SortableHeader
-                        label="코너"
-                        active={sortKey === "corner"}
-                        dir={sortDir}
-                        onClick={() => toggleSort("corner")}
-                      />
-                      <SortableHeader
-                        label="누적 식수"
-                        active={sortKey === "headcount"}
-                        dir={sortDir}
-                        align="right"
-                        onClick={() => toggleSort("headcount")}
-                      />
-                      <SortableHeader
-                        label="평균 만족도"
-                        active={sortKey === "score"}
-                        dir={sortDir}
-                        align="right"
-                        onClick={() => toggleSort("score")}
-                      />
-                      <SortableHeader
-                        label="피크타임 분당 서브"
-                        active={sortKey === "throughput"}
-                        dir={sortDir}
-                        align="right"
-                        onClick={() => toggleSort("throughput")}
-                      />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedCornerRows.map((c) => (
-                      <tr key={c.corner_name} className="border-b" style={{ borderColor: "var(--border)" }}>
-                        <td className="py-2 pr-4">{c.corner_name}</td>
-                        <td className="py-2 pr-4 text-right">{c.headcount_total.toLocaleString()}</td>
-                        <td className="py-2 pr-4 text-right">{c.avg_taste_score?.toFixed(2) ?? "-"}</td>
-                        <td className="py-2 pr-4 text-right">{c.avg_peak_throughput_per_min?.toFixed(2) ?? "-"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full text-[13px]" style={{ color: "var(--ink)" }}>
+              <thead>
+                <tr>
+                  <SortableHeader
+                    label="코너"
+                    active={sortKey === "corner"}
+                    dir={sortDir}
+                    onClick={() => toggleSort("corner")}
+                  />
+                  <SortableHeader
+                    label="주간 평균 식수"
+                    active={sortKey === "headcount"}
+                    dir={sortDir}
+                    align="right"
+                    onClick={() => toggleSort("headcount")}
+                  />
+                  <SortableHeader
+                    label="평균 만족도"
+                    active={sortKey === "score"}
+                    dir={sortDir}
+                    align="right"
+                    onClick={() => toggleSort("score")}
+                  />
+                  <SortableHeader
+                    label="피크타임 분당 서브"
+                    active={sortKey === "throughput"}
+                    dir={sortDir}
+                    align="right"
+                    onClick={() => toggleSort("throughput")}
+                  />
+                </tr>
+              </thead>
+              <tbody>
+                {sortedCornerRows.map((c) => (
+                  <tr key={c.corner_name} className="border-b" style={{ borderColor: "var(--border)" }}>
+                    <td className="py-2 pr-4">{c.corner_name}</td>
+                    <td className="py-2 pr-4 text-right">{weeklyAvg(c)?.toLocaleString() ?? "-"}</td>
+                    <td className="py-2 pr-4 text-right">{c.avg_taste_score?.toFixed(2) ?? "-"}</td>
+                    <td className="py-2 pr-4 text-right">{c.avg_peak_throughput_per_min?.toFixed(2) ?? "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </Card>
@@ -1596,19 +1598,52 @@ function WeeklyMenuReviewTab() {
             {renderDailyRuleRow("면류 (하루 최대 4개)", ruleCheckQuery.data.noodle)}
             {renderDailyRuleRow("매운(빨간국물) (하루 최대 4개)", ruleCheckQuery.data.spicy_red_broth)}
             <div className="mt-2 flex items-center gap-2 text-[13px]">
-              <span className="font-medium">최근 저조 식수(200식 이하) 재편성</span>
+              {(() => {
+                const allLowHeadcountMatches = ruleCheckQuery.data.low_headcount_reuse.violations.flatMap(
+                  (v) => v.matches
+                );
+                return (
+                  <button
+                    className="font-medium underline decoration-dotted disabled:no-underline disabled:cursor-default"
+                    style={{ color: allLowHeadcountMatches.length > 0 ? "var(--accent)" : undefined }}
+                    onClick={() => selectRuleMatches(allLowHeadcountMatches)}
+                    disabled={allLowHeadcountMatches.length === 0}
+                    title={
+                      allLowHeadcountMatches.length > 0
+                        ? "클릭하면 이번 주 위반 전체를 격자에서 하이라이트합니다"
+                        : undefined
+                    }
+                  >
+                    최근 저조 식수(200식 이하) 재편성
+                  </button>
+                );
+              })()}
               <Badge
                 tone={ruleCheckQuery.data.low_headcount_reuse.ok ? "good" : "critical"}
                 label={`${ruleCheckQuery.data.low_headcount_reuse.violations.length}건`}
               />
             </div>
             {!ruleCheckQuery.data.low_headcount_reuse.ok && (
-              <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                재편성 권장 안 함:{" "}
-                {ruleCheckQuery.data.low_headcount_reuse.violations
-                  .map((v) => `${v.menu_name}(${v.corner_name}, 최근 평균 ${v.recent_avg_headcount}식)`)
-                  .join(", ")}
-              </p>
+              <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                {ruleCheckQuery.data.low_headcount_reuse.violations.map((v, vi) =>
+                  v.matches.length > 0 ? (
+                    v.matches.map((m, mi) => (
+                      <button
+                        key={`${vi}_${mi}`}
+                        className="underline"
+                        style={{ color: "var(--accent)" }}
+                        onClick={() => selectSlot(`${m.plan_date}_${m.corner_id}`)}
+                      >
+                        {v.menu_name}({v.corner_name}, 최근 평균 {v.recent_avg_headcount}식, {m.plan_date.slice(5)})
+                      </button>
+                    ))
+                  ) : (
+                    <span key={vi} style={{ color: "var(--ink-muted)" }}>
+                      {v.menu_name}({v.corner_name}, 최근 평균 {v.recent_avg_headcount}식)
+                    </span>
+                  )
+                )}
+              </div>
             )}
           </div>
         )}
@@ -2949,164 +2984,32 @@ function MenuDuplicationCheckSection() {
   );
 }
 
-const PLANNING_ACTION_COLOR: Record<string, string> = {
-  "감편 검토": "var(--critical)",
-  "증편 후보": "var(--good)",
-  "주력 유지": "var(--accent)",
-  "취식 기록 없음": "var(--warning)",
-};
-
-/**
- * 편성 빈도 × 성과 — "다음 주 뭘 빼고 뭘 넣을까".
- * 기존 4분면(/menu-performance)의 X축은 meal_log의 취식 발생 일수라 편성만 되고
- * 아무도 안 먹은 메뉴가 아예 안 나타난다. 이 화면은 weekly_menu_plan 기준이라
- * 그게 보이고, 그게 가장 강한 감편 신호다(2026-08).
- */
-// §81: "편성됐지만 취식 기록이 0인 메뉴" 목록이 이 파일에서 유일하게
-// 미리보기 상한이 없어 길어지면 다 펼쳐졌다 — 다른 섹션과 같은 패턴 적용.
-const NO_INTAKE_PREVIEW_COUNT = 12;
+// §86: "편성 빈도 × 성과"가 만족도·VoE 탭의 "메뉴별 분석"(4분면, 취식 데이터
+// 기준 만족도×수요)과 겹쳐 보인다는 피드백 — 산점도/감편·증편 4분류는 완전히
+// 지우고, 편성 주기 자체에 집중한 두 리스트로 바꾼다: 그 메뉴의 평균 편성
+// 주기가 원래 짧은 메뉴, 그리고 평균 주기 대비 한참 안 나온(나올 때가 됐는데
+// 안 나온) 메뉴. 둘 다 weekly_menu_plan(편성 이력) 기준이라 "재편성 점검"
+// 탭(RotationCheckPanel)과 데이터 소스는 같지만, 그쪽은 "이번에 재편성된 게
+// 얼마나 일렀나"(인스턴스 단위)를 보고 이 화면은 "그 메뉴 자체의 평균 주기가
+// 짧은지" / "아예 재편성이 안 됐는지"(메뉴 단위)를 본다 — 서로 다른 질문이라
+// 중복이 아니다.
+const OVERDUE_PREVIEW_COUNT = 12;
 
 function MenuPlanPerformanceSection() {
   const { days, setDays, periodStart, periodEnd } = usePlanPeriod();
-  const chartTheme = useChartTheme();
-  const [showAllNoIntake, setShowAllNoIntake] = useState(false);
+  const [showAllOverdue, setShowAllOverdue] = useState(false);
   const query = useQuery({
-    queryKey: ["menu-plan-performance", periodStart, periodEnd],
-    queryFn: () => api.menuPlanPerformance({ period_start: periodStart, period_end: periodEnd }),
+    queryKey: ["menu-plan-rotation-frequency", periodStart, periodEnd],
+    queryFn: () => api.weeklyMenuRotation({ period_start: periodStart, period_end: periodEnd }),
   });
 
-  const items = query.data?.items ?? [];
-  // §80: X축을 "편성 횟수"에서 "1회 편성당 식수"로 바꿨다(담당자: "편성 횟수는
-  // 불필요") — 편성 횟수는 축에서 빠지지만 버블 크기로는 계속 보인다.
-  const medianHeadcountPerPlan = query.data?.median_headcount_per_plan ?? 0;
-  const medianScore = query.data?.median_satisfaction ?? 0;
-  const maxPlanCount = Math.max(1, ...items.map((r) => r.plan_count));
-
-  // 판정별로 시리즈를 나눈다 — 그래야 범례가 생기고, 범례를 눌러 한 분류만
-  // 골라 볼 수 있다. 예전엔 시리즈 하나에 색만 달라서 "이 색이 무슨 뜻인지"를
-  // 알 방법이 없었다(2026-08 "그래프가 직관적이지 않음" 피드백).
-  const PLOTTED_ACTIONS = ["감편 검토", "증편 후보", "주력 유지", "현행 유지"] as const;
-  const actionSeries = PLOTTED_ACTIONS.map((action) => ({
-    name: action,
-    type: "scatter" as const,
-    itemStyle: { color: resolveColor(PLANNING_ACTION_COLOR[action] ?? "var(--ink-muted)") },
-    symbolSize: (v: number[]) => 8 + Math.sqrt(v[2] / maxPlanCount) * 22,
-    // 점마다 메뉴명을 상시 표시하고 겹치면 자동으로 비킨다 — 4분면 차트(§42)와
-    // 같은 처리라 두 화면의 조작감이 같다.
-    // formatter를 안 주면 ECharts가 값(숫자)을 찍는다 — 메뉴명이 나와야 한다.
-    label: {
-      show: true,
-      position: "right" as const,
-      color: chartTheme.text,
-      fontSize: 11,
-      formatter: (p: { name: string }) => p.name,
-    },
-    labelLayout: { moveOverlap: "shiftY" as const, hideOverlap: true },
-    data: items
-      .filter((r) => r.action === action && r.avg_satisfaction != null)
-      .map((r) => ({
-        name: r.menu_name,
-        value: [r.headcount_per_plan, r.avg_satisfaction as number, r.plan_count],
-      })),
-  })).filter((serie) => serie.data.length > 0);
-
-  // 사분면 배경 음영 + 모서리 이름. 중앙값 십자선만 있으면 "어느 쪽이 감편인지"를
-  // 매번 머리로 계산해야 한다.
-  const maxHeadcountPerPlan = Math.max(
-    medianHeadcountPerPlan * 2,
-    ...items.map((r) => r.headcount_per_plan),
-    1,
-  );
-  const quadrantMarkArea = {
-    silent: true,
-    itemStyle: { opacity: 0.06 },
-    label: {
-      show: true,
-      position: "inside" as const,
-      color: chartTheme.text,
-      fontSize: 11,
-      opacity: 0.9,
-    },
-    data: [
-      // 1회당 식수 많음 + 반응 낮음 → 감편
-      [
-        { xAxis: medianHeadcountPerPlan, yAxis: 0, itemStyle: { color: resolveColor("var(--critical)") },
-          label: { formatter: "감편 검토\n(식수 많은데 반응 낮음)", position: "insideBottomRight" as const } },
-        { xAxis: maxHeadcountPerPlan, yAxis: medianScore },
-      ],
-      // 1회당 식수 적음 + 반응 높음 → 증편
-      [
-        { xAxis: 0, yAxis: medianScore, itemStyle: { color: resolveColor("var(--good)") },
-          label: { formatter: "증편 후보\n(식수 적은데 반응 좋음)", position: "insideTopLeft" as const } },
-        { xAxis: medianHeadcountPerPlan, yAxis: 5 },
-      ],
-      // 많음 + 높음 → 주력 유지
-      [
-        { xAxis: medianHeadcountPerPlan, yAxis: medianScore, itemStyle: { color: resolveColor("var(--accent)") },
-          label: { formatter: "주력 유지", position: "insideTopRight" as const } },
-        { xAxis: maxHeadcountPerPlan, yAxis: 5 },
-      ],
-    ],
-  };
-
-  const option = {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 56, right: 40, top: 44, bottom: 48 },
-    legend: { top: 0, textStyle: { color: chartTheme.text } },
-    tooltip: {
-      trigger: "item",
-      formatter: (p: { name: string; value: number[]; seriesName: string }) =>
-        `${p.name} · ${p.seriesName}<br/>1회 편성당 ${p.value[0]}명 · 만족도 ${p.value[1].toFixed(2)}` +
-        `<br/>편성 ${p.value[2]}회 (점 크기)`,
-    },
-    xAxis: {
-      type: "value",
-      name: "1회 편성당 식수 →",
-      nameLocation: "middle",
-      nameGap: 28,
-      min: 0,
-      axisLabel: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-    },
-    yAxis: {
-      type: "value",
-      name: "만족도",
-      min: 0,
-      max: 5,
-      axisLabel: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-    },
-    series: [
-      ...actionSeries,
-      {
-        // 사분면 배경 + 중앙값 십자선 전용(데이터 없는 시리즈) — 각 산점도
-        // 시리즈에 붙이면 분류 수만큼 겹쳐 그려진다.
-        name: "기준선",
-        type: "scatter" as const,
-        data: [],
-        silent: true,
-        markArea: quadrantMarkArea,
-        markLine: {
-          silent: true,
-          symbol: "none" as const,
-          lineStyle: { color: chartTheme.axis, type: "dashed" as const },
-          label: { color: chartTheme.text, fontSize: 10, position: "insideEndTop" as const },
-          data: [
-            { xAxis: medianHeadcountPerPlan, label: { formatter: "1회당 식수 중앙값" } },
-            { yAxis: medianScore, label: { formatter: "만족도 중앙값" } },
-          ],
-        },
-      },
-    ],
-  };
-
-  const actionRows = items.filter((r) => r.action === "감편 검토" || r.action === "증편 후보");
-  const noIntake = items.filter((r) => r.action === "취식 기록 없음");
+  const shortestCycleMenus = query.data?.shortest_cycle_menus ?? [];
+  const overdueMenus = query.data?.overdue_menus ?? [];
 
   return (
-    <Card title="편성 빈도 × 성과 — 다음 주 편성 조정">
+    <Card title="편성 빈도 × 성과 — 편성 주기 점검">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        <strong>1회 편성당 식수</strong> × 만족도. 점 크기는 편성 횟수, 기준선은 기간 중앙값입니다(메인메뉴만).
+        메인메뉴 기준, 그 메뉴 자체의 평균 편성 주기로 봅니다.
       </p>
       <div className="mb-3 flex flex-wrap items-center gap-3">
         <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3117,83 +3020,65 @@ function MenuPlanPerformanceSection() {
 
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} />}
-      {query.data && items.length === 0 && (
+      {query.data && shortestCycleMenus.length === 0 && overdueMenus.length === 0 && (
         <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          이 기간에 등록된 식단표가 없습니다.
+          이 기간에 판정할 만한 편성 이력이 없습니다.
         </p>
       )}
 
-      {query.data && items.length > 0 && (
-        <>
-          <div
-            className="mb-3 rounded-md border p-2 text-xs"
-            style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
-          >
-            식단표↔취식기록 매칭: 이어진 메뉴 {query.data.matching.matched}개 · 편성만 되고 취식 0인 메뉴{" "}
-            {query.data.matching.plan_only.length}개 · 취식만 있고 식단표에 없는 메뉴{" "}
-            {query.data.matching.log_only.length}개.{" "}
-            <strong>취식 0은 진짜 안 팔린 것일 수도, 메뉴명 표기가 달라 매칭이 안 된 것일 수도</strong>{" "}
-            있으니 아래 목록에서 확인하세요.
-          </div>
-          {actionSeries.length > 0 && <ReactECharts option={option} style={{ height: 400 }} />}
+      {query.data && shortestCycleMenus.length > 0 && (
+        <div className="mb-4">
+          <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+            편성 주기가 짧은 메뉴 (평균 주기 짧은 순)
+          </p>
+          <Table
+            columns={[
+              { key: "menu", label: "메뉴(코너)" },
+              { key: "interval", label: "평균 주기", align: "right" },
+              { key: "count", label: "편성 횟수", align: "right" },
+              { key: "last", label: "최근 편성일", align: "right" },
+            ]}
+            rows={shortestCycleMenus.map((r) => ({
+              menu: `${r.menu_name} (${r.corner_name})`,
+              interval: `${r.avg_interval_days}일`,
+              count: `${r.occurrence_count}회`,
+              last: r.last_date.slice(5),
+            }))}
+            rowKey={(r) => r.menu as string}
+          />
+        </div>
+      )}
 
-          {actionRows.length > 0 && (
-            <div className="mt-4">
-              <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-                편성 조정 후보
-              </p>
-              <Table
-                columns={[
-                  { key: "menu", label: "메뉴" },
-                  { key: "action", label: "판정" },
-                  { key: "plans", label: "편성", align: "right" },
-                  { key: "score", label: "만족도", align: "right" },
-                  { key: "perPlan", label: "1회당 식수", align: "right" },
-                ]}
-                rows={actionRows.map((r) => ({
-                  menu: r.menu_name,
-                  action: (
-                    <span style={{ color: PLANNING_ACTION_COLOR[r.action] ?? "var(--ink-muted)" }}>
-                      {r.action}
-                    </span>
-                  ),
-                  plans: `${r.plan_count}회`,
-                  score: r.avg_satisfaction?.toFixed(2) ?? "-",
-                  perPlan: `${r.headcount_per_plan}명`,
-                }))}
-                rowKey={(r) => r.menu as string}
-              />
-            </div>
+      {query.data && overdueMenus.length > 0 && (
+        <div>
+          <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+            나올 때가 됐는데 안 나온 메뉴 (평균 주기 대비 오래 안 나온 순)
+          </p>
+          <Table
+            columns={[
+              { key: "menu", label: "메뉴(코너)" },
+              { key: "interval", label: "평균 주기", align: "right" },
+              { key: "last", label: "마지막 편성일", align: "right" },
+              { key: "since", label: "경과일", align: "right" },
+            ]}
+            rows={(showAllOverdue ? overdueMenus : overdueMenus.slice(0, OVERDUE_PREVIEW_COUNT)).map((r) => ({
+              menu: `${r.menu_name} (${r.corner_name})`,
+              interval: `${r.avg_interval_days}일`,
+              last: r.last_date.slice(5),
+              since: `${r.days_since_last}일`,
+            }))}
+            rowKey={(r) => r.menu as string}
+          />
+          {overdueMenus.length > OVERDUE_PREVIEW_COUNT && (
+            <button
+              className="mt-2 text-xs underline"
+              style={{ color: "var(--accent)" }}
+              onClick={() => setShowAllOverdue((v) => !v)}
+            >
+              {showAllOverdue ? "접기" : `전체 ${overdueMenus.length}개 보기`}
+            </button>
           )}
-
-          {noIntake.length > 0 && (
-            <div className="mt-4 border-t pt-3" style={{ borderColor: "var(--border)" }}>
-              <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-                편성됐지만 취식 기록이 0인 메뉴 — 메뉴명 표기 불일치를 먼저 확인하세요.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {(showAllNoIntake ? noIntake : noIntake.slice(0, NO_INTAKE_PREVIEW_COUNT)).map((r) => (
-                  <span
-                    key={r.menu_id}
-                    className="rounded-md border px-2 py-1 text-xs"
-                    style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
-                  >
-                    {r.menu_name} · {r.plan_count}회 편성
-                  </span>
-                ))}
-              </div>
-              {noIntake.length > NO_INTAKE_PREVIEW_COUNT && (
-                <button
-                  className="mt-2 text-xs underline"
-                  style={{ color: "var(--accent)" }}
-                  onClick={() => setShowAllNoIntake((v) => !v)}
-                >
-                  {showAllNoIntake ? "접기" : `전체 ${noIntake.length}개 보기`}
-                </button>
-              )}
-            </div>
-          )}
-        </>
+        </div>
       )}
     </Card>
   );
