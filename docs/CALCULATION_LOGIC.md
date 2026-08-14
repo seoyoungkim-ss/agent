@@ -6924,3 +6924,127 @@ Playwright 스크립트가 처음에 서로 다른 입력을 헷갈렸을 만큼
 - `npx tsc -b` + `npx vite build` 클린.
 - 위 Playwright 확인.
 - 문서화(§91) 후 커밋·푸시.
+
+# §92. 홈 상단 스탯타일 4개 교체 — 금일 식수/맛평가 + 금주 VOE + 편성 규칙 이상 여부 (2026-08)
+
+## Context
+
+담당자 요청(원문): "현황 4개 카드에 금일식수(일주일간일평균식수) 금일맛평가점수
+(일주일간 일평균점수) 금주 메뉴과거 VoE 금주 메뉴 편성 규칙 이상 여부 이거로
+바꿔줘." 기존 4개 스탯타일(선택한 주의 누적 식수 / 최근 7일 식수 / 최고 식수
+코너·메뉴 / 금주 메뉴 과거 VOE) 중 "금주 메뉴 과거 VOE"만 그대로 남기고
+나머지 셋을 교체한다.
+
+"금일 식수"/"금일 맛평가 점수"는 **오늘** 값이 필요한데, 기존
+`daily_corner_stats`(나이트 배치)는 어제까지만 채워져 있어(§22/§45/§91에서
+반복 확인된 문제) 그대로 쓰면 항상 0/공백으로 보인다 — `headcount_trend`가
+이미 같은 이유로 meal_log를 그때그때 집계하는 방식을 쓰고 있어, 이번에도
+같은 패턴을 새 전용 엔드포인트에 적용한다.
+
+"최고 식수 코너/메뉴" 타일이 빠지면서, 그 타일 전용이었던
+`weekly_menu_planned_headcount_ranking`(§80에서 추가, 이번 주 편성된
+MAIN 슬롯을 실측 평균 식수로 랭킹) 엔드포인트가 프론트 전체에서 완전히
+고아가 됐다(grep으로 다른 소비처 없음 확인) — §82/§85 원칙대로 백엔드
+엔드포인트·`client.ts` 타입/함수·프론트 쿼리까지 전부 같이 삭제했다.
+
+"금주 메뉴 편성 규칙 이상 여부"는 새 계산을 만들지 않고, "메뉴 편성·운영"
+탭의 규칙검증 패널이 이미 쓰는 `GET /analysis/weekly-menu/plan-rule-check`
+(§77~§78에서 만든 해장/면류/매운맛 요일별 판정 + 저조 식수 재편성 판정)를
+선택한 주로 그대로 호출해, 위반 건수만 합산해서 요약한다.
+
+## 설계
+
+### 1. 백엔드 — `GET /analysis/home-daily-summary` 신규
+
+`backend/app/api/analysis.py`, `headcount_trend` 바로 다음에 추가:
+
+```python
+@router.get("/home-daily-summary")
+def home_daily_summary(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """홈 "금일 식수"/"금일 맛평가 점수" 스탯타일 전용 — headcount_trend와
+    같은 이유로 daily_corner_stats(나이트 배치) 대신 meal_log를 그때그때
+    집계한다."""
+```
+
+기간 내 `meal_log`를 `func.date(eaten_at)`로 그루핑해 날짜별 headcount(행
+개수)와 `avg_taste_score`(`TASTE_SCORE_POINTS` 환산 평균, 평가 없는 날은
+`None`)를 계산하고, 요청한 기간의 모든 날짜(데이터 없는 날 포함, headcount=0/
+avg_taste_score=None)를 순서대로 반환한다.
+
+### 2. 백엔드 — 고아가 된 엔드포인트 삭제
+
+`weekly_menu_planned_headcount_ranking`(`GET
+/weekly-menu/planned-headcount-ranking`) 함수 전체를 삭제. 이 엔드포인트가
+쓰던 `_recent_avg_headcount_by_menu`/`_HISTORY_WINDOW_DAYS`는 다른 3곳
+(`weekly_menu_plan_rule_check`의 `low_headcount_reuse`, `menu_plan_performance`
+등)에서 계속 쓰여 그대로 둔다 — 엔드포인트 함수만 고아였다.
+
+### 3. `client.ts`
+
+`HomeDailySummaryDay`(`date`/`headcount`/`avg_taste_score`) 타입 +
+`api.homeDailySummary({period_start, period_end})` 추가. `PlannedHeadcountRankingRow`/
+`WeeklyMenuPlannedHeadcountRankingResponse` 타입과 `weeklyMenuPlannedHeadcountRanking`
+함수는 삭제(고아).
+
+### 4. `HomePage.tsx`
+
+- `plannedHeadcountRanking` 쿼리와 그 파생값(`plannedHeadcountRows`/
+  `plannedHeadcountBars`/`topPlannedHeadcountRow`) 전부 삭제 — "최고 식수
+  코너/메뉴" 타일이 유일한 소비자였다.
+- `recentHeadcountQuery`(배치 기반 `api.weeklySummary`)를
+  `homeDailySummaryQuery`(`api.homeDailySummary`, 트레일링 7일 = 오늘 포함
+  최근 7일)로 교체. 오늘 값은 `homeDailySummaryDays.find(d => d.date ===
+  isoDaysAgo(0))`로 뽑고, 일평균은 7일 평균(headcount)과 평가가 있었던
+  날만의 평균(avg_taste_score)을 따로 낸다 — 평가 자체가 없는 날까지
+  0으로 넣으면 점수가 왜곡된다.
+- `weeklyRuleCheckQuery`(`api.weeklyMenuPlanRuleCheck({period_start:
+  selectedMonday, period_end: saturdayOfSelected})`) 신규 — 이미 "메뉴
+  편성·운영" 탭이 쓰는 것과 동일한 엔드포인트를 홈에서도 같은 주로
+  호출한다. 위반 건수(`ruleViolationCount`) = 해장/면류/매운맛 3개
+  배열의 `ok===false`인 날 개수 합 + `low_headcount_reuse.violations`
+  길이.
+- 스탯타일 4개 최종 구성: **금일 식수**(값=오늘 headcount, sub=최근 7일
+  일평균) → **금일 맛평가 점수**(값=오늘 avg_taste_score, sub=최근 7일
+  일평균 점수, 평가 없으면 "-"/"최근 7일 평가 없음") → **금주 메뉴 과거
+  VOE**(기존 그대로, 클릭 시 `onOpenWeeklyVoe`) → **금주 메뉴 편성 규칙
+  이상 여부**(위반 0건이면 "이상 없음"+`tone="good"`, 있으면 "이상 N건"+
+  `tone="critical"`).
+- `weekly` 쿼리와 `totalHeadcount`는 삭제하지 않았다 — "이 기간 식수가
+  0으로 나옵니다" 배치 재계산 배너(§85)가 여전히 그 값을 쓴다.
+
+## 손대지 않은 것 (교차 확인)
+
+- `weekly`/`totalHeadcount`/`recomputeDailyStats` — 배치 재계산 배너가
+  계속 씀.
+- `weeklyVoeHistory`/`onOpenWeeklyVoe` — "금주 메뉴 과거 VOE" 타일 로직
+  자체는 무변경.
+- `_recent_avg_headcount_by_menu`/`_HISTORY_WINDOW_DAYS` — 다른 3개
+  호출부가 계속 씀, 삭제 안 함.
+- `GET /analysis/weekly-menu/plan-rule-check`와 그 백엔드 로직
+  (`menu_plan_rules.py`) — 로직 변경 없음, 홈에서 같은 엔드포인트를
+  한 번 더 호출할 뿐.
+
+## 테스트
+
+- `backend/tests/test_api_ingest_and_analysis.py::test_home_daily_summary_computes_live_headcount_and_avg_taste_score`
+  (신규) — 이틀치 취식 로그(맛남/보통/개선 혼합)를 시딩해 날짜별
+  headcount·평균 점수가 정확한지, 데이터 없는 날은 `headcount=0`/
+  `avg_taste_score=None`인지 확인.
+- `pytest -q` 전체 회귀 — 563개 통과(기존 562 + 신규 1). 삭제한
+  `weekly_menu_planned_headcount_ranking`을 직접 때리는 기존 테스트는
+  없어 회귀 감소 없음.
+- `npx tsc -b` + `npx vite build` 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건): 홈 상단 4개 타일이 "금일 식수"/"금일 맛평가 점수"/"금주
+  메뉴 과거 VOE"/"금주 메뉴 편성 규칙 이상 여부" 순으로 뜨는지,
+  "금일 맛평가 점수" sub에 최근 7일 일평균이 보이는지, "금주 메뉴 편성
+  규칙 이상 여부" 타일의 건수가 `GET /weekly-menu/plan-rule-check`
+  응답(해장 0 + 면류 1 + 매운맛 0 + 저조식수 3 = 4건)과 정확히 일치하고
+  `tone="critical"`(빨간 좌측 테두리)로 뜨는지 확인.
+
+## 검증
+
+- `pytest -q` 전체 회귀(563개 통과).
+- `npx tsc -b` + `npx vite build` 클린.
+- 위 Playwright 확인.
+- 문서화(§92) 후 커밋·푸시.

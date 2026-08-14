@@ -45,6 +45,13 @@ export interface WeeklySummaryDay {
   headcount: number;
 }
 
+// §92: 홈 "금일 식수"/"금일 맛평가 점수" 스탯타일 전용 — meal_log 기반 실시간 집계.
+export interface HomeDailySummaryDay {
+  date: string;
+  headcount: number;
+  avg_taste_score: number | null;
+}
+
 export interface MenuHistoryEntry {
   period_start: string;
   period_end: string;
@@ -563,20 +570,6 @@ export interface WeeklyMenuPlanRuleCheckResponse {
   low_headcount_reuse: { ok: boolean; violations: LowHeadcountViolation[] };
 }
 
-export interface PlannedHeadcountRankingRow {
-  plan_date: string;
-  meal_type: MealType;
-  corner_name: string;
-  menu_name: string;
-  recent_avg_headcount: number | null;
-}
-
-export interface WeeklyMenuPlannedHeadcountRankingResponse {
-  period_start: string;
-  period_end: string;
-  rows: PlannedHeadcountRankingRow[];
-}
-
 export interface ComboSpreadEntry {
   sides: (string | null)[];
   avg_satisfaction: number | null;
@@ -879,10 +872,8 @@ export const api = {
 
   // §80: "금주 예상 식수"를 날씨/메뉴배수 예측 대신 최근 실측 평균 기반
   // 코너-메뉴 랭킹으로 보여준다.
-  weeklyMenuPlannedHeadcountRanking: (params: { period_start: string; period_end: string }) =>
-    request<WeeklyMenuPlannedHeadcountRankingResponse>(
-      `/analysis/weekly-menu/planned-headcount-ranking${qs(params)}`,
-    ),
+  homeDailySummary: (params: { period_start: string; period_end: string }) =>
+    request<HomeDailySummaryDay[]>(`/analysis/home-daily-summary${qs(params)}`),
 
   menuCombinationSpreadRanking: (params: {
     period_start: string;

@@ -333,6 +333,44 @@ def headcount_trend(
     ]
 
 
+@router.get("/home-daily-summary")
+def home_daily_summary(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
+    """§92: 홈 "금일 식수"/"금일 맛평가 점수" 스탯타일 전용 — headcount_trend와
+    같은 이유로 daily_corner_stats(나이트 배치) 대신 meal_log를 그때그때
+    집계한다. 배치가 어제까지만 채워져 있어 "오늘" 수치가 늘 비는 문제를
+    §22/§45/§91에서 반복해서 겪었다.
+    """
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    rows = (
+        db.query(func.date(MealLog.eaten_at).label("stat_date"), MealLog.taste_score)
+        .filter(MealLog.eaten_at >= period_start_dt, MealLog.eaten_at < period_end_exclusive)
+        .all()
+    )
+    headcount_by_date: dict[dt.date, int] = {}
+    scores_by_date: dict[dt.date, list[int]] = {}
+    for stat_date, taste_score in rows:
+        if isinstance(stat_date, str):
+            stat_date = dt.date.fromisoformat(stat_date)
+        headcount_by_date[stat_date] = headcount_by_date.get(stat_date, 0) + 1
+        if taste_score is not None:
+            scores_by_date.setdefault(stat_date, []).append(TASTE_SCORE_POINTS[taste_score])
+
+    days = []
+    current = period_start
+    while current <= period_end:
+        scores = scores_by_date.get(current)
+        days.append(
+            {
+                "date": current.isoformat(),
+                "headcount": headcount_by_date.get(current, 0),
+                "avg_taste_score": statistics.fmean(scores) if scores else None,
+            }
+        )
+        current += dt.timedelta(days=1)
+    return days
+
+
 def _weather_event_by_date(
     db: Session, period_start: dt.date, period_end: dt.date
 ) -> tuple[dict[dt.date, WeatherEvent], dict[dt.date, DailyWeather], bool]:
@@ -1872,59 +1910,6 @@ def weekly_menu_plan_rule_check(
             "violations": low_headcount_violations,
         },
     }
-
-
-@router.get("/weekly-menu/planned-headcount-ranking")
-def weekly_menu_planned_headcount_ranking(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
-    """§80: 이번 주 편성된 코너-메뉴(MAIN)를 최근 실측 평균 식수로 랭킹한다.
-
-    담당자 피드백 — "예상 식수는 오차 리스크가 있을 것 같은데 최근 실측
-    평균으로 변경 가능할까요" — 홈 화면의 날씨/메뉴배수 예측 기반 "금주
-    예상 식수" 차트를 대체한다. `weekly_menu_plan_rule_check`의
-    `low_headcount_reuse`와 같은 계산(직전 `_HISTORY_WINDOW_DAYS`일
-    `_recent_avg_headcount_by_menu`)을 재사용하되, 위반 여부와 무관하게
-    이번 주 편성된 MAIN 슬롯 전체를 식수 내림차순으로 반환한다.
-    """
-    plan_rows = (
-        db.query(
-            WeeklyMenuPlan.menu_id,
-            WeeklyMenuPlan.plan_date,
-            WeeklyMenuPlan.meal_type,
-            MenuMaster.menu_name,
-            CornerMaster.corner_name,
-        )
-        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
-        .join(CornerMaster, WeeklyMenuPlan.corner_id == CornerMaster.corner_id)
-        .filter(
-            WeeklyMenuPlan.plan_date.between(period_start, period_end),
-            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
-        )
-        .all()
-    )
-    slots = [
-        (menu_id, plan_date, meal_type, menu_name, corner_name)
-        for menu_id, plan_date, meal_type, menu_name, corner_name in plan_rows
-        if menu_name not in PLACEHOLDER_MENU_NAMES and corner_name not in LOW_HEADCOUNT_EXEMPT_CORNER_NAMES
-    ]
-
-    history_end = period_start - dt.timedelta(days=1)
-    history_start = history_end - dt.timedelta(days=_HISTORY_WINDOW_DAYS)
-    avg_by_menu = _recent_avg_headcount_by_menu(db, {s[0] for s in slots}, history_start, history_end)
-
-    rows = [
-        {
-            "plan_date": plan_date.isoformat(),
-            "meal_type": meal_type.value,
-            "corner_name": corner_name,
-            "menu_name": menu_name,
-            "recent_avg_headcount": round(avg_by_menu[menu_id], 1) if menu_id in avg_by_menu else None,
-        }
-        for menu_id, plan_date, meal_type, menu_name, corner_name in slots
-    ]
-    # 식수 내림차순 — 이력 없는 신메뉴(None)는 맨 뒤로.
-    rows.sort(key=lambda r: (r["recent_avg_headcount"] is None, -(r["recent_avg_headcount"] or 0)))
-
-    return {"period_start": period_start.isoformat(), "period_end": period_end.isoformat(), "rows": rows}
 
 
 @router.get("/weekly-menu/rotation")

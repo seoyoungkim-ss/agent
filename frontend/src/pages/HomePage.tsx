@@ -163,14 +163,40 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       }),
   });
 
-  // §83: "금주 예상 식수"(선택한 주 스코프의 실측 평균 합계) 대신, 어느 주를
-  // 보고 있든 안 바뀌는 "최근 7일 식수" 스냅샷 — 분류/끼니 필터 없이 전체
-  // 합산으로 오늘 기준 트레일링 7일 실측 식수를 낸다.
-  const recentHeadcountQuery = useQuery({
-    queryKey: ["recent-headcount-7d"],
-    queryFn: () => api.weeklySummary({ start_date: isoDaysAgo(6), end_date: isoDaysAgo(0) }),
+  // §92: "금일 식수"/"금일 맛평가 점수" 스탯타일 — daily_corner_stats(나이트
+  // 배치)는 어제까지만 채워져 "오늘" 수치가 항상 비므로, headcount_trend와
+  // 같은 방식으로 meal_log를 그때그때 집계하는 전용 엔드포인트를 쓴다.
+  // 트레일링 7일(오늘 포함) 범위를 한 번에 받아 오늘 값과 일평균을 함께 낸다.
+  const homeDailySummaryQuery = useQuery({
+    queryKey: ["home-daily-summary-7d"],
+    queryFn: () => api.homeDailySummary({ period_start: isoDaysAgo(6), period_end: isoDaysAgo(0) }),
   });
-  const recentHeadcountTotal = recentHeadcountQuery.data?.reduce((sum, d) => sum + d.headcount, 0) ?? 0;
+  const homeDailySummaryDays = homeDailySummaryQuery.data ?? [];
+  const todayDailySummary = homeDailySummaryDays.find((d) => d.date === isoDaysAgo(0));
+  const todayHeadcount = todayDailySummary?.headcount ?? 0;
+  const weeklyAvgHeadcount =
+    homeDailySummaryDays.length > 0
+      ? homeDailySummaryDays.reduce((sum, d) => sum + d.headcount, 0) / homeDailySummaryDays.length
+      : null;
+  const daysWithScore = homeDailySummaryDays.filter((d) => d.avg_taste_score != null);
+  const weeklyAvgTasteScore =
+    daysWithScore.length > 0
+      ? daysWithScore.reduce((sum, d) => sum + (d.avg_taste_score as number), 0) / daysWithScore.length
+      : null;
+
+  // §92: "금주 메뉴 편성 규칙 이상 여부" — 이미 있는 규칙검증 엔드포인트(주간
+  // 식단표 관리 탭의 검증 패널과 동일)를 선택한 주로 그대로 호출해, 위반 유무만
+  // 요약해서 보여준다.
+  const weeklyRuleCheckQuery = useQuery({
+    queryKey: ["weekly-menu-plan-rule-check", selectedMonday, saturdayOfSelected],
+    queryFn: () => api.weeklyMenuPlanRuleCheck({ period_start: selectedMonday, period_end: saturdayOfSelected }),
+  });
+  const ruleViolationCount = weeklyRuleCheckQuery.data
+    ? weeklyRuleCheckQuery.data.hangover.filter((d) => !d.ok).length +
+      weeklyRuleCheckQuery.data.noodle.filter((d) => !d.ok).length +
+      weeklyRuleCheckQuery.data.spicy_red_broth.filter((d) => !d.ok).length +
+      weeklyRuleCheckQuery.data.low_headcount_reuse.violations.length
+    : 0;
 
   const menuHistory = useQuery({
     queryKey: ["menu-history", searchedMenu],
@@ -236,16 +262,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
     if (ids.length > 0) setTrendCornerIds(ids);
   }, [cornerListQuery.data]);
 
-  // ---- 코너-메뉴별 예상 식수(실측 평균) / 점유율·대기시간 (2026-08 현황 재편) ----
-  // §80: "예상 식수는 오차 리스크가 있을 것 같다"는 담당자 피드백으로 날씨/
-  // 메뉴배수 예측(weeklyCongestionForecast)을 걷어내고, 이번 주 편성된
-  // 코너-메뉴를 최근 실측 평균 식수로 랭킹하는 가벼운 집계로 바꿨다 — 버튼
-  // 게이팅 없이 바로 조회(예측처럼 과거 180일을 슬롯마다 다시 훑지 않음).
-  const plannedHeadcountRanking = useQuery({
-    queryKey: ["weekly-menu-planned-headcount-ranking", selectedMonday, saturdayOfSelected],
-    queryFn: () =>
-      api.weeklyMenuPlannedHeadcountRanking({ period_start: selectedMonday, period_end: saturdayOfSelected }),
-  });
   // 일간 × 코너별로 볼 때 툴팁에 그날 그 코너의 메인메뉴를 덧붙인다(2026-07 요청,
   // 코너별 주간 추이 차트에 있던 기능을 통합 차트로 옮겨옴). 그 조합일 때만 조회한다.
   const trendMainMenuEnabled = trendGranularity === "daily" && trendGroupBy === "corner";
@@ -329,17 +345,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
 
   // 패밀리데이 월별 추이 카드는 제거됐다(2026-08 현황 재편) — 아래 "식수 추이"
   // 통합 차트에서 classification=패밀리데이 + 기간단위=월간으로 같은 걸 볼 수 있다.
-
-  // 코너-메뉴별 예상 식수 랭킹 가로막대 — §80: 이번 주 편성된 MAIN 슬롯을
-  // 최근 실측 평균 식수(내림차순, 백엔드가 이미 정렬)로 그린다. 이력 없는
-  // 신메뉴(recent_avg_headcount === null)는 막대 대신 별도 안내 문구로
-  // 뺀다(0으로 그리면 "정말 안 먹힘"과 혼동된다).
-  const plannedHeadcountRows = plannedHeadcountRanking.data?.rows ?? [];
-  const plannedHeadcountBars = plannedHeadcountRows.filter((r) => r.recent_avg_headcount != null);
-  // §83: "최고 혼잡 예상 코너/메뉴" 대신 실측 기준 최고 식수 코너/메뉴 —
-  // 백엔드가 이미 recent_avg_headcount 내림차순으로 정렬해 주므로 첫 행이
-  // 바로 최고 식수 행이다.
-  const topPlannedHeadcountRow = plannedHeadcountBars[0] ?? null;
 
   // 툴팁은 시리즈 "이름"(코너명)만 알 수 있는데 main-menu-by-date는 corner_id로
   // 오므로, 코너 목록으로 id→이름을 옮겨 코너명 기준 키로 맞춘다.
@@ -503,31 +508,33 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile label="선택한 주의 누적 식수" value={totalHeadcount.toLocaleString()} />
         <StatTile
-          label="최근 7일 식수"
-          value={recentHeadcountQuery.isLoading ? "…" : recentHeadcountTotal.toLocaleString()}
-          sub="오늘 포함 최근 7일 실측 식수 합계(전체 코너·끼니)"
+          label="금일 식수"
+          value={homeDailySummaryQuery.isLoading ? "…" : todayHeadcount.toLocaleString()}
+          sub={weeklyAvgHeadcount != null ? `최근 7일 일평균 ${Math.round(weeklyAvgHeadcount).toLocaleString()}명` : undefined}
         />
         <StatTile
-          label="최고 식수 코너/메뉴"
+          label="금일 맛평가 점수"
           value={
-            topPlannedHeadcountRow
-              ? `${topPlannedHeadcountRow.corner_name} · ${topPlannedHeadcountRow.menu_name}`
-              : "-"
+            homeDailySummaryQuery.isLoading
+              ? "…"
+              : (todayDailySummary?.avg_taste_score != null ? todayDailySummary.avg_taste_score.toFixed(2) : "-")
           }
-          sub={
-            topPlannedHeadcountRow
-              ? `실측 평균 ${Math.round(topPlannedHeadcountRow.recent_avg_headcount as number).toLocaleString()}명`
-              : "이번 주 데이터 없음"
-          }
-          tone={topPlannedHeadcountRow ? "warning" : undefined}
+          sub={weeklyAvgTasteScore != null ? `최근 7일 일평균 ${weeklyAvgTasteScore.toFixed(2)}점` : "최근 7일 평가 없음"}
         />
         <StatTile
           label="금주 메뉴 과거 VOE"
           value={weeklyVoeHistory.isLoading ? "…" : (weeklyVoeHistory.data ?? 0)}
           sub="클릭하면 메뉴별 상세를 볼 수 있어요"
           onClick={onOpenWeeklyVoe ? () => onOpenWeeklyVoe(selectedMonday) : undefined}
+        />
+        <StatTile
+          label="금주 메뉴 편성 규칙 이상 여부"
+          value={
+            weeklyRuleCheckQuery.isLoading ? "…" : ruleViolationCount > 0 ? `이상 ${ruleViolationCount}건` : "이상 없음"
+          }
+          sub="해장·면류·매운맛 편성 기준 + 저조 식수 재편성"
+          tone={weeklyRuleCheckQuery.isLoading ? undefined : ruleViolationCount > 0 ? "critical" : "good"}
         />
       </div>
 

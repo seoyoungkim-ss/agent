@@ -1846,6 +1846,32 @@ def test_headcount_trend_total_matches_division_analysis(client):
     assert new_total == legacy_total
 
 
+def test_home_daily_summary_computes_live_headcount_and_avg_taste_score(client):
+    """§92: 홈 "금일 식수"/"금일 맛평가 점수" 스탯타일 전용 엔드포인트 —
+    daily_corner_stats(나이트 배치) 없이도 meal_log만으로 즉시 값이 나와야
+    하고(headcount_trend와 동일한 이유), 데이터 없는 날은 0/None으로 응답한다.
+    """
+    day2 = MONDAY + dt.timedelta(days=1)
+    day3 = MONDAY + dt.timedelta(days=2)
+    _ingest_meal_log_with_meal_type(client, "E1", "맛남", "중식", "제육볶음", eaten_date=MONDAY)
+    _ingest_meal_log_with_meal_type(client, "E2", "보통", "중식", "제육볶음", eaten_date=MONDAY)
+    _ingest_meal_log_with_meal_type(client, "E3", "개선", "중식", "제육볶음", eaten_date=day2)
+
+    resp = client.get(
+        "/api/analysis/home-daily-summary",
+        params={"period_start": MONDAY.isoformat(), "period_end": day3.isoformat()},
+    )
+    assert resp.status_code == 200
+    body = {row["date"]: row for row in resp.json()}
+
+    assert body[MONDAY.isoformat()]["headcount"] == 2
+    assert body[MONDAY.isoformat()]["avg_taste_score"] == pytest.approx((5 + 3) / 2)
+    assert body[day2.isoformat()]["headcount"] == 1
+    assert body[day2.isoformat()]["avg_taste_score"] == pytest.approx(1.0)
+    assert body[day3.isoformat()]["headcount"] == 0
+    assert body[day3.isoformat()]["avg_taste_score"] is None
+
+
 def test_weekly_congestion_forecast_skips_holidays_and_applies_multipliers(client, db_session):
     """현황 "금주 예상 식수" — 주 단위 래퍼(2026-08).
 
