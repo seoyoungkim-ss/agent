@@ -6588,3 +6588,53 @@ variables === month`로 판정해 같은 카드 안 다른 달 버튼과 안
 - `npm run build` 타입체크.
 - 위 Playwright 확인.
 - 문서화 후 커밋·푸시.
+
+# §89. 주간 편성 규칙 검증 — 번호 붙은 태그 칩으로 재디자인 (2026-08)
+
+## Context
+
+담당자 신고: "주간식단표 관리에서 주간편성규칙 4개 모두 클릭하면
+하이라이트 되게 해줘 지금은 각규칙이 잘 안 드러나는데 규칙1) 이런식으로
+태그로 네모낳게 만들고... 지금 최근저조식수만 파란색 밑줄되어잇는데
+촌스러움." 조사 결과 4개 규칙(해장/면류/매운(빨간국물)/최근 저조 식수
+재편성) 모두 이미 `selectRuleMatches`로 격자 하이라이트가 정상 동작하고
+있었다(§78/§81) — 순수 스타일 문제였다. 라벨 버튼이 전부
+`underline decoration-dotted` + `color: var(--accent)`(위반 있을 때만)로만
+렌더돼, 위반이 없는 주는 그냥 검은 텍스트로 보여 "클릭 가능한 버튼"이라는
+게 전혀 안 드러났다.
+
+## 변경
+
+`frontend/src/pages/AnalysisPage.tsx`의 `WeeklyMenuReviewTab`만 수정
+(로직·백엔드 변경 없음):
+
+- `isRuleSelected(matches)` — 현재 격자에 하이라이트 중인 슬롯 집합과
+  이 규칙의 매치 집합이 완전히 같은지 판정(active 테두리용).
+- `renderRuleChip(ruleNumber, label, matches)` — "규칙N) 라벨" 형태의
+  사각 태그 버튼. 위반유무는 앞의 점(dot) 색(빨강/초록)으로만 표시하고
+  글자는 `var(--ink)`/`var(--ink-muted)` 유지(§39.12 "색은 점에만"
+  관례). 선택(active) 상태는 `var(--accent)` 테두리 +
+  `var(--surface-2)` 배경(기존 필터 칩 패턴, `AnalysisPage.tsx:3427`
+  재사용). 해장/면류/매운(빨간국물) 3개는 `renderDailyRuleRow`가
+  이 칩으로 라벨을 교체(규칙번호 인자 추가), 최근 저조 식수는
+  4번으로 직접 호출.
+- 담당자가 추가로 지적한(작업 중 재검토 요청) 개별 위반 매치 목록의
+  파란 밑줄 링크도 같은 이유로 촌스러워 보여, `renderMatchChip(m,
+  label, key)`로 함께 교체 — `HomePage.tsx`의 정적 키워드 태그(§86,
+  `rounded-full border`)와 같은 모양의 작은 알약 칩, 클릭 시
+  `selectSlot` 그대로 호출, 선택된 슬롯만 accent 테두리.
+- `selectRuleMatches`/`selectSlot`/`selectedSlotKeys`/격자 하이라이트
+  로직은 전혀 안 건드림.
+
+## 검증
+
+- 백엔드 변경 없어 pytest 불필요.
+- `npx tsc -b` 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건): 4개 규칙 모두 "규칙N)" 사각 태그로 렌더, 위반 있는 주는
+  빨간 점(규칙2/4), 없는 주는 초록 점(규칙1/3) — 위반 0건이어도 박스
+  형태 유지. 규칙2 클릭 시 격자 5개 슬롯 하이라이트 + 칩 테두리가
+  파란색으로 active 표시, 재클릭 시 해제(스크린샷으로 확인). 개별
+  위반 매치 목록도 더 이상 파란 밑줄 링크가 아니라 작은 테두리 칩으로
+  렌더됨을 확인.
+- 문서화 후 커밋·푸시.

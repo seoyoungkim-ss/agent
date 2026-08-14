@@ -1374,6 +1374,13 @@ function WeeklyMenuReviewTab() {
     setShowPrediction(false);
   };
 
+  // §89: 규칙 칩의 active(선택) 표시 여부 — selectRuleMatches의 토글 비교 로직을 재사용.
+  function isRuleSelected(matches: { plan_date: string; corner_id: number }[]): boolean {
+    if (matches.length === 0) return false;
+    const keys = new Set(matches.map((m) => `${m.plan_date}_${m.corner_id}`));
+    return selectedSlotKeys.size === keys.size && [...keys].every((k) => selectedSlotKeys.has(k));
+  }
+
   const slotsQuery = useQuery({
     queryKey: ["weekly-menu", selectedMonday],
     queryFn: () => api.weeklyMenu({ period_start: selectedMonday, period_end: sunday }),
@@ -1517,21 +1524,66 @@ function WeeklyMenuReviewTab() {
   // 키(`${plan_date}_${corner_id}`, selectSlot 토글)를 그대로 재사용한다.
   // §81: 규칙 라벨 자체를 클릭하면 그 규칙의 이번 주 위반 매치 전체를 한
   // 번에 하이라이트한다(selectRuleMatches).
-  function renderDailyRuleRow(label: string, results: DailyMenuPlanRuleResult[]) {
+  // §89: 규칙1)~규칙4) 번호 붙은 사각 태그 버튼 — 색은 점(dot)에만, 글자는
+  // ink 톤 유지(§39.12 관례), 선택형 필터 칩 스타일(rounded border,
+  // accent 테두리+surface-2 배경) 재사용.
+  function renderRuleChip(ruleNumber: number, label: string, matches: { plan_date: string; corner_id: number }[]) {
+    const hasViolations = matches.length > 0;
+    const active = isRuleSelected(matches);
+    return (
+      <button
+        onClick={() => selectRuleMatches(matches)}
+        disabled={!hasViolations}
+        className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-default"
+        style={{
+          borderColor: active ? "var(--accent)" : "var(--border)",
+          background: active ? "var(--surface-2)" : "var(--surface)",
+          color: hasViolations ? "var(--ink)" : "var(--ink-muted)",
+        }}
+        title={hasViolations ? "클릭하면 이번 주 위반 전체를 격자에서 하이라이트합니다" : "이번 주 위반 없음"}
+      >
+        <span
+          className="h-1.5 w-1.5 shrink-0 rounded-full"
+          style={{ background: hasViolations ? "var(--critical)" : "var(--good)" }}
+        />
+        규칙{ruleNumber}) {label}
+      </button>
+    );
+  }
+
+  // §89: 개별 위반 매치도 파란 밑줄 링크 대신 작은 태그 칩으로 — HomePage.tsx의
+  // 정적 키워드 태그(rounded-full border, §86)와 같은 모양에, 선택(격자 하이라이트
+  // 중) 상태만 accent 테두리로 표시한다.
+  function renderMatchChip(
+    m: { plan_date: string; corner_id: number },
+    label: string,
+    key: string | number
+  ) {
+    const slotKey = `${m.plan_date}_${m.corner_id}`;
+    const active = selectedSlotKeys.has(slotKey);
+    return (
+      <button
+        key={key}
+        onClick={() => selectSlot(slotKey)}
+        className="rounded-full border px-2 py-0.5 text-[11px] transition-colors"
+        style={{
+          borderColor: active ? "var(--accent)" : "var(--border)",
+          background: active ? "var(--surface-2)" : "var(--surface)",
+          color: "var(--ink)",
+        }}
+      >
+        {label}
+      </button>
+    );
+  }
+
+  function renderDailyRuleRow(ruleNumber: number, label: string, results: DailyMenuPlanRuleResult[]) {
     const byDate = new Map(results.map((r) => [r.plan_date, r]));
     const violatingMatches = results.filter((r) => !r.ok).flatMap((r) => r.matches);
     return (
       <div className="mb-2">
         <div className="flex flex-wrap items-center gap-2 text-[13px]">
-          <button
-            className="font-medium underline decoration-dotted disabled:no-underline disabled:cursor-default"
-            style={{ color: violatingMatches.length > 0 ? "var(--accent)" : undefined }}
-            onClick={() => selectRuleMatches(violatingMatches)}
-            disabled={violatingMatches.length === 0}
-            title={violatingMatches.length > 0 ? "클릭하면 이번 주 위반 전체를 격자에서 하이라이트합니다" : undefined}
-          >
-            {label}
-          </button>
+          {renderRuleChip(ruleNumber, label, violatingMatches)}
           {weekdayDates.slice(0, 5).map((d, i) => {
             const r = byDate.get(d);
             if (!r) {
@@ -1547,17 +1599,10 @@ function WeeklyMenuReviewTab() {
           })}
         </div>
         {violatingMatches.length > 0 && (
-          <div className="mt-1 flex flex-wrap gap-2 text-xs">
-            {violatingMatches.map((m, i) => (
-              <button
-                key={i}
-                className="underline"
-                style={{ color: "var(--accent)" }}
-                onClick={() => selectSlot(`${m.plan_date}_${m.corner_id}`)}
-              >
-                {m.menu_name}({m.corner_name}, {m.plan_date.slice(5)})
-              </button>
-            ))}
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {violatingMatches.map((m, i) =>
+              renderMatchChip(m, `${m.menu_name}(${m.corner_name}, ${m.plan_date.slice(5)})`, i)
+            )}
           </div>
         )}
       </div>
@@ -1595,51 +1640,33 @@ function WeeklyMenuReviewTab() {
         {ruleCheckQuery.data && (
           <div className="mb-4 rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
             <h3 className="mb-2 text-[13px] font-semibold">주간 편성 규칙 검증 (주중, 요일별)</h3>
-            {renderDailyRuleRow("해장 메뉴 (하루 최소 1개)", ruleCheckQuery.data.hangover)}
-            {renderDailyRuleRow("면류 (하루 최대 4개)", ruleCheckQuery.data.noodle)}
-            {renderDailyRuleRow("매운(빨간국물) (하루 최대 4개)", ruleCheckQuery.data.spicy_red_broth)}
+            {renderDailyRuleRow(1, "해장 메뉴 (하루 최소 1개)", ruleCheckQuery.data.hangover)}
+            {renderDailyRuleRow(2, "면류 (하루 최대 4개)", ruleCheckQuery.data.noodle)}
+            {renderDailyRuleRow(3, "매운(빨간국물) (하루 최대 4개)", ruleCheckQuery.data.spicy_red_broth)}
             <div className="mt-2 flex items-center gap-2 text-[13px]">
-              {(() => {
-                const allLowHeadcountMatches = ruleCheckQuery.data.low_headcount_reuse.violations.flatMap(
-                  (v) => v.matches
-                );
-                return (
-                  <button
-                    className="font-medium underline decoration-dotted disabled:no-underline disabled:cursor-default"
-                    style={{ color: allLowHeadcountMatches.length > 0 ? "var(--accent)" : undefined }}
-                    onClick={() => selectRuleMatches(allLowHeadcountMatches)}
-                    disabled={allLowHeadcountMatches.length === 0}
-                    title={
-                      allLowHeadcountMatches.length > 0
-                        ? "클릭하면 이번 주 위반 전체를 격자에서 하이라이트합니다"
-                        : undefined
-                    }
-                  >
-                    최근 저조 식수(200식 이하) 재편성
-                  </button>
-                );
-              })()}
+              {renderRuleChip(
+                4,
+                "최근 저조 식수(200식 이하) 재편성",
+                ruleCheckQuery.data.low_headcount_reuse.violations.flatMap((v) => v.matches)
+              )}
               <Badge
                 tone={ruleCheckQuery.data.low_headcount_reuse.ok ? "good" : "critical"}
                 label={`${ruleCheckQuery.data.low_headcount_reuse.violations.length}건`}
               />
             </div>
             {!ruleCheckQuery.data.low_headcount_reuse.ok && (
-              <div className="mt-1 flex flex-wrap gap-2 text-xs">
+              <div className="mt-1 flex flex-wrap gap-1.5">
                 {ruleCheckQuery.data.low_headcount_reuse.violations.map((v, vi) =>
                   v.matches.length > 0 ? (
-                    v.matches.map((m, mi) => (
-                      <button
-                        key={`${vi}_${mi}`}
-                        className="underline"
-                        style={{ color: "var(--accent)" }}
-                        onClick={() => selectSlot(`${m.plan_date}_${m.corner_id}`)}
-                      >
-                        {v.menu_name}({v.corner_name}, 최근 평균 {v.recent_avg_headcount}식, {m.plan_date.slice(5)})
-                      </button>
-                    ))
+                    v.matches.map((m, mi) =>
+                      renderMatchChip(
+                        m,
+                        `${v.menu_name}(${v.corner_name}, 최근 평균 ${v.recent_avg_headcount}식, ${m.plan_date.slice(5)})`,
+                        `${vi}_${mi}`
+                      )
+                    )
                   ) : (
-                    <span key={vi} style={{ color: "var(--ink-muted)" }}>
+                    <span key={vi} className="text-xs" style={{ color: "var(--ink-muted)" }}>
                       {v.menu_name}({v.corner_name}, 최근 평균 {v.recent_avg_headcount}식)
                     </span>
                   )
