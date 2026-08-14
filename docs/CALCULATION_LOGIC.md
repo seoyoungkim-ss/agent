@@ -6473,3 +6473,118 @@ period_end)`를 `dashboard.py`에 추가해 MAIN 역할 편성 메뉴 중 그
 - `npm run build` 타입체크.
 - 위 Playwright 확인.
 - 문서화 후 커밋·푸시.
+
+# §88. 주관식 VOE 탭 월별 다중 조회 (기본 최근 3개월) (2026-08)
+
+## Context
+
+담당자 요청: "주관식 VOE 관련 기능을 전부 월별로 볼 수 있게 해주고
+기본은 최근 3개월로 보여줘." 조사 결과 대상은
+`frontend/src/pages/AnalysisPage.tsx`의 `VoeAnalysisTab`(만족도·VoE
+탭의 "주관식 VOE" 영역) 하나였다 — 카드 4개(조회 컨트롤, 월간 VOE
+분류, 이달의 VOE AI 브리핑, 월간 VOE 클러스터링)가 전부 단일
+`period`(YYYY-MM) state 하나를 공유하며 한 번에 딱 1개월치만
+보여줬다(`<input type="month">` 하나로 달을 바꿔가며 순차 조회). 유일한
+예외는 클러스터링 카드 맨 아래 "월별 VOE 코멘트 수 추이" 스파크라인
+차트뿐인데, 이마저 `VOE_TREND_MONTHS = 6`으로 하드코딩된 참고용
+그래프였다.
+
+백엔드 세 GET 엔드포인트(`voe-by-category`/`voe-clusters`/
+`voe-briefing`)는 전부 `period: dt.date` 단일값만 받고 여러 달을 한
+번에 주는 기능이 없었다. 다만 정확히 같은 패턴으로 여러 달을 병렬
+조회하는 선례가 이미 이 파일 안에 있었다 — 클러스터링 카드의 6개월
+추이 차트가 `Promise.all(trendMonths.map(m =>
+api.voeByCategory(...)))`로 이미 하던 방식이다. 세 엔드포인트 모두
+가벼운 조회(그 달 코멘트 스캔 1건 또는 캐시 조회 1건)이고 이미
+6개월치 병렬 조회가 실사용 중이었으므로, **백엔드 변경 없이 이 프론트
+패턴을 세 카드 전체로 확장**했다 — 새 range 쿼리 파라미터를 만드는
+것보다 훨씬 작은 변경이다.
+
+AskUserQuestion으로 두 가지를 확정했다: (1) 개월 수는 사용자가 직접
+조절 가능(1/3/6/12개월, 기본 3개월) — 이 파일에 이미 있는
+`usePlanPeriod`/`PLAN_PERIOD_OPTIONS`(편성 빈도 섹션의 30일/60일/90일/
+6개월 `SegmentedControl`) 패턴 재사용. (2) 재계산 버튼은 달마다 개별
+배치 — "전체 재계산" 한 번에 몰아 돌리면 개월 수가 많을 때(6/12개월)
+LLM 호출이 순서대로 밀려 오래 걸리므로, 특정 한 달만 다시 계산하고
+싶을 때 그 달만 누르게 한다.
+
+## 설계
+
+`VoeAnalysisTab`(`AnalysisPage.tsx`) 하나만 재작성했다. 백엔드·
+`client.ts`·다른 컴포넌트는 변경 없음 — 기존 단일월 API 함수
+(`api.voeByCategory`/`api.voeClusters`/`api.voeBriefing`/
+`api.recomputeVoeByCategory`/`api.recomputeVoeClusters`/
+`api.recomputeVoeBriefing`, 전부 `(period: string) => ...`)를 그대로
+달 개수만큼 반복 호출한다.
+
+**State**: 단일 `period` → `anchorMonth`(기준월=최신 달, 여전히
+`<input type="month">`) + `monthCount`(`"1"|"3"|"6"|"12"`, 기본
+`"3"`, 새 `SegmentedControl`)로 분리. 파생값 `months =
+Array.from({length: Number(monthCount)}, (_, i) =>
+monthsBefore(anchorMonth, i))`(기존 `monthsBefore` 헬퍼 재사용) —
+최신 달이 맨 앞, 과거로 갈수록 뒤.
+
+**쿼리**: 기존 3개 단일월 쿼리 + 6개월 트렌드 전용 쿼리
+(`monthlyVolumeQuery`, 삭제)를 3개 다중월 쿼리로 교체 —
+`voeCategoryMulti`/`voeClustersMulti`/`voeBriefingMulti`, 각각
+`queryFn`이 `Promise.all(months.map(m => api.xxx(`${m}-01`)))`로
+병렬 호출 후 `{month, data}[]`를 반환한다(`queryKey`는
+`months.join(",")`).
+
+**재계산 뮤테이션**: `mutationFn: (month: string) =>
+api.recomputeXxx(`${month}-01`)`로 파라미터화. 버튼은
+`onClick={() => mutate(month)}`, 로딩 상태는 `isPending &&
+variables === month`로 판정해 같은 카드 안 다른 달 버튼과 안
+섞이게 했다(react-query 뮤테이션이 마지막 호출 인자를 `.variables`로
+노출하는 것을 활용).
+
+**카드별 렌더**: "VOE 분류"/"VOE AI 브리핑"/"VOE 클러스터링"(제목에서
+"월간"/"이달의" 접두어 제거 — 이제 여러 달을 보여주므로) 세 카드
+모두 `voeXxxMulti.data`를 `.map()`으로 돌며 달마다 소제목
+(`formatMonthLabel(month)`, 새 헬퍼, "2026년 8월" 형식) + 그 달
+전용 재계산 버튼 + 기존 렌더 로직을 그대로 반복한다. "이달의 VOE
+최다 코너/메뉴" 계산 로직은 컴포넌트 본문 인라인이던 것을 순수 헬퍼
+`computeTopVoeEntries(categories)`로 추출해 달마다 호출한다.
+카테고리 드릴다운 state `selectedVoeCategory`는 `string | null` →
+`{month, category} | null`로 바꿔 서로 다른 달 블록의 선택이 안
+섞이게 했다.
+
+**트렌드 차트**: 새 쿼리를 만들지 않고 이미
+`voeCategoryMulti.data`에 달마다 들어있는 `total_comments`를
+그대로 재사용한다(`[...voeCategoryMulti.data].reverse()`로
+과거→최신 순으로 뒤집어 X축이 시간순이 되게). 캡션도 "최근
+{VOE_TREND_MONTHS}개월" → "선택한 {months.length}개월"로 바꾸고
+`VOE_TREND_MONTHS` 상수는 삭제.
+
+## 손대지 않은 것 (교차 확인)
+
+- 백엔드 `voe-by-category`/`voe-clusters`/`voe-briefing`(GET·POST
+  재계산 전부) — 시그니처·로직 변경 없음.
+- `improvement_points` 엔드포인트의 VOE 축(현재 달 vs 직전 달 고정
+  비교) — "개선 필요 포인트" 카드는 이번 "주관식 VOE" 화면과 다른
+  화면이라 범위 밖.
+- `menu-comments`/`WeeklyMenuVoeDetailPage.tsx`("금주 메뉴 VOE
+  상세") — 메뉴별 "최근 N건" 조회이지 달력월 단위 조회가 아니라 이번
+  요청과 무관.
+
+## 검증
+
+- 백엔드 변경이 없어 `pytest` 재실행 불필요.
+- `npx tsc -b`·`npm run build` — 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건): (1) 만족도·VoE 탭 진입 시 기본으로 최근 3개월(2026년
+  8/7/6월) 블록이 세 카드 모두에 뜨고, 네트워크 요청이 정확히
+  9건(카드 3개 × 3개월) 발생함을 확인, (2) "표시 기간"을 6개월로
+  바꾸면 요청이 18건(3×6)으로 늘고 월 소제목이 카드마다 6개씩(총
+  18개) 뜸을 확인, (3) 서로 다른 두 달에서 카테고리를 각각 클릭해도
+  드릴다운이 안 섞임을 확인, (4) 특정 한 달 "재계산" 클릭이 다른
+  달 버튼에 영향 없이 정상 동작, (5) 클러스터링 카드 하단 추이
+  차트가 선택한 개월 수만큼(3개월/6개월) 점을 찍고 시간순(과거→
+  최신)으로 표시되며 실제 코멘트 수(2026-06:1건, 2026-07:35건,
+  2026-08:0건)와 일치함을 확인.
+
+## 검증 요약
+
+- `npm run build` 타입체크.
+- 위 Playwright 확인.
+- 문서화 후 커밋·푸시.

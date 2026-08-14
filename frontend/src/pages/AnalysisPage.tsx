@@ -14,6 +14,7 @@ import {
   type PredictedNumbersRow,
   type Season,
   type TrendDirection,
+  type VoeCategoryRow,
   type Weather,
   type WeatherCorrelationMetric,
   type WeatherEvent,
@@ -1973,92 +1974,26 @@ function WeeklyMenuReviewTab() {
   );
 }
 
-const VOE_TREND_MONTHS = 6;
-
 function monthsBefore(period: string, n: number): string {
   const [y, m] = period.split("-").map(Number);
   const d = new Date(y, m - 1 - n, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-// PRD 5-2: "주관식 VOE" 서브탭 — 홈 화면에 있던 "월간 VOE 분류"(고정 카테고리)를
-// 여기로 옮기고, 백엔드엔 이미 있었지만 어느 화면에도 안 붙어있던 voe-clusters
-// (자유 주제 클러스터링)를 추가로 붙인다.
-function VoeAnalysisTab() {
-  const chartTheme = useChartTheme();
-  const [period, setPeriod] = useState(() => new Date().toISOString().slice(0, 7));
-  const [selectedVoeCategory, setSelectedVoeCategory] = useState<string | null>(null);
+function formatMonthLabel(month: string): string {
+  const [y, m] = month.split("-").map(Number);
+  return `${y}년 ${m}월`;
+}
 
-  const voeCategory = useQuery({
-    queryKey: ["voe-by-category-tab", period],
-    queryFn: () => api.voeByCategory(`${period}-01`),
-  });
-  const recomputeVoeCategory = useMutation({
-    mutationFn: () => api.recomputeVoeByCategory(`${period}-01`),
-    onSuccess: () => voeCategory.refetch(),
-  });
-
-  const voeClusters = useQuery({
-    queryKey: ["voe-clusters-tab", period],
-    queryFn: () => api.voeClusters(`${period}-01`),
-  });
-  const recomputeVoeClusters = useMutation({
-    mutationFn: () => api.recomputeVoeClusters(`${period}-01`),
-    onSuccess: () => voeClusters.refetch(),
-  });
-
-  const voeBriefing = useQuery({
-    queryKey: ["voe-briefing-tab", period],
-    queryFn: () => api.voeBriefing(`${period}-01`),
-  });
-  const recomputeVoeBriefing = useMutation({
-    mutationFn: () => api.recomputeVoeBriefing(`${period}-01`),
-    onSuccess: () => voeBriefing.refetch(),
-  });
-
-  const trendMonths = Array.from({ length: VOE_TREND_MONTHS }, (_, i) => monthsBefore(period, VOE_TREND_MONTHS - 1 - i));
-  const monthlyVolumeQuery = useQuery({
-    queryKey: ["voe-monthly-volume", period],
-    queryFn: async () => {
-      const results = await Promise.all(trendMonths.map((m) => api.voeByCategory(`${m}-01`)));
-      return trendMonths.map((m, i) => ({ month: m, total: results[i].total_comments }));
-    },
-  });
-  const volumeTrendOption = {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 40, right: 16, top: 16, bottom: 28 },
-    tooltip: { trigger: "axis" as const, formatter: axisTooltipFormatter },
-    xAxis: {
-      type: "category" as const,
-      data: trendMonths,
-      axisLine: { lineStyle: { color: chartTheme.axis } },
-      axisLabel: { color: chartTheme.text },
-      axisTick: { show: false },
-    },
-    yAxis: {
-      type: "value" as const,
-      name: "코멘트 수",
-      axisLabel: { color: chartTheme.text },
-      splitLine: { lineStyle: { color: chartTheme.grid } },
-    },
-    series: [
-      {
-        name: "VOE 코멘트 수",
-        type: "line" as const,
-        symbol: "circle",
-        symbolSize: 8,
-        lineStyle: { width: 2, color: resolveColor("var(--series-1)") },
-        itemStyle: { color: resolveColor("var(--series-1)") },
-        data: (monthlyVolumeQuery.data ?? []).map((d) => d.total),
-      },
-    ],
-  };
-
-  // "이달의 VOE 최다 코너/메뉴" — 새 백엔드 집계 없이 이미 받아온 카테고리별
-  // 코멘트를 프론트에서 tally한다. 한 코멘트가 여러 카테고리에 동시에 걸릴 수
-  // 있어(다중 라벨) 그대로 합치면 중복 카운트되므로 먼저 dedupe한다.
+// "이달의 VOE 최다 코너/메뉴" — 새 백엔드 집계 없이 카테고리별 코멘트를
+// 프론트에서 tally한다. 한 코멘트가 여러 카테고리에 동시에 걸릴 수 있어(다중
+// 라벨) 그대로 합치면 중복 카운트되므로 먼저 dedupe한다.
+function computeTopVoeEntries(categories: VoeCategoryRow[]): {
+  topVoeCorner: { name: string; count: number } | null;
+  topVoeMenu: { name: string; count: number } | null;
+} {
   const seenVoeKeys = new Set<string>();
-  const uniqueVoeComments = (voeCategory.data?.categories ?? []).flatMap((c) => c.comments).filter((c) => {
+  const uniqueVoeComments = categories.flatMap((c) => c.comments).filter((c) => {
     const key = `${c.eaten_at}|${c.corner_name}|${c.menu_name}|${c.comment}`;
     if (seenVoeKeys.has(key)) return false;
     seenVoeKeys.add(key);
@@ -2077,207 +2012,354 @@ function VoeAnalysisTab() {
     }
     return best;
   }
-  const topVoeCorner = topVoeEntry((c) => c.corner_name);
-  const topVoeMenu = topVoeEntry((c) => c.menu_name);
+  return {
+    topVoeCorner: topVoeEntry((c) => c.corner_name),
+    topVoeMenu: topVoeEntry((c) => c.menu_name),
+  };
+}
+
+const VOE_MONTH_COUNT_OPTIONS = [
+  { label: "1개월", value: "1" },
+  { label: "3개월", value: "3" },
+  { label: "6개월", value: "6" },
+  { label: "12개월", value: "12" },
+];
+
+// PRD 5-2: "주관식 VOE" 서브탭 — 홈 화면에 있던 "월간 VOE 분류"(고정 카테고리)를
+// 여기로 옮기고, 백엔드엔 이미 있었지만 어느 화면에도 안 붙어있던 voe-clusters
+// (자유 주제 클러스터링)를 추가로 붙인다.
+// §88: 전 카드가 단일 월만 보여주던 것을, 기준월부터 과거로 N개월(기본
+// 3개월)을 한 화면에 나란히 보여주도록 확장했다 — 기존 단일월 API를 그대로
+// 여러 번(Promise.all) 병렬 호출한다(6개월 추이 차트가 이미 쓰던 패턴 재사용).
+function VoeAnalysisTab() {
+  const chartTheme = useChartTheme();
+  const [anchorMonth, setAnchorMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const [monthCount, setMonthCount] = useState("3");
+  const [selectedVoeCategory, setSelectedVoeCategory] = useState<{ month: string; category: string } | null>(null);
+
+  // 최신 달(anchorMonth)이 맨 앞, 과거로 갈수록 뒤.
+  const months = Array.from({ length: Number(monthCount) }, (_, i) => monthsBefore(anchorMonth, i));
+  const monthsKey = months.join(",");
+
+  const voeCategoryMulti = useQuery({
+    queryKey: ["voe-by-category-tab", monthsKey],
+    queryFn: async () => {
+      const results = await Promise.all(months.map((m) => api.voeByCategory(`${m}-01`)));
+      return months.map((m, i) => ({ month: m, data: results[i] }));
+    },
+  });
+  const recomputeVoeCategory = useMutation({
+    mutationFn: (month: string) => api.recomputeVoeByCategory(`${month}-01`),
+    onSuccess: () => voeCategoryMulti.refetch(),
+  });
+
+  const voeClustersMulti = useQuery({
+    queryKey: ["voe-clusters-tab", monthsKey],
+    queryFn: async () => {
+      const results = await Promise.all(months.map((m) => api.voeClusters(`${m}-01`)));
+      return months.map((m, i) => ({ month: m, data: results[i] }));
+    },
+  });
+  const recomputeVoeClusters = useMutation({
+    mutationFn: (month: string) => api.recomputeVoeClusters(`${month}-01`),
+    onSuccess: () => voeClustersMulti.refetch(),
+  });
+
+  const voeBriefingMulti = useQuery({
+    queryKey: ["voe-briefing-tab", monthsKey],
+    queryFn: async () => {
+      const results = await Promise.all(months.map((m) => api.voeBriefing(`${m}-01`)));
+      return months.map((m, i) => ({ month: m, data: results[i] }));
+    },
+  });
+  const recomputeVoeBriefing = useMutation({
+    mutationFn: (month: string) => api.recomputeVoeBriefing(`${month}-01`),
+    onSuccess: () => voeBriefingMulti.refetch(),
+  });
+
+  // 추이 차트는 별도 쿼리를 새로 만들지 않고 voeCategoryMulti의 total_comments를
+  // 그대로 재사용한다(과거→최신 순으로 뒤집어야 X축이 시간순으로 읽힌다).
+  const trendRows = [...(voeCategoryMulti.data ?? [])].reverse();
+  const volumeTrendOption = {
+    textStyle: { fontFamily: "inherit", color: chartTheme.text },
+    grid: { left: 40, right: 16, top: 16, bottom: 28 },
+    tooltip: { trigger: "axis" as const, formatter: axisTooltipFormatter },
+    xAxis: {
+      type: "category" as const,
+      data: trendRows.map((r) => r.month),
+      axisLine: { lineStyle: { color: chartTheme.axis } },
+      axisLabel: { color: chartTheme.text },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value" as const,
+      name: "코멘트 수",
+      axisLabel: { color: chartTheme.text },
+      splitLine: { lineStyle: { color: chartTheme.grid } },
+    },
+    series: [
+      {
+        name: "VOE 코멘트 수",
+        type: "line" as const,
+        symbol: "circle",
+        symbolSize: 8,
+        lineStyle: { width: 2, color: resolveColor("var(--series-1)") },
+        itemStyle: { color: resolveColor("var(--series-1)") },
+        data: trendRows.map((r) => r.data.total_comments),
+      },
+    ],
+  };
 
   return (
     <div className="space-y-6">
       <Card title="주관식 VOE">
-        <label className="flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-          조회 월
-          <input
-            type="month"
-            value={period}
-            onChange={(e) => e.target.value && setPeriod(e.target.value)}
-            className="rounded-md border px-3 py-2 text-[13px]"
-            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-          />
-        </label>
-      </Card>
-
-      <Card title="월간 VOE 분류 (맛·간·위생·서비스)">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            카테고리를 클릭하면 코멘트를 볼 수 있습니다. 매일 자동 분류되며, 즉시 반영하려면 재계산하세요.
-          </p>
-          <Button
-            variant="secondary"
-            onClick={() => recomputeVoeCategory.mutate()}
-            disabled={recomputeVoeCategory.isPending}
-          >
-            {recomputeVoeCategory.isPending ? "분류 중..." : "이번 달 재계산"}
-          </Button>
-        </div>
-        {recomputeVoeCategory.isError && <ErrorState error={recomputeVoeCategory.error} />}
-        {voeCategory.isLoading && <LoadingState />}
-        {voeCategory.isError && <ErrorState error={voeCategory.error} />}
-        {voeCategory.data && voeCategory.data.total_comments === 0 && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            이번 달 코멘트가 없습니다.
-          </p>
-        )}
-        {voeCategory.data && voeCategory.data.total_comments > 0 && (
-          <>
-            <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <StatTile
-                label="이달의 VOE 최다 코너"
-                value={topVoeCorner ? topVoeCorner.name : "-"}
-                sub={topVoeCorner ? `${topVoeCorner.count}건` : undefined}
-              />
-              <StatTile
-                label="이달의 VOE 최다 메뉴"
-                value={topVoeMenu ? topVoeMenu.name : "-"}
-                sub={topVoeMenu ? `${topVoeMenu.count}건` : undefined}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-              {voeCategory.data.categories.map((c) => (
-                <button
-                  key={c.category}
-                  onClick={() => setSelectedVoeCategory((cur) => (cur === c.category ? null : c.category))}
-                  className="rounded-xl border p-3 text-left transition-colors"
-                  style={{
-                    borderColor: selectedVoeCategory === c.category ? "var(--accent)" : "var(--border)",
-                    background: selectedVoeCategory === c.category ? "var(--surface-2)" : "var(--surface)",
-                  }}
-                >
-                  <div className="text-[13px] font-medium">{c.category}</div>
-                  <div className="mt-1 text-lg font-semibold">{c.count}</div>
-                </button>
-              ))}
-            </div>
-            {selectedVoeCategory && (
-              <div className="mt-4">
-                {(() => {
-                  const selected = voeCategory.data.categories.find((c) => c.category === selectedVoeCategory);
-                  if (!selected || selected.comments.length === 0) {
-                    return (
-                      <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                        해당 분류의 코멘트가 없습니다.
-                      </p>
-                    );
-                  }
-                  return (
-                    <Table
-                      columns={[
-                        { key: "eaten_at", label: "취식일시" },
-                        { key: "corner_menu", label: "코너·메뉴" },
-                        { key: "comment", label: "코멘트" },
-                      ]}
-                      rows={selected.comments.map((c) => ({
-                        eaten_at: c.eaten_at.replace("T", " "),
-                        // 어떤 메뉴에 대한 의견인지 바로 알 수 있게 코너+메뉴를 함께 표기(2026-08).
-                        corner_menu: c.corner_name
-                          ? `${c.corner_name}${c.menu_name ? ` · ${c.menu_name}` : ""}`
-                          : "-",
-                        comment: c.comment,
-                      }))}
-                      rowKey={(r, i) => `${r.eaten_at as string}-${i}`}
-                    />
-                  );
-                })()}
-              </div>
-            )}
-          </>
-        )}
-      </Card>
-
-      <Card title="이달의 VOE AI 브리핑">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            아래 "월간 VOE 클러스터링" 결과를 요약합니다. 클러스터링이 먼저 계산돼 있어야 합니다.
-          </p>
-          <Button
-            variant="secondary"
-            onClick={() => recomputeVoeBriefing.mutate()}
-            disabled={recomputeVoeBriefing.isPending}
-          >
-            {recomputeVoeBriefing.isPending ? "요약 중..." : "이번 달 재계산"}
-          </Button>
-        </div>
-        {recomputeVoeBriefing.isError && <ErrorState error={recomputeVoeBriefing.error} />}
-        {voeBriefing.isLoading && <LoadingState />}
-        {voeBriefing.isError && <ErrorState error={voeBriefing.error} />}
-        {voeBriefing.data && !voeBriefing.data.has_clusters && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            먼저 아래 "월간 VOE 클러스터링"을 계산하세요.
-          </p>
-        )}
-        {voeBriefing.data && voeBriefing.data.has_clusters && !voeBriefing.data.briefing && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            아직 브리핑이 계산되지 않았습니다. "이번 달 재계산"을 눌러보세요.
-          </p>
-        )}
-        {voeBriefing.data?.briefing && voeBriefing.data.has_clusters && (
-          <div>
-            <p className="whitespace-pre-line text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-              {voeBriefing.data.briefing}
-            </p>
-            {voeBriefing.data.briefing_computed_at && (
-              <p className="mt-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-                {voeBriefing.data.briefing_computed_at.replace("T", " ")} 기준
-              </p>
-            )}
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+            기준월(최신 달)
+            <input
+              type="month"
+              value={anchorMonth}
+              onChange={(e) => e.target.value && setAnchorMonth(e.target.value)}
+              className="rounded-md border px-3 py-2 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            />
+          </label>
+          <div className="flex items-center gap-2">
+            <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+              표시 기간
+            </span>
+            <SegmentedControl value={monthCount} options={VOE_MONTH_COUNT_OPTIONS} onChange={setMonthCount} />
           </div>
-        )}
+        </div>
       </Card>
 
-      <Card title="월간 VOE 클러스터링 (주제·키워드 기반)">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            그 달 코멘트를 자유 주제로 묶은 군집입니다. 매일 자동 계산되며, 즉시 반영하려면 재계산하세요.
-          </p>
-          <Button
-            variant="secondary"
-            onClick={() => recomputeVoeClusters.mutate()}
-            disabled={recomputeVoeClusters.isPending}
-          >
-            {recomputeVoeClusters.isPending ? "계산 중..." : "이번 달 재계산"}
-          </Button>
-        </div>
-        {recomputeVoeClusters.isError && <ErrorState error={recomputeVoeClusters.error} />}
-        {voeClusters.isLoading && <LoadingState />}
-        {voeClusters.isError && <ErrorState error={voeClusters.error} />}
-        {voeClusters.data && voeClusters.data.length === 0 && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            이번 달 클러스터 결과가 없습니다. "이번 달 재계산"을 눌러보세요.
-          </p>
-        )}
-        {voeClusters.data && voeClusters.data.length > 0 && (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {voeClusters.data.map((c, i) => (
-              <div
-                key={i}
-                className="rounded-xl border p-3"
-                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-[13px] font-medium">{c.cluster_label}</div>
-                  <div className="shrink-0 text-xs" style={{ color: "var(--ink-muted)" }}>
-                    {c.comment_count}건
-                  </div>
+      <Card title="VOE 분류 (맛·간·위생·서비스)">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          카테고리를 클릭하면 코멘트를 볼 수 있습니다. 매일 자동 분류되며, 즉시 반영하려면 그 달을 재계산하세요.
+        </p>
+        {voeCategoryMulti.isLoading && <LoadingState />}
+        {voeCategoryMulti.isError && <ErrorState error={voeCategoryMulti.error} />}
+        <div className="space-y-6">
+          {voeCategoryMulti.data?.map(({ month, data }) => {
+            const { topVoeCorner, topVoeMenu } = computeTopVoeEntries(data.categories);
+            const isPendingThisMonth = recomputeVoeCategory.isPending && recomputeVoeCategory.variables === month;
+            return (
+              <div key={month} className="border-t pt-4 first:border-t-0 first:pt-0" style={{ borderColor: "var(--border)" }}>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <h3 className="text-[13px] font-semibold">{formatMonthLabel(month)}</h3>
+                  <Button
+                    variant="secondary"
+                    onClick={() => recomputeVoeCategory.mutate(month)}
+                    disabled={isPendingThisMonth}
+                  >
+                    {isPendingThisMonth ? "분류 중..." : "재계산"}
+                  </Button>
                 </div>
-                {c.keywords.length > 0 && (
-                  <div className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                    {c.keywords.join(", ")}
-                  </div>
+                {recomputeVoeCategory.isError && recomputeVoeCategory.variables === month && (
+                  <ErrorState error={recomputeVoeCategory.error} />
                 )}
-                {c.representative_comment && (
-                  <div className="mt-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-                    "{c.representative_comment}"
+                {data.total_comments === 0 && (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    이 달 코멘트가 없습니다.
+                  </p>
+                )}
+                {data.total_comments > 0 && (
+                  <>
+                    <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <StatTile
+                        label="이 달 VOE 최다 코너"
+                        value={topVoeCorner ? topVoeCorner.name : "-"}
+                        sub={topVoeCorner ? `${topVoeCorner.count}건` : undefined}
+                      />
+                      <StatTile
+                        label="이 달 VOE 최다 메뉴"
+                        value={topVoeMenu ? topVoeMenu.name : "-"}
+                        sub={topVoeMenu ? `${topVoeMenu.count}건` : undefined}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+                      {data.categories.map((c) => {
+                        const isSelected = selectedVoeCategory?.month === month && selectedVoeCategory?.category === c.category;
+                        return (
+                          <button
+                            key={c.category}
+                            onClick={() =>
+                              setSelectedVoeCategory((cur) =>
+                                cur?.month === month && cur?.category === c.category ? null : { month, category: c.category },
+                              )
+                            }
+                            className="rounded-xl border p-3 text-left transition-colors"
+                            style={{
+                              borderColor: isSelected ? "var(--accent)" : "var(--border)",
+                              background: isSelected ? "var(--surface-2)" : "var(--surface)",
+                            }}
+                          >
+                            <div className="text-[13px] font-medium">{c.category}</div>
+                            <div className="mt-1 text-lg font-semibold">{c.count}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {selectedVoeCategory?.month === month && (
+                      <div className="mt-4">
+                        {(() => {
+                          const selected = data.categories.find((c) => c.category === selectedVoeCategory.category);
+                          if (!selected || selected.comments.length === 0) {
+                            return (
+                              <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                                해당 분류의 코멘트가 없습니다.
+                              </p>
+                            );
+                          }
+                          return (
+                            <Table
+                              columns={[
+                                { key: "eaten_at", label: "취식일시" },
+                                { key: "corner_menu", label: "코너·메뉴" },
+                                { key: "comment", label: "코멘트" },
+                              ]}
+                              rows={selected.comments.map((c) => ({
+                                eaten_at: c.eaten_at.replace("T", " "),
+                                // 어떤 메뉴에 대한 의견인지 바로 알 수 있게 코너+메뉴를 함께 표기(2026-08).
+                                corner_menu: c.corner_name
+                                  ? `${c.corner_name}${c.menu_name ? ` · ${c.menu_name}` : ""}`
+                                  : "-",
+                                comment: c.comment,
+                              }))}
+                              rowKey={(r, i) => `${r.eaten_at as string}-${i}`}
+                            />
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card title="VOE AI 브리핑">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          아래 "VOE 클러스터링" 결과를 요약합니다. 그 달의 클러스터링이 먼저 계산돼 있어야 합니다.
+        </p>
+        {voeBriefingMulti.isLoading && <LoadingState />}
+        {voeBriefingMulti.isError && <ErrorState error={voeBriefingMulti.error} />}
+        <div className="space-y-6">
+          {voeBriefingMulti.data?.map(({ month, data }) => {
+            const isPendingThisMonth = recomputeVoeBriefing.isPending && recomputeVoeBriefing.variables === month;
+            return (
+              <div key={month} className="border-t pt-4 first:border-t-0 first:pt-0" style={{ borderColor: "var(--border)" }}>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <h3 className="text-[13px] font-semibold">{formatMonthLabel(month)}</h3>
+                  <Button
+                    variant="secondary"
+                    onClick={() => recomputeVoeBriefing.mutate(month)}
+                    disabled={isPendingThisMonth}
+                  >
+                    {isPendingThisMonth ? "요약 중..." : "재계산"}
+                  </Button>
+                </div>
+                {recomputeVoeBriefing.isError && recomputeVoeBriefing.variables === month && (
+                  <ErrorState error={recomputeVoeBriefing.error} />
+                )}
+                {!data.has_clusters && (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    먼저 아래 "VOE 클러스터링"을 계산하세요.
+                  </p>
+                )}
+                {data.has_clusters && !data.briefing && (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    아직 브리핑이 계산되지 않았습니다. "재계산"을 눌러보세요.
+                  </p>
+                )}
+                {data.briefing && data.has_clusters && (
+                  <div>
+                    <p className="whitespace-pre-line text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                      {data.briefing}
+                    </p>
+                    {data.briefing_computed_at && (
+                      <p className="mt-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+                        {data.briefing_computed_at.replace("T", " ")} 기준
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
-            ))}
-          </div>
-        )}
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card title="VOE 클러스터링 (주제·키워드 기반)">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          그 달 코멘트를 자유 주제로 묶은 군집입니다. 매일 자동 계산되며, 즉시 반영하려면 그 달을 재계산하세요.
+        </p>
+        {voeClustersMulti.isLoading && <LoadingState />}
+        {voeClustersMulti.isError && <ErrorState error={voeClustersMulti.error} />}
+        <div className="space-y-6">
+          {voeClustersMulti.data?.map(({ month, data }) => {
+            const isPendingThisMonth = recomputeVoeClusters.isPending && recomputeVoeClusters.variables === month;
+            return (
+              <div key={month} className="border-t pt-4 first:border-t-0 first:pt-0" style={{ borderColor: "var(--border)" }}>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <h3 className="text-[13px] font-semibold">{formatMonthLabel(month)}</h3>
+                  <Button
+                    variant="secondary"
+                    onClick={() => recomputeVoeClusters.mutate(month)}
+                    disabled={isPendingThisMonth}
+                  >
+                    {isPendingThisMonth ? "계산 중..." : "재계산"}
+                  </Button>
+                </div>
+                {recomputeVoeClusters.isError && recomputeVoeClusters.variables === month && (
+                  <ErrorState error={recomputeVoeClusters.error} />
+                )}
+                {data.length === 0 && (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    이 달 클러스터 결과가 없습니다. "재계산"을 눌러보세요.
+                  </p>
+                )}
+                {data.length > 0 && (
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {data.map((c, i) => (
+                      <div
+                        key={i}
+                        className="rounded-xl border p-3"
+                        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-[13px] font-medium">{c.cluster_label}</div>
+                          <div className="shrink-0 text-xs" style={{ color: "var(--ink-muted)" }}>
+                            {c.comment_count}건
+                          </div>
+                        </div>
+                        {c.keywords.length > 0 && (
+                          <div className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                            {c.keywords.join(", ")}
+                          </div>
+                        )}
+                        {c.representative_comment && (
+                          <div className="mt-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                            "{c.representative_comment}"
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
         <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
           <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-            월별 VOE 코멘트 수 추이(최근 {VOE_TREND_MONTHS}개월).
+            월별 VOE 코멘트 수 추이(선택한 {months.length}개월).
           </p>
-          {monthlyVolumeQuery.isLoading && <LoadingState />}
-          {monthlyVolumeQuery.isError && <ErrorState error={monthlyVolumeQuery.error} />}
-          {monthlyVolumeQuery.data && <ReactECharts option={volumeTrendOption} style={{ height: 220 }} />}
+          {voeCategoryMulti.isLoading && <LoadingState />}
+          {voeCategoryMulti.isError && <ErrorState error={voeCategoryMulti.error} />}
+          {voeCategoryMulti.data && <ReactECharts option={volumeTrendOption} style={{ height: 220 }} />}
         </div>
       </Card>
     </div>
