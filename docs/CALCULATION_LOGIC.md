@@ -6752,3 +6752,175 @@ state)을 지원했다 — "전체"는 사전에 배치로 계산해 캐시해 �
   `menu-performance/by-meal-type?...&meal_type=%EC%A4%91%EC%8B%9D`
   요청 1건만 나가는지 확인(콘솔 에러 0건).
 - 문서화 후 커밋·푸시.
+
+# §91. 코너별 조식/중식/석식 식수 현황 표(홈) + 코너 등장 순서 전역 고정 (2026-08)
+
+## Context
+
+담당자가 실제 운영 리포트 스크린샷(코너별 조식/중식/석식 식수 현황 —
+Take In 7개 코너를 도담찌개/고슬고슬비빈/싱푸차이나/모던키친/동방식객/
+한식사계/스냅스낵 순으로 나열, 이어서 Take Out/소계/합계, 끼니별로
+메뉴·수량·식수율 3열씩)을 보여주며 두 가지를 요청했다: "스크린샷 형태로
+현황에 나타나게 해주고 모든 기능내 코너 등장 순번을 저 순서대로 해줘."
+`AskUserQuestion`으로 두 가지를 확정했다 — (1) 고정 순서를 "코너
+목록/필터/차트 색상" 같은 순수 나열 자리뿐 아니라 식수순 등 다른 기준으로
+정렬하던 곳까지 **모든 곳 공통 기준**으로 적용, (2) 스크린샷에 없는
+코너(그린미트·미캠회관(전골)·테스트코너 등)는 맨 뒤에 기존 순서(corner_id
+오름차순)대로.
+
+조사 결과 코너 순서를 매기는 자리가 백엔드 7곳 + `simulation.py` 2곳 +
+프론트 3곳, 총 11곳이 서로 다른 독립 구현(일부는 알파벳순, 일부는
+corner_id순, 일부는 아예 무순서)이었다. "모든 곳 공통 기준"을 문자
+그대로 적용하면 이미 다른 기준(식수 desc, core_employee_count desc 등)
+으로 랭킹하는 화면들의 목적이 훼손된다 — 그래서 원칙을 이렇게 나눴다:
+**순수 나열(코너 목록/필터/차트 색상 배정) 자리는 새 고정 순서를 1차
+정렬 키로**, **이미 다른 지표로 랭킹하는 자리는 그 지표를 1차로 유지하고
+새 고정 순서를 동점 처리(tiebreak)로만** 추가한다 — 랭킹 화면 자체의
+의미는 안 바꾸면서 "같은 순위끼리는 항상 같은 순서로 보인다"는 일관성만
+더한다.
+
+스크린샷의 7개 코너 이름은 이 세션 샌드박스 DB에 전혀 없다(샌드박스는
+한식/그린미트/일품/분식/양식/… 같은 자리표시용 이름을 쓴다) — 실제
+운영 코너 이름 그대로 구현하고, 순서 정확성은 시드 데이터를 넣은
+pytest(`test_corner_aliases.py`)로 검증했다. Playwright는 이 샌드박스로
+표의 **구조·계산식·Take Out 격리**만 실제 데이터로 확인했다(정확한
+"도담찌개가 맨 앞" 시각적 확인은 이름이 일치하는 코너가 없어 불가능).
+
+## 설계
+
+### 1. 코너 고정 순서 — `corner_aliases.py`에 단일 소스 추가
+
+새 DB 컬럼/마이그레이션 없이 순수 파이썬 상수로 뒀다(코너 집합이 자주
+안 바뀌어 마이그레이션+시드 비용이 안 맞음):
+
+```python
+# backend/app/services/corner_aliases.py
+CORNER_DISPLAY_ORDER: tuple[str, ...] = (
+    "도담찌개", "고슬고슬비빈", "싱푸차이나", "모던키친",
+    "동방식객", "한식사계", SNAP_SNACK_CORNER_NAME, TAKE_OUT_CORNER_NAME,
+)
+
+def corner_display_sort_key(corner_id: int, corner_name: str) -> tuple[int, int]:
+    """목록에 있으면 그 순번, 없으면 목록 길이(=항상 뒤) — 목록 밖 코너끼리는
+    corner_id 오름차순으로 2차 정렬. 이미 다른 기준(식수 desc 등)으로 랭킹하는
+    화면은 그 기준을 1차로 유지하고 이 키는 tiebreak로만 쓴다."""
+    try:
+        rank = CORNER_DISPLAY_ORDER.index(corner_name)
+    except ValueError:
+        rank = len(CORNER_DISPLAY_ORDER)
+    return (rank, corner_id)
+```
+
+### 2. 11개 호출부에 적용
+
+**백엔드 `analysis.py`** — 7곳:
+- `corner_analysis`(`/corners`): 식수 desc 유지, `corner_display_sort_key`를
+  3차(그린미트류 배치 다음) tiebreak로 추가.
+- `corner_list`(`/corners/list`): corner_id 정렬 → `corner_display_sort_key`
+  정렬로 완전 교체(1차 키) — 이 목록이 프론트 코너 필터/차트 색상 배정의
+  사실상 유일한 출처라, 여기만 바꾸면 그 화면들도 새 순서를 물려받는다.
+- `corner_main_menu_by_date`(`/corners/main-menu-by-date`): 원래 정렬이
+  아예 없었음 — `(plan_date, corner_display_sort_key)`로 추가.
+- `corner_core_layer_summary`: `core_employee_count` desc 유지,
+  `corner_display_sort_key`를 tiebreak로 추가.
+- `headcount_trend`(`group_by="corner"`): 기존 정렬이 `series_key`
+  (문자열 corner_id)의 사전식 비교라 "10" < "2"인 잠재 버그가 있었음 —
+  `corner_display_sort_key`로 교체하며 같이 고쳤다.
+- `weekly_menu_combination_check`/`weekly_menu_rotation`: 각각 클래시
+  개수/플래그 순서 유지, `corner_name` 알파벳 tiebreak를
+  `corner_display_sort_key` tiebreak로 교체.
+
+**백엔드 `simulation.py`** — 2곳(`what_if`, `_forecast_corners`): 둘 다
+`db.query(CornerMaster).all()`(무순서)를 `corner_display_sort_key`로
+정렬해 반환 — 코너별 예측 막대그래프의 응답 배열 순서가 그대로 UI
+나열 순서로 쓰이는 화면이라 정렬 자체가 필요했다.
+
+**프론트 `AnalysisPage.tsx`** — 3곳: `CornerMetricComparisonSection`의
+"코너" 컬럼 정렬(알파벳 → `corner_list` 응답 위치를 랭크로 쓰는
+`cornerRank` Map), `WeeklyMenuReviewTab`의 격자 행 순서와 차트 색상
+배정(`cornerColor`)도 같은 `cornerRank` 기반으로 통일.
+
+**의도적으로 안 건드림**: `weekly_menu_prediction.py`의 코너 순회는
+`dict[corner_id, float]` 룩업 테이블을 만들 뿐 화면에 순서 그대로
+노출되지 않아 영향이 없다. `WeatherScenarioForecastSection`의 코너별
+예측 막대는 `predicted_headcount`(연속값) desc라 동점이 사실상 안
+나서 tiebreak 추가 비용(별도 `corner-list` fetch)이 안 맞다고 판단해
+생략했다.
+
+### 3. 신규 — `GET /analysis/corners/meal-type-headcount`
+
+`backend/app/api/analysis.py`, `corner_list` 바로 다음에 추가. 스크린샷
+표를 그대로 재현하는 단일 날짜(`target_date`) 스냅샷:
+
+```python
+@router.get("/corners/meal-type-headcount")
+def corner_meal_type_headcount(target_date: dt.date, db: Session = Depends(get_db)):
+```
+
+- **데이터 소스**: `daily_corner_stats`(나이트 배치)가 아니라 `meal_log`를
+  그때그때 GROUP BY — `headcount_trend`와 같은 이유(배치를 기다리지
+  않고 "오늘" 스냅샷도 봐야 함, §22/§45의 배치 미갱신 교훈 재적용).
+- **메뉴 열**: `WeeklyMenuPlan.menu_role == MAIN`을 그 날짜·코너·끼니로
+  조인해 채운다(없으면 `null`).
+- **식수율**: `compute_share_of_traffic`(기존 순수함수, 그대로 재사용) —
+  분모는 그 끼니의 **전체 합계(Take Out 포함)**. 스크린샷 수치로 역산
+  검증됨(도담찌개 조식 78/2094=3.7%, Take Out 1963/2094=93.7% 일치).
+- **응답 구조**: `take_in`(Take Out 제외, `corner_display_sort_key` 순),
+  `take_out`(단일 행, 분리), `subtotal`(Take In만 합산),
+  `total`(Take Out까지 포함 — 항상 식수율 100%).
+- Take Out 코너 판별은 기존 `TAKE_OUT_CORNER_NAME` 상수 재사용(별칭
+  병합은 이미 ingest 단계에서 끝나 있음, `corner_aliases.py`).
+
+**`client.ts`**: `CornerMealTypeHeadcountRow`/`MealTypeHeadcountCell`/
+`MealTypeHeadcountBucket`/`CornerMealTypeHeadcountResponse` 타입과
+`api.cornerMealTypeHeadcount({ target_date })` 함수 추가.
+
+**`HomePage.tsx`**: 새 컴포넌트 없이 `HomePage` 본문에 직접
+`Card title="코너별 조식/중식/석식 식수 현황"`로 추가(식수 추이 카드
+다음, 코너별 지표 비교 카드 앞). 이 파일에 그루핑된 2행 `<thead>`
+전례가 없어(`Table` 컴포넌트는 flat 컬럼만 지원) 손수 만든 `<table>`로
+구현 — 1행은 `colSpan=3`으로 조식/중식/석식 그룹, 2행은 메뉴/수량/
+식수율. Take In 행들 → Take Out 행(배경 강조) → 소계 → 합계 순.
+날짜 입력(`<input type="date">`, `max`를 오늘로 제한)으로 스냅샷 날짜를
+고른다 — 페이지 상단의 "선택한 주" 네비게이터와는 완전히 독립된
+state(`mealTypeHeadcountDate`)다(우연히 같은 `type="date"` 셀렉터라
+Playwright 스크립트가 처음에 서로 다른 입력을 헷갈렸을 만큼 시각적으로
+비슷하니, 컴포넌트를 더 추가할 땐 `aria-label`/구조로 구분할 것).
+
+## 손대지 않은 것 (교차 확인)
+
+- `weekly_menu_prediction.py`의 코너 순회(딕셔너리 룩업 전용) — 순서
+  무관, 미적용.
+- `WeatherScenarioForecastSection`의 코너별 예측 막대 — 연속값 desc라
+  tiebreak 비용 대비 효과가 낮아 미적용.
+- 그 외 8개(백/프론트 각각) 적용 지점의 기존 1차 정렬 기준(식수 desc,
+  core_employee_count desc, 클래시 개수 desc 등) — 전부 그대로 유지,
+  이번 변경은 tiebreak만 추가.
+
+## 테스트
+
+- `backend/tests/test_corner_aliases.py`(신규): `corner_display_sort_key`
+  유닛 테스트 — 목록 안 코너 순번, 목록 밖 코너는 뒤로, 목록 밖끼리는
+  corner_id 순, 혼합 집합 end-to-end 정렬.
+- `backend/tests/test_api_ingest_and_analysis.py`:
+  `test_corner_meal_type_headcount_matches_report_layout` — 한식/도담찌개/
+  Take Out 3개 코너에 중식 식수를 시딩해 식수율(분모=끼니 합계, Take Out
+  포함) 계산, Take In/Out 분리, 소계(Take In만)/합계(Take Out 포함) 차이,
+  고정 순서(도담찌개가 한식보다 먼저) 전부 검증.
+- `pytest -q` 전체 회귀 — 562개 전부 통과(기존 557 + 신규 5).
+- `npx tsc -b` + `npx vite build` 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔 에러
+  0건): 새 표가 그루핑된 헤더(조식/중식/석식 → 메뉴/수량/식수율)로
+  렌더되는지, 날짜를 바꾸면(2026-08-01) 실제 데이터(한식 제육볶음
+  20명·50%, 그린미트 9명·22.5%, 일품 11명·27.5%, 소계=합계=40명·100%,
+  이 샌드박스엔 그날 Take Out 기록이 없어 0으로 표시)가 정확히 반영
+  되는지 확인 — 표 구조·계산식·Take Out 격리(있었다면 소계에서
+  제외됐을 것)는 실증됐고, "도담찌개가 맨 앞" 순서 자체는 이 샌드박스에
+  이름이 일치하는 코너가 없어 위 pytest로 대체 검증했다.
+
+## 검증
+
+- `pytest -q` 전체 회귀(562개 통과).
+- `npx tsc -b` + `npx vite build` 클린.
+- 위 Playwright 확인.
+- 문서화(§91) 후 커밋·푸시.

@@ -152,6 +152,10 @@ export function CornerMetricComparisonSection() {
         exclude_take_out: true, // Take Out은 착석 취식이 아니라 혼잡도/만족도 분석 대상이 아님(홈 화면 식수 추이엔 남김)
       }),
   });
+  // §91: "코너" 컬럼 정렬 기준을 알파벳 대신 담당자가 준 코너 고정 순서로 —
+  // corner_list가 이미 이 순서로 내려오므로 그 응답 위치를 그대로 랭크로 쓴다.
+  const cornerOrderQuery = useQuery({ queryKey: ["corner-list"], queryFn: () => api.cornerList() });
+  const cornerRank = new Map((cornerOrderQuery.data ?? []).map((c, i) => [c.corner_id, i]));
   const recomputeDailyStats = useMutation({
     mutationFn: () => api.recomputeDailyStats({ period_start: PERIOD_START, period_end: PERIOD_END }),
     onSuccess: () => query.refetch(),
@@ -165,7 +169,11 @@ export function CornerMetricComparisonSection() {
 
   const sortedCornerRows = [...(query.data ?? [])].sort((a, b) => {
     const dir = sortDir === "asc" ? 1 : -1;
-    if (sortKey === "corner") return a.corner_name.localeCompare(b.corner_name) * dir;
+    if (sortKey === "corner") {
+      const rankA = cornerRank.get(a.corner_id) ?? Infinity;
+      const rankB = cornerRank.get(b.corner_id) ?? Infinity;
+      return (rankA - rankB) * dir;
+    }
     const metricValue = (row: typeof a) =>
       sortKey === "headcount"
         ? (weeklyAvg(row) ?? -Infinity)
@@ -1403,21 +1411,27 @@ function WeeklyMenuReviewTab() {
   });
 
   const slots = slotsQuery.data ?? [];
+  // §91: 담당자가 준 코너 고정 순서 — corner_list가 이미 이 순서로 내려오므로
+  // 그 응답 위치를 랭크로 써서 격자 행/차트 색상 배정에 재사용한다.
+  const cornerOrderQuery = useQuery({ queryKey: ["corner-list"], queryFn: () => api.cornerList() });
+  const cornerRank = new Map((cornerOrderQuery.data ?? []).map((c, i) => [c.corner_id, i]));
+  const cornerRowRank = (items: WeeklyMenuSlot[]) => cornerRank.get(items[0]?.corner_id) ?? Infinity;
   const cornerRows = groupByCorner(slots)
     .map(([cornerName, items]) => [cornerName, items as WeeklyMenuSlot[]] as const)
     .slice()
-    .sort((a, b) => a[0].localeCompare(b[0]));
+    .sort((a, b) => cornerRowRank(a[1]) - cornerRowRank(b[1]));
   // 상세/편집 패널은 슬롯이 정확히 1개 선택됐을 때만 의미가 있다 — 규칙 라벨
   // 클릭으로 여러 개가 한꺼번에 선택되면 이 패널 대신 격자 하이라이트만 보여준다.
   const singleSelectedSlotKey = selectedSlotKeys.size === 1 ? [...selectedSlotKeys][0] : null;
   const selectedSlot = slots.find((s) => `${s.plan_date}_${s.corner_id}` === singleSelectedSlotKey) ?? null;
   const effectiveDonutDay = weekdayDates.includes(donutDay) ? donutDay : weekdayDates[0];
 
-  // dataviz 스킬: "색은 순위가 아니라 개체를 따라간다" — corner_id 고정 순서로
-  // 배정(CornerAnalysisTab의 cornerColor와 동일 컨벤션), 도넛/추이 차트가 공유.
+  // dataviz 스킬: "색은 순위가 아니라 개체를 따라간다" — §91부터는 corner_id
+  // 대신 담당자가 준 코너 고정 순서로 배정(CornerAnalysisTab의 cornerColor와
+  // 동일 컨벤션), 도넛/추이 차트가 공유.
   const cornerList = cornerRows
     .map(([cornerName, items]) => ({ corner_id: items[0].corner_id, corner_name: cornerName }))
-    .sort((a, b) => a.corner_id - b.corner_id);
+    .sort((a, b) => (cornerRank.get(a.corner_id) ?? Infinity) - (cornerRank.get(b.corner_id) ?? Infinity));
   const cornerColor = new Map(cornerList.map((c, i) => [c.corner_id, `var(--series-${(i % 8) + 1})`]));
 
   const predictedRows = Object.values(predictedByPlanId);

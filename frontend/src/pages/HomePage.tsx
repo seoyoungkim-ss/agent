@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import {
@@ -202,6 +202,15 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   const cornerListQuery = useQuery({
     queryKey: ["corner-list"],
     queryFn: () => api.cornerList(),
+  });
+
+  // §91: 코너별 조식/중식/석식 식수 현황 — 담당자가 준 리포트(스크린샷) 양식을
+  // 그대로 재현한다. daily_corner_stats(나이트 배치)와 달리 meal_log를 그때
+  // 그때 집계하는 엔드포인트라 오늘 날짜도 바로 볼 수 있다.
+  const [mealTypeHeadcountDate, setMealTypeHeadcountDate] = useState(isoDaysAgo(0));
+  const cornerMealTypeHeadcountQuery = useQuery({
+    queryKey: ["corner-meal-type-headcount", mealTypeHeadcountDate],
+    queryFn: () => api.cornerMealTypeHeadcount({ target_date: mealTypeHeadcountDate }),
   });
 
   // §81: 담당자가 지정한 7개 코너를 기본으로 켠 상태로 시작한다. 코너 목록은
@@ -658,6 +667,196 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
         {trendPeriods.length > 0 && <ReactECharts option={headcountTrendOption} style={{ height: 320 }} />}
       </Card>
 
+      <Card title="코너별 조식/중식/석식 식수 현황">
+        <div className="mb-3 flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          <label className="flex items-center gap-1.5">
+            날짜
+            <input
+              type="date"
+              value={mealTypeHeadcountDate}
+              max={isoDaysAgo(0)}
+              onChange={(e) => setMealTypeHeadcountDate(e.target.value)}
+              className="rounded border px-2 py-1 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            />
+          </label>
+        </div>
+        {cornerMealTypeHeadcountQuery.isLoading && <LoadingState />}
+        {cornerMealTypeHeadcountQuery.isError && <ErrorState error={cornerMealTypeHeadcountQuery.error} />}
+        {cornerMealTypeHeadcountQuery.data && (
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-[13px]">
+              <thead>
+                <tr>
+                  <th
+                    rowSpan={2}
+                    className="border px-2 py-1.5 text-left align-bottom"
+                    style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+                  >
+                    구분
+                  </th>
+                  {MEAL_TYPE_OPTIONS.map((mt) => (
+                    <th
+                      key={mt}
+                      colSpan={3}
+                      className="border px-2 py-1.5 text-center"
+                      style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+                    >
+                      {mt}
+                    </th>
+                  ))}
+                </tr>
+                <tr>
+                  {MEAL_TYPE_OPTIONS.map((mt) => (
+                    <Fragment key={mt}>
+                      <th
+                        className="border px-2 py-1 text-center font-normal"
+                        style={{ borderColor: "var(--border)", color: "var(--ink-muted)" }}
+                      >
+                        메뉴
+                      </th>
+                      <th
+                        className="border px-2 py-1 text-center font-normal"
+                        style={{ borderColor: "var(--border)", color: "var(--ink-muted)" }}
+                      >
+                        수량
+                      </th>
+                      <th
+                        className="border px-2 py-1 text-center font-normal"
+                        style={{ borderColor: "var(--border)", color: "var(--ink-muted)" }}
+                      >
+                        식수율
+                      </th>
+                    </Fragment>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cornerMealTypeHeadcountQuery.data.take_in.map((row) => (
+                  <tr key={row.corner_id}>
+                    <td className="border px-2 py-1.5" style={{ borderColor: "var(--border)" }}>
+                      {row.corner_name}
+                    </td>
+                    {MEAL_TYPE_OPTIONS.map((mt) => {
+                      const cell = row.meals[mt];
+                      return (
+                        <Fragment key={mt}>
+                          <td
+                            className="border px-2 py-1.5"
+                            style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+                          >
+                            {cell?.menu_name ?? "-"}
+                          </td>
+                          <td className="border px-2 py-1.5 text-right" style={{ borderColor: "var(--border)" }}>
+                            {(cell?.headcount ?? 0).toLocaleString()}
+                          </td>
+                          <td
+                            className="border px-2 py-1.5 text-right"
+                            style={{ borderColor: "var(--border)", color: "var(--ink-muted)" }}
+                          >
+                            {cell?.share_of_traffic != null ? `${(cell.share_of_traffic * 100).toFixed(1)}%` : "-"}
+                          </td>
+                        </Fragment>
+                      );
+                    })}
+                  </tr>
+                ))}
+                {cornerMealTypeHeadcountQuery.data.take_out && (
+                  <tr>
+                    <td
+                      className="border px-2 py-1.5 font-medium"
+                      style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
+                    >
+                      {cornerMealTypeHeadcountQuery.data.take_out.corner_name}
+                    </td>
+                    {MEAL_TYPE_OPTIONS.map((mt) => {
+                      const cell = cornerMealTypeHeadcountQuery.data!.take_out!.meals[mt];
+                      return (
+                        <Fragment key={mt}>
+                          <td
+                            className="border px-2 py-1.5"
+                            style={{ borderColor: "var(--border)", background: "var(--surface-2)", color: "var(--ink-secondary)" }}
+                          >
+                            {cell?.menu_name ?? "-"}
+                          </td>
+                          <td
+                            className="border px-2 py-1.5 text-right"
+                            style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
+                          >
+                            {(cell?.headcount ?? 0).toLocaleString()}
+                          </td>
+                          <td
+                            className="border px-2 py-1.5 text-right"
+                            style={{ borderColor: "var(--border)", background: "var(--surface-2)", color: "var(--ink-muted)" }}
+                          >
+                            {cell?.share_of_traffic != null ? `${(cell.share_of_traffic * 100).toFixed(1)}%` : "-"}
+                          </td>
+                        </Fragment>
+                      );
+                    })}
+                  </tr>
+                )}
+                <tr>
+                  <td className="border px-2 py-1.5 font-medium" style={{ borderColor: "var(--border)" }}>
+                    소계
+                  </td>
+                  {MEAL_TYPE_OPTIONS.map((mt) => {
+                    const bucket = cornerMealTypeHeadcountQuery.data!.subtotal[mt];
+                    return (
+                      <Fragment key={mt}>
+                        <td className="border px-2 py-1.5" style={{ borderColor: "var(--border)" }} />
+                        <td
+                          className="border px-2 py-1.5 text-right font-medium"
+                          style={{ borderColor: "var(--border)" }}
+                        >
+                          {(bucket?.headcount ?? 0).toLocaleString()}
+                        </td>
+                        <td
+                          className="border px-2 py-1.5 text-right"
+                          style={{ borderColor: "var(--border)", color: "var(--ink-muted)" }}
+                        >
+                          {bucket?.share_of_traffic != null ? `${(bucket.share_of_traffic * 100).toFixed(1)}%` : "-"}
+                        </td>
+                      </Fragment>
+                    );
+                  })}
+                </tr>
+                <tr>
+                  <td
+                    className="border px-2 py-1.5 font-semibold"
+                    style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
+                  >
+                    합계
+                  </td>
+                  {MEAL_TYPE_OPTIONS.map((mt) => {
+                    const bucket = cornerMealTypeHeadcountQuery.data!.total[mt];
+                    return (
+                      <Fragment key={mt}>
+                        <td
+                          className="border px-2 py-1.5"
+                          style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
+                        />
+                        <td
+                          className="border px-2 py-1.5 text-right font-semibold"
+                          style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
+                        >
+                          {(bucket?.headcount ?? 0).toLocaleString()}
+                        </td>
+                        <td
+                          className="border px-2 py-1.5 text-right"
+                          style={{ borderColor: "var(--border)", background: "var(--surface-2)", color: "var(--ink-muted)" }}
+                        >
+                          {bucket?.share_of_traffic != null ? `${(bucket.share_of_traffic * 100).toFixed(1)}%` : "-"}
+                        </td>
+                      </Fragment>
+                    );
+                  })}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
 
       {/* 코너별 지표 비교 — 2026-08 재편으로 "분석 > 코너별" 탭에서 현황으로 옮겨왔다. */}
       <CornerMetricComparisonSection />

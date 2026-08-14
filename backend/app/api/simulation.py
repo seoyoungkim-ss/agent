@@ -13,6 +13,7 @@ from app.models.enums import MealType, MenuQuadrant, MenuRole
 from app.models.logs import WeeklyMenuPlan
 from app.models.master import CornerMaster
 from app.models.stats import DailyCornerStats, MenuPerformanceStats
+from app.services.corner_aliases import corner_display_sort_key
 from app.services.holidays import DayClassification, HolidayAdjacency, HolidayService, is_family_day
 from app.services.menu_throughput import build_corner_daily_peak_share, compute_peak_share_ratio, window_minutes
 from app.services.weekly_menu_prediction import compute_expected_wait_minutes
@@ -228,7 +229,11 @@ def what_if(payload: WhatIfRequest, db: Session = Depends(get_db)):
         )
         planned_menu_quadrant = menu_stats.quadrant_label if menu_stats else None
 
-    corners = db.query(CornerMaster).all()
+    # §91: 코너 고정 순서 적용 — 응답 배열 순서가 그대로 UI 나열 순서로
+    # 쓰이는 화면이 있어(예: 코너별 예측 막대그래프) 정렬해서 내려준다.
+    corners = sorted(
+        db.query(CornerMaster).all(), key=lambda c: corner_display_sort_key(c.corner_id, c.corner_name)
+    )
     results = []
     for corner in corners:
         baseline = _baseline_headcount(db, corner.corner_id, payload.meal_type, classification)
@@ -272,7 +277,11 @@ def _forecast_corners(
     (코너별 메뉴 인기도 배수와 곱해진다).
     """
     classification = holiday_svc.classify(target_date)
-    corners = db.query(CornerMaster).all()
+    # §91: 코너 고정 순서 적용 — 응답 배열 순서가 그대로 UI 나열 순서로
+    # 쓰이는 화면이 있어(예: 코너별 예측 막대그래프) 정렬해서 내려준다.
+    corners = sorted(
+        db.query(CornerMaster).all(), key=lambda c: corner_display_sort_key(c.corner_id, c.corner_name)
+    )
     settings = get_settings()
     peak_window_minutes = window_minutes(settings.peak_time_start, settings.peak_time_end)
     meal_window_minutes = window_minutes(settings.meal_period_start, settings.meal_period_end)

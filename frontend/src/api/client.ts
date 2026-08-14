@@ -145,6 +145,32 @@ export interface CornerMainMenuByDateRow {
   menu_name: string;
 }
 
+// §91: 코너별 조식/중식/석식 식수 현황 — 담당자가 준 리포트 양식을 홈에 재현.
+export interface MealTypeHeadcountCell {
+  menu_name: string | null;
+  headcount: number;
+  share_of_traffic: number | null;
+}
+
+export interface CornerMealTypeHeadcountRow {
+  corner_id: number;
+  corner_name: string;
+  meals: Record<string, MealTypeHeadcountCell>; // key: "조식" | "중식" | "석식"
+}
+
+export interface MealTypeHeadcountBucket {
+  headcount: number;
+  share_of_traffic: number | null;
+}
+
+export interface CornerMealTypeHeadcountResponse {
+  target_date: string;
+  take_in: CornerMealTypeHeadcountRow[];
+  take_out: CornerMealTypeHeadcountRow | null;
+  subtotal: Record<string, MealTypeHeadcountBucket>;
+  total: Record<string, MealTypeHeadcountBucket>;
+}
+
 export type TrendDirection = "상승" | "유지" | "하락";
 
 export interface MenuPerformanceRow {
@@ -730,6 +756,9 @@ export const api = {
 
   cornerMainMenuByDate: (params: { period_start: string; period_end: string }) =>
     request<CornerMainMenuByDateRow[]>(`/analysis/corners/main-menu-by-date${qs(params)}`),
+
+  cornerMealTypeHeadcount: (params: { target_date: string }) =>
+    request<CornerMealTypeHeadcountResponse>(`/analysis/corners/meal-type-headcount${qs(params)}`),
 
   divisionAnalysis: (params: {
     period_start: string;

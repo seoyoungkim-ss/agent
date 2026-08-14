@@ -37,7 +37,7 @@ from app.services.corner_core_layer import (
     build_employee_corner_counts,
     classify_corner_core_layer,
 )
-from app.services.corner_aliases import LOW_HEADCOUNT_EXEMPT_CORNER_NAMES
+from app.services.corner_aliases import LOW_HEADCOUNT_EXEMPT_CORNER_NAMES, corner_display_sort_key
 from app.services.food_vector import (
     FOOD_VECTOR_DIMENSIONS,
     FOOD_VECTOR_LABELS_KO,
@@ -316,9 +316,20 @@ def headcount_trend(
         key = (_period_bucket(stat_date, granularity), series_key, series_label)
         totals[key] = totals.get(key, 0) + cnt
 
+    # §91: group_by="corner"일 때 기존 정렬은 series_key(문자열 corner_id)의
+    # 사전식 비교라 "10"이 "2"보다 앞에 오는 버그가 있었다 — 코너 고정 순서로
+    # 바꾸면서 같이 고친다. 다른 group_by는 그대로 튜플 사전식 정렬 유지.
+    if group_by == "corner":
+        items = sorted(
+            totals.items(),
+            key=lambda item: (item[0][0], corner_display_sort_key(int(item[0][1]), item[0][2])),
+        )
+    else:
+        items = sorted(totals.items())
+
     return [
         {"period": period, "series_key": series_key, "series_label": series_label, "headcount": headcount}
-        for (period, series_key, series_label), headcount in sorted(totals.items())
+        for (period, series_key, series_label), headcount in items
     ]
 
 
@@ -829,7 +840,16 @@ def corner_analysis(
                 "avg_peak_throughput_per_min": statistics.fmean(throughputs) if throughputs else None,
             }
         )
-    result.sort(key=lambda r: (bool(r["is_diet_corner"]), -r["headcount_total"]))
+    # §91: 그린미트(다이어트식) 마지막 배치, 그 다음 식수 내림차순 랭킹은
+    # 그대로 유지하고, 같은 식수끼리의 동점 처리만 담당자가 준 코너 고정
+    # 순서로 통일한다(기존엔 동점 처리 기준이 아예 없었음).
+    result.sort(
+        key=lambda r: (
+            bool(r["is_diet_corner"]),
+            -r["headcount_total"],
+            corner_display_sort_key(r["corner_id"], r["corner_name"] or ""),
+        )
+    )
     return result
 
 
@@ -841,12 +861,95 @@ def corner_list(db: Session = Depends(get_db)):
     빈 배열이 된다. 현황 화면의 **코너 필터 선택지**는 배치 상태와 무관하게 항상
     떠 있어야 하므로(headcount-trend가 배치에 의존하지 않는 것과 같은 이유)
     마스터를 직접 읽는 경로를 따로 둔다(2026-08).
+
+    §91: 정렬 기준을 corner_id 오름차순에서 담당자가 준 코너 고정 순서로
+    바꿨다 — 이 목록이 프론트 코너 필터/차트 색상 배정의 사실상 유일한
+    출처라, 여기 순서만 바꾸면 그 화면들도 새 순서를 그대로 물려받는다.
     """
-    corners = db.query(CornerMaster).order_by(CornerMaster.corner_id).all()
+    corners = sorted(
+        db.query(CornerMaster).all(), key=lambda c: corner_display_sort_key(c.corner_id, c.corner_name)
+    )
     return [
         {"corner_id": c.corner_id, "corner_name": c.corner_name, "is_diet_corner": c.is_diet_corner}
         for c in corners
     ]
+
+
+@router.get("/corners/meal-type-headcount")
+def corner_meal_type_headcount(target_date: dt.date, db: Session = Depends(get_db)):
+    """§91: 코너별 조식/중식/석식 식수 현황 — 담당자가 준 리포트(스크린샷) 양식을
+    현황(홈) 화면에 그대로 재현한다.
+
+    `daily_corner_stats`(나이트 배치, §22/§45)는 전날까지만 쌓여 "오늘" 스냅샷을
+    못 보여주므로, headcount_trend와 같은 방식으로 meal_log를 그때그때 집계한다.
+    식수율 분모는 그 끼니의 전체 합계(Take Out 포함) — 스크린샷 수치로 역산
+    검증됨(예: 78/2094=3.7%, Take Out 1963/2094=93.7%).
+    """
+    day_start = dt.datetime.combine(target_date, dt.time())
+    day_end = day_start + dt.timedelta(days=1)
+
+    counts = (
+        db.query(MealLog.corner_id, MealLog.meal_type, func.count().label("cnt"))
+        .filter(MealLog.eaten_at >= day_start, MealLog.eaten_at < day_end)
+        .group_by(MealLog.corner_id, MealLog.meal_type)
+        .all()
+    )
+    headcount_by_corner_meal: dict[tuple[int, MealType], int] = {
+        (corner_id, meal_type): cnt for corner_id, meal_type, cnt in counts
+    }
+    total_by_meal: dict[MealType, int] = {}
+    for (corner_id, meal_type), cnt in headcount_by_corner_meal.items():
+        total_by_meal[meal_type] = total_by_meal.get(meal_type, 0) + cnt
+
+    main_menu_rows = (
+        db.query(WeeklyMenuPlan.corner_id, WeeklyMenuPlan.meal_type, MenuMaster.menu_name)
+        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
+        .filter(WeeklyMenuPlan.plan_date == target_date, WeeklyMenuPlan.menu_role == MenuRole.MAIN)
+        .all()
+    )
+    main_menu_by_corner_meal: dict[tuple[int, MealType], str] = {
+        (corner_id, meal_type): menu_name for corner_id, meal_type, menu_name in main_menu_rows
+    }
+
+    corners = sorted(
+        db.query(CornerMaster).all(), key=lambda c: corner_display_sort_key(c.corner_id, c.corner_name)
+    )
+    take_out_corner_ids = {c.corner_id for c in corners if c.corner_name == TAKE_OUT_CORNER_NAME}
+
+    def _cell(corner_id: int, meal_type: MealType) -> dict:
+        cnt = headcount_by_corner_meal.get((corner_id, meal_type), 0)
+        return {
+            "menu_name": main_menu_by_corner_meal.get((corner_id, meal_type)),
+            "headcount": cnt,
+            "share_of_traffic": compute_share_of_traffic(cnt, total_by_meal.get(meal_type, 0)),
+        }
+
+    def _bucket_summary(headcount: int, meal_type: MealType) -> dict:
+        return {
+            "headcount": headcount,
+            "share_of_traffic": compute_share_of_traffic(headcount, total_by_meal.get(meal_type, 0)),
+        }
+
+    take_in_rows = []
+    take_out_row = None
+    subtotal_by_meal: dict[MealType, int] = {mt: 0 for mt in MealType}
+    for c in corners:
+        cells = {mt.value: _cell(c.corner_id, mt) for mt in MealType}
+        row = {"corner_id": c.corner_id, "corner_name": c.corner_name, "meals": cells}
+        if c.corner_id in take_out_corner_ids:
+            take_out_row = row
+            continue
+        for mt in MealType:
+            subtotal_by_meal[mt] += headcount_by_corner_meal.get((c.corner_id, mt), 0)
+        take_in_rows.append(row)
+
+    return {
+        "target_date": target_date.isoformat(),
+        "take_in": take_in_rows,
+        "take_out": take_out_row,
+        "subtotal": {mt.value: _bucket_summary(subtotal_by_meal[mt], mt) for mt in MealType},
+        "total": {mt.value: _bucket_summary(total_by_meal.get(mt, 0), mt) for mt in MealType},
+    }
 
 
 @router.get("/corners/main-menu-by-date")
@@ -865,6 +968,13 @@ def corner_main_menu_by_date(period_start: dt.date, period_end: dt.date, db: Ses
             WeeklyMenuPlan.menu_role == MenuRole.MAIN,
         )
         .all()
+    )
+    # §91: 원래 정렬이 아예 없었다(SQL 결과 순서 그대로) — 담당자가 준 코너
+    # 고정 순서를 적용한다. 이 엔드포인트는 날짜별 툴팁 조회용이라 프론트가
+    # 순서를 재사용하진 않지만, 다른 코너 나열 화면과 일관성을 맞춘다.
+    corner_names = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+    rows = sorted(
+        rows, key=lambda r: (r[1], corner_display_sort_key(r[0], corner_names.get(r[0], "")))
     )
     return [
         {"corner_id": corner_id, "plan_date": plan_date.isoformat(), "menu_name": menu_name}
@@ -916,7 +1026,11 @@ def corner_core_layer_summary(
                 "non_core_employee_count": total_employees - core_count,
             }
         )
-    result.sort(key=lambda r: r["core_employee_count"], reverse=True)
+    # §91: core_employee_count 내림차순 랭킹은 유지하고, 동점 처리만 코너
+    # 고정 순서로 통일한다.
+    result.sort(
+        key=lambda r: (-r["core_employee_count"], corner_display_sort_key(r["corner_id"], r["corner_name"]))
+    )
     return result
 
 
@@ -1569,11 +1683,12 @@ def weekly_menu_combination_check(
         )
 
     # 충돌이 많은 슬롯을 위로 — 담당자가 고쳐야 할 것부터 보여야 한다.
+    # §91: 충돌 많은 순 → 날짜 순 랭킹은 유지, 동점 처리만 코너 고정 순서로.
     results.sort(
         key=lambda r: (
             -(len(r["ingredient_clashes"]) + len(r["vector_clashes"])),
             r["plan_date"],
-            r["corner_name"],
+            corner_display_sort_key(r["corner_id"], r["corner_name"]),
         )
     )
     return {
@@ -1918,7 +2033,14 @@ def weekly_menu_rotation(
         RotationFlag.FIRST_TIME.value: 4,
         RotationFlag.NORMAL.value: 5,
     }
-    results.sort(key=lambda r: (flag_order.get(r["flag"], 9), r["plan_date"], r["corner_name"]))
+    # §91: 경고 심각도 → 날짜 순 랭킹은 유지, 동점 처리만 코너 고정 순서로.
+    results.sort(
+        key=lambda r: (
+            flag_order.get(r["flag"], 9),
+            r["plan_date"],
+            corner_display_sort_key(r["corner_id"], r["corner_name"]),
+        )
+    )
 
     overused = find_overused_menus(planned_in_period)
 

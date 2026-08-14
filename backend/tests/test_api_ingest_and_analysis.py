@@ -2131,6 +2131,71 @@ def test_corner_main_menu_by_date_returns_main_menu_only(client):
     assert body[0]["plan_date"] == MONDAY.isoformat()
 
 
+def test_corner_meal_type_headcount_matches_report_layout(client):
+    """§91: 코너별 조식/중식/석식 식수 현황 — 담당자가 준 리포트 양식.
+
+    식수율 분모는 그 끼니의 합계(Take Out 포함) — 한식/도담찌개/Take Out
+    셋 다 중식을 갖고, 소계(Take In만)와 합계(Take Out 포함) 둘 다 검증한다.
+    """
+    resp = client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                {
+                    "plan_date": MONDAY.isoformat(),
+                    "meal_type": "중식",
+                    "corner_name": "한식",
+                    "menu_name": "제육볶음",
+                    "menu_role": "메인",
+                    "source_row_raw": "제육볶음",
+                }
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY, menu_name="제육볶음", corner_name="한식")
+    _ingest_meal_log(client, "E2", "맛남", eaten_date=MONDAY, menu_name="제육볶음", corner_name="한식")
+    _ingest_meal_log(client, "E3", "맛남", eaten_date=MONDAY, menu_name=None, corner_name="Take Out")
+    _ingest_meal_log(client, "E4", "맛남", eaten_date=MONDAY, menu_name=None, corner_name="Take Out")
+    _ingest_meal_log(client, "E5", "맛남", eaten_date=MONDAY, menu_name=None, corner_name="Take Out")
+    _ingest_meal_log(client, "E6", "맛남", eaten_date=MONDAY, menu_name=None, corner_name="도담찌개")
+    _ingest_meal_log_with_meal_type(client, "E7", "맛남", "조식", "토스트", eaten_date=MONDAY)
+
+    resp = client.get("/api/analysis/corners/meal-type-headcount", params={"target_date": MONDAY.isoformat()})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    take_in_names = [row["corner_name"] for row in body["take_in"]]
+    assert "Take Out" not in take_in_names
+    # §91: 담당자가 준 코너 고정 순서 — 도담찌개(목록 안)가 한식(목록 밖)보다 먼저.
+    assert take_in_names.index("도담찌개") < take_in_names.index("한식")
+
+    hansik = next(row for row in body["take_in"] if row["corner_name"] == "한식")
+    assert hansik["meals"]["중식"]["headcount"] == 2
+    assert hansik["meals"]["중식"]["menu_name"] == "제육볶음"
+    assert hansik["meals"]["중식"]["share_of_traffic"] == pytest.approx(2 / 6)
+
+    dodam = next(row for row in body["take_in"] if row["corner_name"] == "도담찌개")
+    assert dodam["meals"]["중식"]["headcount"] == 1
+    assert dodam["meals"]["중식"]["menu_name"] is None
+
+    assert body["take_out"]["corner_name"] == "Take Out"
+    assert body["take_out"]["meals"]["중식"]["headcount"] == 3
+    assert body["take_out"]["meals"]["중식"]["share_of_traffic"] == pytest.approx(3 / 6)
+
+    # 소계 = Take In만(한식 2 + 도담찌개 1), 합계 = Take Out까지(+3) = 6.
+    assert body["subtotal"]["중식"]["headcount"] == 3
+    assert body["total"]["중식"]["headcount"] == 6
+    assert body["total"]["중식"]["share_of_traffic"] == pytest.approx(1.0)
+
+    # 조식은 한식 1건뿐 — Take Out 등 다른 코너는 그 끼니에 0으로 응답.
+    assert body["subtotal"]["조식"]["headcount"] == 1
+    assert body["total"]["조식"]["headcount"] == 1
+    assert body["take_out"]["meals"]["조식"]["headcount"] == 0
+
+
 def test_top_menus_by_headcount_ranks_by_appearance_count(client):
     _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY, menu_name="제육볶음")
     _ingest_meal_log(client, "E2", "맛남", eaten_date=MONDAY, menu_name="제육볶음")
