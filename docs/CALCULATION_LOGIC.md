@@ -7238,3 +7238,71 @@ React가 경고한다). `borderLeftColor: toneColor ?? "var(--border)"`,
   일치하는지, "평일" 탭으로 바꾸면 안내 문구가 사라지고 35(174÷5)로
   바뀌는지 확인.
 - 문서화(§94) 후 커밋·푸시.
+
+# §95. 식수 추이 차트 — 조회 기간을 사용자가 직접 설정(기본 최근 1주) (2026-08)
+
+## Context
+
+담당자 요청: "식수추이 그래프도 기간을 설정할 수 있게 해붜 디폴트는 최근
+한 주 단위로." 기존 `HomePage.tsx`의 "식수 추이" 차트는 조회 기간을
+사용자가 못 정했다 — `trendGranularity`(일간/주간/월간)를 고르면
+`TREND_LOOKBACK_DAYS`(일=30일/주=84일/월=365일) 표에서 기간이 자동으로
+정해졌다(§81). §93에서 `CornerMetricComparisonSection`에 이미 만든
+"기간을 사용자가 직접 고른다"는 패턴을 이 차트에도 적용한다.
+
+## 설계
+
+`frontend/src/pages/HomePage.tsx`: `trendPeriodStart`/`trendPeriodEnd`를
+`trendGranularity`에서 파생시키던 것을 독립적인 state로 바꾼다:
+
+```ts
+const [trendPeriodStart, setTrendPeriodStart] = useState(() => isoDaysAgo(6));
+const [trendPeriodEnd, setTrendPeriodEnd] = useState(() => isoDaysAgo(0));
+```
+
+기본값은 오늘 포함 최근 7일("최근 한 주"). `기간 단위`(일간/주간/월간,
+막대를 어떻게 쪼갤지)와 이제 완전히 분리된 개념이다 — 기간 단위는 그대로
+두고, 조회 범위만 사용자가 정한다.
+
+**UI**: "기간 단위"/"나누기" 컨트롤 위에 새 줄로 "조회 기간" 시작일·종료일
+`<input type="date">` 2개 + 빠른 선택 버튼 4개(최근 1주/4주/3개월/6개월,
+각각 `isoDaysAgo(6/27/89/179)`)를 추가했다. 시작일 입력의 `max`는 종료일,
+종료일 입력의 `min`은 시작일·`max`는 오늘로 제한해 역전된 범위를 못
+고르게 막는다. 기존에 있던 "{trendPeriodStart} ~ {trendPeriodEnd} 기준"
+캡션 문구는 날짜 입력창 자체가 그 정보를 이미 보여줘서 중복이라 지우고,
+"기본은 최근 한 주입니다"로 교체했다.
+
+`totalHeadcountTrend`(§93, 총식수 꺾은선 전용 무필터 쿼리)와
+`cornerMainMenu`(일간×코너별 툴팁용)도 같은 `trendPeriodStart`/
+`trendPeriodEnd`를 그대로 참조하므로 추가 배선 없이 자동으로 새 기간을
+따라간다.
+
+## 손대지 않은 것 (교차 확인)
+
+- `GET /analysis/headcount-trend` 백엔드 — 무변경, 이미 임의의
+  `period_start`/`period_end`를 받는다.
+- `trendGranularity`/`trendGroupBy`/코너 필터/회사구분 필터/끼니
+  체크박스 — 로직 그대로, 조회 기간과는 독립적으로 계속 동작.
+- `trendAvgWindow`("최근 N일 평균" 뱃지)와 그 표시 조건(`trendGranularity
+  === "daily"`) — 무변경.
+
+## 테스트
+
+- 백엔드 변경 없음 — `pytest -q` 재실행 불필요(회귀 확인 차원에서
+  563개 재실행, 전부 통과).
+- `npx tsc -b` + `npx vite build` 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건): (1) 페이지 첫 로드 시 조회 기간이 오늘 포함 최근 7일로
+  뜨고, `GET /analysis/headcount-trend` 요청이 정확히 그 7일 범위로
+  나가는지, (2) "최근 3개월" 버튼을 누르면 날짜 입력 두 개가 즉시
+  바뀌고 요청도 그 범위로 다시 나가는지, (3) 시작일을 직접
+  2026-07-20으로 바꾸면 차트(막대+총식수 꺾은선)가 그 기간 데이터로
+  다시 그려지는지.
+- 문서화(§95) 후 커밋·푸시.
+
+## 검증
+
+- `pytest -q` 전체 회귀(563개 통과, 백엔드 변경 없음).
+- `npx tsc -b` + `npx vite build` 클린.
+- 위 Playwright 확인.
+- 문서화(§95) 후 커밋·푸시.

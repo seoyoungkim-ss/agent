@@ -221,9 +221,16 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   const [trendDivisions, setTrendDivisions] = useState<Division[]>([]);
   // §80: "OO 일자간 일평균 식수" 요청 — 일간 단위에서만 의미가 있는 선택창.
   const [trendAvgWindow, setTrendAvgWindow] = useState<7 | 14 | 30>(7);
-  const TREND_LOOKBACK_DAYS: Record<Granularity, number> = { daily: 30, weekly: 84, monthly: 365 };
-  const trendPeriodStart = isoDaysAgo(TREND_LOOKBACK_DAYS[trendGranularity]);
-  const trendPeriodEnd = isoDaysAgo(0);
+  // §95: 조회 기간을 기간 단위(일/주/월)에서 자동으로 정하던 것(§81)을 사용자가
+  // 직접 고르는 방식으로 바꿨다 — 기본값은 "최근 한 주"(오늘 포함 7일).
+  const [trendPeriodStart, setTrendPeriodStart] = useState(() => isoDaysAgo(6));
+  const [trendPeriodEnd, setTrendPeriodEnd] = useState(() => isoDaysAgo(0));
+  const TREND_PERIOD_PRESETS: { label: string; days: number }[] = [
+    { label: "최근 1주", days: 6 },
+    { label: "최근 4주", days: 27 },
+    { label: "최근 3개월", days: 89 },
+    { label: "최근 6개월", days: 179 },
+  ];
 
   const cornerListQuery = useQuery({
     queryKey: ["corner-list"],
@@ -592,8 +599,48 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
 
       <Card title="식수 추이 — 기간 단위 · 끼니 · 코너 · 회사구분">
         <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          {trendPeriodStart} ~ {trendPeriodEnd} 기준. 기간 단위·나누기 기준을 고르고 필터로 범위를 좁히세요.
+          기간 단위·나누기 기준을 고르고 필터로 범위를 좁히세요. 기본은 최근 한 주입니다.
         </p>
+        <div className="mb-3 flex flex-wrap items-center gap-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+              조회 기간
+            </span>
+            <input
+              type="date"
+              value={trendPeriodStart}
+              max={trendPeriodEnd}
+              onChange={(e) => e.target.value && setTrendPeriodStart(e.target.value)}
+              className="rounded-md border px-2 py-1.5 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            />
+            <span className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+              ~
+            </span>
+            <input
+              type="date"
+              value={trendPeriodEnd}
+              min={trendPeriodStart}
+              max={isoDaysAgo(0)}
+              onChange={(e) => e.target.value && setTrendPeriodEnd(e.target.value)}
+              className="rounded-md border px-2 py-1.5 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            />
+            {TREND_PERIOD_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                onClick={() => {
+                  setTrendPeriodStart(isoDaysAgo(preset.days));
+                  setTrendPeriodEnd(isoDaysAgo(0));
+                }}
+                className="rounded-md border px-2 py-1.5 text-xs transition-colors"
+                style={{ borderColor: "var(--border)", background: "var(--surface)", color: "var(--ink-secondary)" }}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="mb-3 flex flex-wrap items-center gap-4">
           <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
             기간 단위
