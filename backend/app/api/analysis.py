@@ -990,36 +990,6 @@ def corner_meal_type_headcount(target_date: dt.date, db: Session = Depends(get_d
     }
 
 
-@router.get("/corners/main-menu-by-date")
-def corner_main_menu_by_date(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
-    """코너×날짜별 메인메뉴명 — 코너별 분석 서브그래프의 날짜 툴팁에 "그날 뭐
-    나왔는지" 붙이려는 용도(2026-07). weekly_menu_plan은 운영자가 별도 업로드해야
-    해 누락될 수 있어(32절), 없는 날짜/코너는 응답에서 그냥 빠진다(프론트가
-    없는 조합은 메뉴명 없이 표시).
-    """
-    rows = (
-        db.query(WeeklyMenuPlan.corner_id, WeeklyMenuPlan.plan_date, MenuMaster.menu_name)
-        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
-        .filter(
-            WeeklyMenuPlan.plan_date >= period_start,
-            WeeklyMenuPlan.plan_date <= period_end,
-            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
-        )
-        .all()
-    )
-    # §91: 원래 정렬이 아예 없었다(SQL 결과 순서 그대로) — 담당자가 준 코너
-    # 고정 순서를 적용한다. 이 엔드포인트는 날짜별 툴팁 조회용이라 프론트가
-    # 순서를 재사용하진 않지만, 다른 코너 나열 화면과 일관성을 맞춘다.
-    corner_names = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
-    rows = sorted(
-        rows, key=lambda r: (r[1], corner_display_sort_key(r[0], corner_names.get(r[0], "")))
-    )
-    return [
-        {"corner_id": corner_id, "plan_date": plan_date.isoformat(), "menu_name": menu_name}
-        for corner_id, plan_date, menu_name in rows
-    ]
-
-
 @router.get("/corners/core-layer-summary")
 def corner_core_layer_summary(
     period_start: dt.date,

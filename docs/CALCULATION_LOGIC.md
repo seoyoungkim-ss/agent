@@ -7306,3 +7306,79 @@ const [trendPeriodEnd, setTrendPeriodEnd] = useState(() => isoDaysAgo(0));
 - `npx tsc -b` + `npx vite build` 클린.
 - 위 Playwright 확인.
 - 문서화(§95) 후 커밋·푸시.
+
+# §96. 식수 추이 차트 — "일간" 단위 제거(주간/월간만) (2026-08)
+
+## Context
+
+담당자 요청: "주간으로 했는데 하루치가 나와 / 일간은 없애고 주간/월간만
+보여줘." §95에서 조회 기간 기본값을 "최근 1주"(7일)로 바꿨는데, 주간
+단위(`trendGranularity="weekly"`)와 겹치면 7일 창이 ISO 주 하나에 걸치는
+경우가 많아 막대가 1~2개만 찍혀 "하루치만 나온 것처럼" 보인다. 담당자는
+이 조합 자체를 문제 삼지 않고 "일간" 옵션 자체를 없애 달라고 명시했다.
+
+## 설계
+
+`frontend/src/pages/HomePage.tsx`의 "기간 단위" `SegmentedControl`에서
+`{ label: "일간", value: "daily" as Granularity }` 옵션만 제거 — 주간/월간
+두 개만 남는다. `trendGranularity`의 기본값은 이미 §81에서 `"weekly"`로
+바뀌어 있어 추가 변경이 필요 없었다.
+
+"일간"을 UI에서 고를 수 없게 되면서 완전히 쓸모없어지는 일간 전용
+기능 3개를 같이 걷어냈다(이 세션의 관례 — UI에서 도달 불가능해진
+코드는 스택 전체에서 삭제):
+
+- **"최근 N일 평균" 뱃지**(`trendGranularity === "daily"`일 때만
+  노출되던 `trendAvgWindow`/`trendRecentAvg` 상태 + 7일/14일/30일
+  SegmentedControl) — 일간 단위가 없어지면 조건이 영원히 거짓이라
+  전체 삭제.
+- **일간×코너별 툴팁의 "그날 메인메뉴" 표시** — `trendMainMenuEnabled
+  = trendGranularity === "daily" && trendGroupBy === "corner"`로
+  게이트돼 있던 `cornerMainMenu` 쿼리와 `cornerNameById`/
+  `mainMenuByCornerDate` 맵 생성 로직, 툴팁 formatter의 메뉴줄 삭제.
+  ECharts 툴팁은 이제 계열명+식수만 보여준다.
+- **`GET /analysis/corners/main-menu-by-date`**
+  (`corner_main_menu_by_date`, `backend/app/api/analysis.py`) —
+  위 툴팁 기능의 유일한 소비처였던 백엔드 엔드포인트. 전용 헬퍼가
+  없는 자기완결형 함수라 통째로 삭제. `client.ts`의
+  `cornerMainMenuByDate` 함수·`CornerMainMenuByDateRow` 타입, 그리고
+  `backend/tests/test_api_ingest_and_analysis.py`의
+  `test_corner_main_menu_by_date_returns_main_menu_only` 테스트도
+  같이 삭제(§82/§85/§91/§92에서 이미 반복한 "고아 코드 전량 삭제"
+  원칙 그대로 적용).
+
+`Granularity` 공유 타입(`"daily"|"weekly"|"monthly"`) 자체는 손대지
+않았다 — 백엔드 `GET /analysis/headcount-trend`가 여전히 제네릭하게
+`"daily"`를 받을 수 있고, 이번에 없앤 건 이 화면의 UI 옵션 하나뿐이라
+타입까지 좁힐 이유가 없다.
+
+## 손대지 않은 것 (교차 확인)
+
+- `GET /analysis/headcount-trend` 백엔드 — `granularity` 파라미터로
+  `"daily"`를 여전히 받을 수 있다(이 화면에서만 UI로 고를 수 없게 됨).
+- `totalHeadcountTrend`(§93, 총식수 꺾은선 무필터 쿼리) — 그대로.
+- "조회 기간" 시작일/종료일 입력 + 프리셋 4개(§95) — 그대로.
+- 코너별 분석(`CornerMetricComparisonSection`)의 "주간 편성 규칙"·
+  요일 배지 등 다른 "일간" 관련 로직 — 이번 요청과 무관, 안 건드림.
+
+## 테스트
+
+- `backend/tests/test_api_ingest_and_analysis.py`에서 위 테스트 삭제
+  후 `pytest -q` 전체 회귀(563→562개, 나머지 전부 통과).
+- `npx tsc -b` — 삭제된 `trendAvgWindow`/`trendRecentAvg`/
+  `cornerMainMenu`/`cornerNameById`/`mainMenuByCornerDate` 잔여
+  참조 없음(빌드 성공으로 확인).
+- `npx vite build` 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건): (1) "기간 단위" 컨트롤에 주간/월간 두 버튼만 보이고
+  "일간" 버튼이 없는지, (2) 기본 진입 시 주간 단위·최근 7일 기간이
+  유지되는지, (3) "최근 4주" 프리셋으로 바꾸면 주간 막대가 여러 개
+  (2026-07-20, 2026-07-27) 정상적으로 찍히는지, (4) "월간"으로
+  전환해도 정상 렌더되는지.
+
+## 검증
+
+- `pytest -q` 전체 회귀(562개 통과).
+- `npx tsc -b` + `npx vite build` 클린.
+- 위 Playwright 확인 — 콘솔 에러 0건.
+- 문서화(§96) 후 커밋·푸시.

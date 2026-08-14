@@ -219,8 +219,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   const [trendGroupBy, setTrendGroupBy] = useState<HeadcountGroupBy>("corner");
   const [trendCornerIds, setTrendCornerIds] = useState<number[]>([]);
   const [trendDivisions, setTrendDivisions] = useState<Division[]>([]);
-  // §80: "OO 일자간 일평균 식수" 요청 — 일간 단위에서만 의미가 있는 선택창.
-  const [trendAvgWindow, setTrendAvgWindow] = useState<7 | 14 | 30>(7);
   // §95: 조회 기간을 기간 단위(일/주/월)에서 자동으로 정하던 것(§81)을 사용자가
   // 직접 고르는 방식으로 바꿨다 — 기본값은 "최근 한 주"(오늘 포함 7일).
   const [trendPeriodStart, setTrendPeriodStart] = useState(() => isoDaysAgo(6));
@@ -269,14 +267,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
     if (ids.length > 0) setTrendCornerIds(ids);
   }, [cornerListQuery.data]);
 
-  // 일간 × 코너별로 볼 때 툴팁에 그날 그 코너의 메인메뉴를 덧붙인다(2026-07 요청,
-  // 코너별 주간 추이 차트에 있던 기능을 통합 차트로 옮겨옴). 그 조합일 때만 조회한다.
-  const trendMainMenuEnabled = trendGranularity === "daily" && trendGroupBy === "corner";
-  const cornerMainMenu = useQuery({
-    queryKey: ["corner-main-menu-by-date", trendPeriodStart, trendPeriodEnd],
-    queryFn: () => api.cornerMainMenuByDate({ period_start: trendPeriodStart, period_end: trendPeriodEnd }),
-    enabled: trendMainMenuEnabled,
-  });
   const headcountTrend = useQuery({
     queryKey: [
       "headcount-trend",
@@ -367,16 +357,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   // 패밀리데이 월별 추이 카드는 제거됐다(2026-08 현황 재편) — 아래 "식수 추이"
   // 통합 차트에서 classification=패밀리데이 + 기간단위=월간으로 같은 걸 볼 수 있다.
 
-  // 툴팁은 시리즈 "이름"(코너명)만 알 수 있는데 main-menu-by-date는 corner_id로
-  // 오므로, 코너 목록으로 id→이름을 옮겨 코너명 기준 키로 맞춘다.
-  const cornerNameById = new Map((cornerListQuery.data ?? []).map((c) => [c.corner_id, c.corner_name]));
-  const mainMenuByCornerDate = new Map(
-    (cornerMainMenu.data ?? []).map((r) => [
-      `${cornerNameById.get(r.corner_id) ?? r.corner_id}|${r.plan_date}`,
-      r.menu_name,
-    ]),
-  );
-
   // 통합 식수 추이 차트 — series_key로 시리즈를 가르고 period를 x축으로 쓴다.
   const trendRows = headcountTrend.data ?? [];
   const trendPeriods = [...new Set(trendRows.map((r) => r.period))].sort();
@@ -404,9 +384,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
         const header = params[0]?.axisValue ?? "";
         const lines = params.map((p) => {
           const v = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
-          const menu = trendMainMenuEnabled ? mainMenuByCornerDate.get(`${p.seriesName}|${header}`) : undefined;
-          const menuLine = menu ? `<br/>&nbsp;&nbsp;메뉴: ${menu}` : "";
-          return `${p.marker}${p.seriesName}: ${typeof v === "number" ? Math.round(v) : v}명${menuLine}`;
+          return `${p.marker}${p.seriesName}: ${typeof v === "number" ? Math.round(v) : v}명`;
         });
         return [header, ...lines].join("<br/>");
       },
@@ -455,15 +433,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       },
     ],
   };
-
-  // §80: "OO 일자간 일평균 식수" — 일간 단위일 때만 최근 N일 평균을 보여준다
-  // (이미 가져온 trendRows/trendPeriods를 클라이언트에서 합산하는 것뿐이라
-  // 새 백엔드 호출이 필요 없다).
-  const trendRecentPeriods = trendPeriods.slice(-trendAvgWindow);
-  const trendRecentAvg =
-    trendRecentPeriods.length > 0
-      ? trendRecentPeriods.reduce((sum, p) => sum + (totalHeadcountByPeriod.get(p) ?? 0), 0) / trendRecentPeriods.length
-      : null;
 
   const exportUrl = `/api/dashboard/weekly-summary/export?start_date=${selectedMonday}&end_date=${saturdayOfSelected}${
     classification !== "전체" ? `&classification=${encodeURIComponent(classification)}` : ""
@@ -647,7 +616,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
             <SegmentedControl
               value={trendGranularity}
               options={[
-                { label: "일간", value: "daily" as Granularity },
                 { label: "주간", value: "weekly" as Granularity },
                 { label: "월간", value: "monthly" as Granularity },
               ]}
@@ -736,22 +704,6 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
           <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
             이 조건에 해당하는 취식 데이터가 없습니다.
           </p>
-        )}
-        {trendGranularity === "daily" && trendRecentAvg != null && (
-          <div className="mb-2 flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-            <span>
-              최근 {trendAvgWindow}일 평균: <strong>{Math.round(trendRecentAvg).toLocaleString()}명</strong>
-            </span>
-            <SegmentedControl
-              value={String(trendAvgWindow)}
-              options={[
-                { label: "7일", value: "7" },
-                { label: "14일", value: "14" },
-                { label: "30일", value: "30" },
-              ]}
-              onChange={(v) => setTrendAvgWindow(Number(v) as 7 | 14 | 30)}
-            />
-          </div>
         )}
         {trendPeriods.length > 0 && <ReactECharts option={headcountTrendOption} style={{ height: 320 }} />}
       </Card>

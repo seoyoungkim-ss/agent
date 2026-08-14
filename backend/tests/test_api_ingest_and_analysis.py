@@ -2119,44 +2119,6 @@ def test_menu_comments_unknown_menu_returns_404(client):
     assert resp.status_code == 404
 
 
-def test_corner_main_menu_by_date_returns_main_menu_only(client):
-    resp = client.post(
-        "/api/ingest/weekly-menu",
-        json={
-            "rows": [
-                {
-                    "plan_date": MONDAY.isoformat(),
-                    "meal_type": "중식",
-                    "corner_name": "한식",
-                    "menu_name": "제육볶음",
-                    "menu_role": "메인",
-                    "source_row_raw": "제육볶음",
-                },
-                {
-                    "plan_date": MONDAY.isoformat(),
-                    "meal_type": "중식",
-                    "corner_name": "한식",
-                    "menu_name": "김치",
-                    "menu_role": "부찬",
-                    "source_row_raw": "김치",
-                },
-            ]
-        },
-        headers=AUTH_HEADERS,
-    )
-    assert resp.status_code == 200
-
-    resp = client.get(
-        "/api/analysis/corners/main-menu-by-date",
-        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert len(body) == 1
-    assert body[0]["menu_name"] == "제육볶음"
-    assert body[0]["plan_date"] == MONDAY.isoformat()
-
-
 def test_corner_meal_type_headcount_matches_report_layout(client):
     """§91: 코너별 조식/중식/석식 식수 현황 — 담당자가 준 리포트 양식.
 

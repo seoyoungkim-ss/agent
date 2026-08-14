@@ -146,12 +146,6 @@ export interface ImprovementPoint {
   voe_summary?: string | null;
 }
 
-export interface CornerMainMenuByDateRow {
-  corner_id: number;
-  plan_date: string;
-  menu_name: string;
-}
-
 // §91: 코너별 조식/중식/석식 식수 현황 — 담당자가 준 리포트 양식을 홈에 재현.
 export interface MealTypeHeadcountCell {
   menu_name: string | null;
@@ -746,9 +740,6 @@ export const api = {
 
   // 코너 목록만(통계 없음) — 배치 집계 상태와 무관하게 필터 선택지를 채우려는 용도.
   cornerList: () => request<CornerListRow[]>("/analysis/corners/list"),
-
-  cornerMainMenuByDate: (params: { period_start: string; period_end: string }) =>
-    request<CornerMainMenuByDateRow[]>(`/analysis/corners/main-menu-by-date${qs(params)}`),
 
   cornerMealTypeHeadcount: (params: { target_date: string }) =>
     request<CornerMealTypeHeadcountResponse>(`/analysis/corners/meal-type-headcount${qs(params)}`),
