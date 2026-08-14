@@ -832,49 +832,6 @@ def corner_analysis(
     return result
 
 
-@router.get("/corners/trend")
-def corner_analysis_trend(
-    period_start: dt.date,
-    period_end: dt.date,
-    granularity: Literal["daily", "weekly", "monthly"] = "weekly",
-    classification: str | None = Query(default=None, description="평일 | 주말+공휴일 | 패밀리데이"),
-    exclude_take_out: bool = Query(default=False),
-    meal_types: list[MealType] | None = Query(
-        default=None, description="조식/중식/석식 중 선택 — 여러 개면 합산, 생략 시 전체 합산"
-    ),
-    db: Session = Depends(get_db),
-):
-    """PRD 6.2 확장: 코너별 만족도/피크타임 서브속도(및 식수)의 기간별(일간·주간·월간)
-    추이. 홈 화면의 "코너별 주간 식수 추이"는 이 엔드포인트를 daily로 호출한다."""
-    rows, corners = _load_corner_stats(db, period_start, period_end, classification, meal_types)
-
-    buckets: dict[tuple[str, int], list[DailyCornerStats]] = {}
-    for row in rows:
-        corner = corners.get(row.corner_id)
-        if exclude_take_out and corner and corner.corner_name == TAKE_OUT_CORNER_NAME:
-            continue
-        key = (_period_bucket(row.stat_date, granularity), row.corner_id)
-        buckets.setdefault(key, []).append(row)
-
-    result = []
-    for (period, corner_id), stats in sorted(buckets.items()):
-        corner = corners.get(corner_id)
-        scores = [s.avg_taste_score for s in stats if s.avg_taste_score is not None]
-        throughputs = [s.peak_throughput_per_min for s in stats if s.peak_throughput_per_min is not None]
-        result.append(
-            {
-                "period": period,
-                "corner_id": corner_id,
-                "corner_name": corner.corner_name if corner else None,
-                "is_diet_corner": corner.is_diet_corner if corner else None,
-                "headcount": sum(s.headcount for s in stats),
-                "avg_taste_score": statistics.fmean(scores) if scores else None,
-                "avg_peak_throughput_per_min": statistics.fmean(throughputs) if throughputs else None,
-            }
-        )
-    return result
-
-
 @router.get("/corners/list")
 def corner_list(db: Session = Depends(get_db)):
     """코너 목록만 — corner_master를 그대로 읽는다(통계 없음).

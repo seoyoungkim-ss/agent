@@ -6119,3 +6119,126 @@ const WEATHER_TO_EVENT: Partial<Record<Weather, WeatherEvent>> = {
   선택(폭설)이 그대로 유지됨을 스크린샷으로 확인, (4) 날씨유형·계절·
   상관관계 3개 랭킹 표에 화살표(↑/↓/→)가 라벨 앞에 붙어 보임 확인.
 - 문서화 후 커밋·푸시.
+
+# §85. 홈 화면 정리(설명 요약·중복 차트 삭제) + 코너별 분석 표 중심 재구성 (2026-08)
+
+## Context
+
+담당자가 4가지를 요청했다: (1) 전체 페이지에서 긴 설명 문단을 사용자
+시점으로 요약, (2) "주간 식수 추이" 차트 삭제(바로 아래 "식수 추이 —
+기간 단위 · 끼니 · 코너 · 회사구분" 통합 차트가 같은 정보를 이미
+보여줌), (3) "금주 예상 식수 · 점유율 · 대기시간" 카드 삭제, (4) 코너별
+분석 — 지표 비교에서 그래프는 지우고 표만 남기며 "그린미트" 컬럼 삭제 +
+컬럼별 정렬 추가.
+
+조사(Explore 에이전트 3개 병렬 + 직접 코드 확인)로 두 가지 중요한
+교차 참조를 찾아 잘못된 삭제를 피했다:
+
+- `plannedHeadcountRanking` 쿼리는 삭제 대상 카드 안에 있었지만, 그
+  파생값 `topPlannedHeadcountRow`는 스탯타일 그리드의 "최고 식수
+  코너/메뉴" 타일(§83)이 그대로 쓰고 있었다 — 쿼리와
+  `plannedHeadcountBars`/`topPlannedHeadcountRow`는 남기고, 카드 안의
+  예상 식수 랭킹 가로막대(JSX)와 그 전용 ECharts 옵션만 지웠다.
+- `api.weeklyMenuPredictedImpactSummary`(점유율/대기시간 엔드포인트)는
+  삭제 대상 카드 말고 `AnalysisPage.tsx`의 주간 식단표 관리 탭
+  ("전체 예측 비교" 히트맵)에서도 쓰고 있었다 — HomePage 쪽 호출과
+  `forecastRequested` 상태만 지우고, `client.ts` 함수·타입과 백엔드
+  엔드포인트는 그대로 뒀다.
+
+반대로 `GET /analysis/corners/trend`(`cornerAnalysisTrend`)는 코너별
+분석 컴포넌트 안에서만 쓰이는 게 grep으로 확인돼(프론트 전체에서 이
+컴포넌트 말고 다른 호출부 없음, 백엔드도 이 라우트 하나뿐) 그래프를
+지우면서 프론트 함수·타입·백엔드 엔드포인트·테스트까지 §82와 같은
+원칙으로 완전 삭제했다.
+
+## 설계
+
+### 1. 전체 페이지 설명 텍스트 요약
+
+긴 설명 문단은 전부 `HomePage.tsx`와 `AnalysisPage.tsx` 두 파일에만
+있었다(나머지 페이지 파일은 짧은 상태 메시지뿐, Explore로 확인).
+원칙: (a) 지금 뭘 보고 있는지/뭘 하면 되는지 한 마디, (b) 숫자를
+잘못 읽지 않게 막는 핵심 경고(표본 부족, 상관관계≠인과관계, "예측이
+아니라 실측")만 남기고, 왜 이렇게 설계했는지 이력·배치 스케줄 주기
+같은 내부 구현 설명·변경 이력은 뺐다. 두 파일 합쳐 약 25곳의 설명
+문단을 1문장(또는 짧은 절 하나 추가) 수준으로 줄였다 — 코너별 분석·
+메뉴별 분석·음식벡터 관리·부찬 조합·주간 식단표 관리·VOE 4개 카드·
+메뉴 중복 점검 3개 탭·편성 빈도×성과·날씨 시나리오 예측·날씨/계절/
+상관관계 랭킹 3개·Admin 화면 2곳 등. 스타일(`text-[13px]`/`text-xs` +
+`var(--ink-muted)`)은 그대로 두고 텍스트 내용만 줄였다.
+
+### 2. "주간 식수 추이" 카드 삭제 (HomePage.tsx)
+
+`Card title="주간 식수 추이"` 블록과 그 전용 파생값
+(`chartWeeklyData`/`classificationByDate`/`weekdayAxisLabel`/
+`pointColorForClassification`/`chartOption`, 색상 상수들,
+`axisTooltipFormatter`/`formatTooltipNumber`)을 지웠다. `showSaturday`
+상태와 그 유일한 UI 트리거인 "토요일 포함 보기" 버튼도 같이 지웠다 —
+이 토글의 유일한 소비자가 `chartWeeklyData`뿐이었다(누적 식수
+스탯타일은 `weekly.data`를 직접 써 영향 없음). `weekly` 쿼리 자체와
+`recomputeDailyStats` mutation은 "선택한 주의 누적 식수" 스탯타일이
+계속 쓰므로 남겼다. 이 카드 안에 있던 "선택한 주 식수 0 → 재계산"
+복구 UX는 4개 스탯타일 그리드 바로 위 작은 조건부 배너로 옮겼다(축약된
+문구 "이 기간 식수가 0으로 나옵니다 — 배치 집계가 안 됐을 수
+있어요." + 기존 재계산 버튼 그대로 재사용).
+
+### 3. "금주 예상 식수 · 점유율 · 대기시간" 카드 삭제 (HomePage.tsx)
+
+카드 전체(예상 식수 랭킹 가로막대 + 점유율·대기시간 게이트+표)를
+지웠다. 같이 지운 전용 코드: `plannedHeadcountOption`,
+`plannedHeadcountNewMenuCount`, `forecastRequested` 상태,
+`predictedImpact` 쿼리, `WAIT_MINUTES_PLAUSIBLE_MAX`. 남긴 것:
+`plannedHeadcountRanking` 쿼리와 `plannedHeadcountBars`/
+`topPlannedHeadcountRow`("최고 식수 코너/메뉴" 스탯타일이 씀),
+`api.weeklyMenuPredictedImpactSummary`/`PredictedNumbersRow`/백엔드
+엔드포인트(주간 식단표 관리 탭이 독립적으로 씀).
+
+### 4. 코너별 분석 — 지표 비교: 표 중심 재구성 (AnalysisPage.tsx `CornerMetricComparisonSection`)
+
+지표 선택형 통합 그래프(듀얼축, 좌/우 지표 선택기, "두 번째 지표
+비교" 체크박스, 주간/월간/주차별 추이) 전체와 그 전용 상태·쿼리·파생값
+(`leftMetric`/`rightMetric`/`showSecondMetric`/`trendGranularity`/
+`weekOfMonthPeriod`/`trendQuery`/`womQuery`/`womMainMenuQuery`/
+`cornerMetricOption` 등)을 지웠다. 모듈 상수 `CornerMetricKey`/
+`CORNER_METRIC_OPTIONS`/`CORNER_METRIC_LABELS`/`CORNER_METRIC_AXIS`와
+`monthRange`/`weekOfMonthLabel` 헬퍼도 이 컴포넌트에서만 쓰여 같이
+지웠다(`formatTooltipNumber`/`axisTooltipFormatter`는 파일의 다른
+차트가 계속 써서 남김).
+
+표에서 "그린미트"(`is_diet_corner`를 "예"/"-"로 보여주던 컬럼, 실제
+코너명 "그린미트"와 헷갈리기 쉬운 이름이었음) 컬럼을 삭제하고, 남은
+4개 컬럼(코너/누적 식수/평균 만족도/피크타임 분당 서브) 모두 클릭
+정렬 가능하게 만들었다 — 이 파일에 이미 있던 `SortableHeader`
+컴포넌트(`MenuQuadrantTab`/`RepeatedSideDishPanel`이 쓰던 "같은 키
+다시 클릭하면 방향 반전, 다른 키 클릭하면 desc로 리셋" 패턴)를
+재사용해 `Table` 제네릭 컴포넌트 호출을 손수 만든 `<table>`로
+교체했다. "표로 보기"/"표 숨기기" 토글은 그대로 뒀다.
+
+`GET /analysis/corners/trend`(`corner_analysis_trend`)가 완전히
+고아가 돼(grep으로 프론트·백엔드 각 1곳뿐임을 확인) `client.ts`의
+`cornerAnalysisTrend` 함수·`CornerTrendRow` 타입, 백엔드 엔드포인트,
+테스트 2개(`test_corner_analysis_trend_groups_by_period_and_corner`/
+`test_corner_analysis_trend_filters_by_meal_types`)를 완전 삭제했다.
+`_period_bucket` 헬퍼는 다른 엔드포인트도 써서 남겼다.
+
+## 검증
+
+- `pytest -q` — 556개 통과(§84의 558개에서 고아 테스트 2개 삭제).
+- `npx tsc -b`·`npm run build` — 클린.
+- `cornerAnalysisTrend`/`corners/trend`/`showSaturday`/
+  `forecastRequested`/`predictedImpact`/`plannedHeadcountOption`
+  잔여 참조 0건 재확인(문서 언급 제외).
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건): (1) 홈에 "주간 식수 추이"·"금주 예상 식수 · 점유율 ·
+  대기시간" 카드가 없고 "토요일 포함 보기" 버튼도 없음, 스탯타일
+  4개(선택한 주의 누적 식수/최근 7일 식수/최고 식수 코너·메뉴/금주
+  메뉴 과거 VOE) 정상 표시, 통합 "식수 추이" 차트와 축약된 문구
+  정상, 식수 0일 때 재계산 배너가 스탯타일 위에 뜨고 버튼 동작함을
+  확인, (2) "메뉴 편성·운영" 탭의 주간 식단표 관리 "전체 예측 비교"
+  히트맵이 여전히 정상 동작(점유율/대기시간 백엔드 보존 검증), (3)
+  코너별 분석 — 지표 비교에서 그래프 없이 "코너별 분석 — 지표 비교
+  (식수 / 만족도 / 피크타임 서브속도)" 카드만 뜨고, 표에 "그린미트"
+  컬럼이 없으며(코너명 "그린미트"는 행 데이터로는 정상 표시), 컬럼
+  헤더 클릭 시 오름/내림차순 정렬과 화살표(▲/▼) 표시가 정상 동작함을
+  스크린샷으로 확인.
+- 문서화 후 커밋·푸시.

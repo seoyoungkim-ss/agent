@@ -971,30 +971,6 @@ def test_corner_analysis_sorts_green_meat_last_regardless_of_headcount(client, d
     assert rows[-1]["headcount_total"] == 5
 
 
-def test_corner_analysis_trend_groups_by_period_and_corner(client, db_session):
-    from app.services.aggregation import aggregate_daily_stats
-
-    _ingest_weekly_menu(client)
-    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY)
-    _ingest_meal_log(client, "E2", "맛남", eaten_date=MONDAY + dt.timedelta(days=7))
-    aggregate_daily_stats(db_session, MONDAY)
-    aggregate_daily_stats(db_session, MONDAY + dt.timedelta(days=7))
-
-    resp = client.get(
-        "/api/analysis/corners/trend",
-        params={
-            "period_start": MONDAY.isoformat(),
-            "period_end": (MONDAY + dt.timedelta(days=7)).isoformat(),
-            "granularity": "weekly",
-        },
-    )
-    assert resp.status_code == 200
-    rows = resp.json()
-    hansik_rows = [r for r in rows if r["corner_name"] == "한식"]
-    assert len(hansik_rows) == 2  # 서로 다른 주 2개
-    assert {r["headcount"] for r in hansik_rows} == {1, 1}
-
-
 def test_daily_stats_recompute_backfills_range_for_corner_and_home_views(client):
     # 과거 기간(예: 6개월치)을 한꺼번에 적재했을 때, 매일 새벽 스케줄러가 "어제"
     # 하루치만 계산하는 것과 달리 이 엔드포인트는 기간 전체를 한 번에 채워야 한다.
@@ -2296,27 +2272,6 @@ def test_weekly_summary_filters_by_meal_types(client, db_session):
         params={"start_date": MONDAY.isoformat(), "end_date": MONDAY.isoformat()},
     )
     assert unfiltered.json()[0]["headcount"] == 2
-
-
-def test_corner_analysis_trend_filters_by_meal_types(client, db_session):
-    from app.services.aggregation import aggregate_daily_stats
-
-    _ingest_meal_log_with_meal_type(client, "E1", "맛남", "조식", "토스트")
-    _ingest_meal_log_with_meal_type(client, "E2", "맛남", "중식", "제육볶음")
-    aggregate_daily_stats(db_session, MONDAY)
-
-    resp = client.get(
-        "/api/analysis/corners/trend",
-        params={
-            "period_start": MONDAY.isoformat(),
-            "period_end": MONDAY.isoformat(),
-            "granularity": "daily",
-            "meal_types": ["조식"],
-        },
-    )
-    assert resp.status_code == 200
-    hansik = next(r for r in resp.json() if r["corner_name"] == "한식")
-    assert hansik["headcount"] == 1
 
 
 def test_menu_performance_by_meal_type_filters_to_selected_meal(client):

@@ -137,16 +137,6 @@ export interface ImprovementPoint {
   voe_summary?: string | null;
 }
 
-export interface CornerTrendRow {
-  period: string;
-  corner_id: number;
-  corner_name: string;
-  is_diet_corner: boolean;
-  headcount: number;
-  avg_taste_score: number | null;
-  avg_peak_throughput_per_min: number | null;
-}
-
 export interface CornerMainMenuByDateRow {
   corner_id: number;
   plan_date: string;
@@ -739,15 +729,6 @@ export const api = {
     exclude_take_out?: boolean;
     meal_types?: MealType[];
   }) => request<CornerAnalysisRow[]>(`/analysis/corners${qs(params)}`),
-
-  cornerAnalysisTrend: (params: {
-    period_start: string;
-    period_end: string;
-    granularity: "daily" | "weekly" | "monthly";
-    classification?: Classification;
-    exclude_take_out?: boolean;
-    meal_types?: MealType[];
-  }) => request<CornerTrendRow[]>(`/analysis/corners/trend${qs(params)}`),
 
   // 코너 목록만(통계 없음) — 배치 집계 상태와 무관하게 필터 선택지를 채우려는 용도.
   cornerList: () => request<CornerListRow[]>("/analysis/corners/list"),

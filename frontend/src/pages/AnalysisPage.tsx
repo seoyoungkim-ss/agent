@@ -5,7 +5,6 @@ import clsx from "clsx";
 import {
   api,
   type Classification,
-  type CornerTrendRow,
   type DailyMenuPlanRuleResult,
   type MealType,
   type MenuFoodVectorRow,
@@ -67,21 +66,6 @@ function axisTooltipFormatter(
   return [header, ...lines].join("<br/>");
 }
 
-// "YYYY-MM" 월 문자열 → 그 달의 [첫날, 마지막날] ISO 날짜 문자열.
-function monthRange(period: string): [string, string] {
-  const [y, m] = period.split("-").map(Number);
-  const first = `${period}-01`;
-  const last = new Date(y, m, 0).toISOString().slice(0, 10); // 다음달 0일 = 이번달 마지막날
-  return [first, last];
-}
-
-// "YYYY-MM-DD" → "N주차 MM-DD" — 월을 주차 단위로 나눠 보여줄 때 쓴다.
-function weekOfMonthLabel(dateIso: string): string {
-  const day = Number(dateIso.slice(8, 10));
-  const week = Math.ceil(day / 7);
-  return `${week}주차 ${dateIso.slice(5)}`;
-}
-
 // 히트맵 값(0~1)이 낮음→높음으로 진해지는 단일 색상(blue) 시퀀셜 램프 —
 // dataviz 스킬 palette.md의 sequential blue 램프 step 100/350/700과 동일한 값.
 const SEQUENTIAL_BLUE_RAMP = ["#cde2fb", "#5598e7", "#0d366b"];
@@ -139,49 +123,21 @@ function useLightTextOn(bgRgb: [number, number, number] | undefined): boolean {
 }
 
 
-// 코너별 분석 "코너별 비교" 통합 그래프의 지표 선택지 — 기존엔 (식수+만족도)/
-// (서브속도+점유율) 두 고정 조합 그래프가 따로 있었는데(2026-07, 42.3), 사용자가
-// 좌/우 축에 넣을 지표를 직접 고르는 그래프 하나로 재설계했다(2026-08).
-type CornerMetricKey = "headcount" | "satisfaction" | "throughput" | "share";
-const CORNER_METRIC_OPTIONS: { label: string; value: CornerMetricKey }[] = [
-  { label: "식수", value: "headcount" },
-  { label: "만족도", value: "satisfaction" },
-  { label: "피크타임 서브속도", value: "throughput" },
-  { label: "점유율", value: "share" },
-];
-const CORNER_METRIC_LABELS: Record<CornerMetricKey, string> = {
-  headcount: "식수",
-  satisfaction: "만족도",
-  throughput: "피크타임 서브",
-  share: "점유율(%)",
-};
-const CORNER_METRIC_AXIS: Record<CornerMetricKey, { name: string; min?: number; max?: number }> = {
-  headcount: { name: "식수" },
-  satisfaction: { name: "만족도", min: 0, max: 5 },
-  throughput: { name: "피크타임 분당 서브" },
-  share: { name: "점유율(%)", min: 0, max: 100 },
-};
-
-// 코너별 지표 비교 그래프 — 2026-08 화면 재편으로 "분석 > 코너별" 탭이 사라지면서
+// 코너별 지표 비교 — 2026-08 화면 재편으로 "분석 > 코너별" 탭이 사라지면서
 // 현황(HomePage)으로 옮겼다. 그래서 탭이 아니라 export되는 섹션 컴포넌트다.
+// §85: 추이 그래프(지표 선택형 듀얼축)는 지우고 표만 남긴다 — 컬럼별 정렬 가능.
 export function CornerMetricComparisonSection() {
   const [classification, setClassification] = useState<Classification | "전체">("전체");
   const [showCornerTable, setShowCornerTable] = useState(false);
-  const [leftMetric, setLeftMetric] = useState<CornerMetricKey>("headcount");
-  const [rightMetric, setRightMetric] = useState<CornerMetricKey>("satisfaction");
-  // §80: "선이 너무 많고 뭘 봐야할지 모르겠음" — 코너마다 지표 2개(듀얼축)를
-  // 항상 같이 그려 코너 8개면 선이 최대 16개까지 뜨던 걸, 기본은 지표 1개
-  // (코너당 선 1개)만 보여주고 두 번째 지표는 명시적 옵트인으로 바꿨다.
-  const [showSecondMetric, setShowSecondMetric] = useState(false);
-  function handleLeftMetricChange(v: CornerMetricKey) {
-    if (v === rightMetric) setRightMetric(leftMetric);
-    setLeftMetric(v);
+  const [sortKey, setSortKey] = useState<"corner" | "headcount" | "score" | "throughput">("headcount");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  function toggleSort(key: typeof sortKey) {
+    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
   }
-  function handleRightMetricChange(v: CornerMetricKey) {
-    if (v === leftMetric) setLeftMetric(rightMetric);
-    setRightMetric(v);
-  }
-  const chartTheme = useChartTheme();
   const query = useQuery({
     queryKey: ["corner-analysis", classification],
     queryFn: () =>
@@ -197,245 +153,21 @@ export function CornerMetricComparisonSection() {
     onSuccess: () => query.refetch(),
   });
 
-  // 파이차트·꺾은선그래프 색상을 코너 인기 순위가 아니라 코너 자체(corner_id)에 고정한다
-  // (dataviz 스킬: "색은 순위가 아니라 개체를 따라간다" — 기간별로 랭킹이 바뀌어도 같은 코너는 같은 색).
-  const SHARE_EXCLUDED_CORNER_NAMES = new Set(["미캠회관(전골)"]); // 그린미트(is_diet_corner)와 함께 점유율 비교에서 제외
-  const stableCorners = [...(query.data ?? [])].sort((a, b) => a.corner_id - b.corner_id);
-  const cornerColor = new Map(stableCorners.map((c, i) => [c.corner_id, `var(--series-${(i % 8) + 1})`]));
-
-  const [trendGranularity, setTrendGranularity] = useState<"weekly" | "monthly" | "weekly-of-month">("weekly");
-  const [weekOfMonthPeriod, setWeekOfMonthPeriod] = useState(() => new Date().toISOString().slice(0, 7));
-  const isWeekOfMonth = trendGranularity === "weekly-of-month";
-  const trendQuery = useQuery({
-    queryKey: ["corner-analysis-trend", classification, trendGranularity],
-    queryFn: () =>
-      api.cornerAnalysisTrend({
-        period_start: PERIOD_START,
-        period_end: PERIOD_END,
-        granularity: trendGranularity === "weekly-of-month" ? "weekly" : trendGranularity,
-        classification: classification === "전체" ? undefined : classification,
-        exclude_take_out: true,
-      }),
-    enabled: !isWeekOfMonth,
+  const sortedCornerRows = [...(query.data ?? [])].sort((a, b) => {
+    const dir = sortDir === "asc" ? 1 : -1;
+    if (sortKey === "corner") return a.corner_name.localeCompare(b.corner_name) * dir;
+    const metricValue = (row: typeof a) =>
+      sortKey === "headcount"
+        ? row.headcount_total
+        : sortKey === "score"
+          ? (row.avg_taste_score ?? -Infinity)
+          : (row.avg_peak_throughput_per_min ?? -Infinity);
+    return (metricValue(a) - metricValue(b)) * dir;
   });
-  const trendPeriods = [...new Set((trendQuery.data ?? []).map((r) => r.period))].sort();
-  const trendByCorner: Map<string, Map<string, CornerTrendRow>> = new Map();
-  for (const row of trendQuery.data ?? []) {
-    if (!trendByCorner.has(row.corner_name)) trendByCorner.set(row.corner_name, new Map());
-    trendByCorner.get(row.corner_name)!.set(row.period, row);
-  }
-  // 시리즈 순서·색은 이미 정렬된 query.data(그린미트 항상 마지막) 순서를 그대로 따라간다.
-  const trendCorners = (query.data ?? []).filter((c) => trendByCorner.has(c.corner_name));
-
-  // "주차별" 모드 — 선택한 한 달을 일간 데이터로 받아 주차 라벨로 보여준다(값 자체는
-  // 일간, 라벨만 "N주차"로 묶어 보여주는 방식 — 이래야 날짜별 데이터 포인트가
-  // 그대로 남아 hover 시 그날의 메인메뉴를 붙일 수 있다).
-  const [womPeriodStart, womPeriodEnd] = monthRange(weekOfMonthPeriod);
-  const womQuery = useQuery({
-    queryKey: ["corner-analysis-week-of-month", classification, weekOfMonthPeriod],
-    queryFn: () =>
-      api.cornerAnalysisTrend({
-        period_start: womPeriodStart,
-        period_end: womPeriodEnd,
-        granularity: "daily",
-        classification: classification === "전체" ? undefined : classification,
-        exclude_take_out: true,
-      }),
-    enabled: isWeekOfMonth,
-  });
-  const womMainMenuQuery = useQuery({
-    queryKey: ["corner-main-menu-by-date", weekOfMonthPeriod],
-    queryFn: () => api.cornerMainMenuByDate({ period_start: womPeriodStart, period_end: womPeriodEnd }),
-    enabled: isWeekOfMonth,
-  });
-  const womPeriods = [...new Set((womQuery.data ?? []).map((r) => r.period))].sort();
-  const womByCorner: Map<string, Map<string, CornerTrendRow>> = new Map();
-  for (const row of womQuery.data ?? []) {
-    if (!womByCorner.has(row.corner_name)) womByCorner.set(row.corner_name, new Map());
-    womByCorner.get(row.corner_name)!.set(row.period, row);
-  }
-  const womCorners = (query.data ?? []).filter((c) => womByCorner.has(c.corner_name));
-  const cornerIdByName = new Map((query.data ?? []).map((c) => [c.corner_name, c.corner_id]));
-  const mainMenuByCornerDate = new Map((womMainMenuQuery.data ?? []).map((r) => [`${r.corner_id}|${r.plan_date}`, r.menu_name]));
-
-  // 두 모드(달력 전체 주간/월간 vs 선택한 한 달의 일별) 중 실제로 화면에 쓸 데이터를
-  // 하나로 통일해서 아래 옵션 빌더가 모드를 신경 안 쓰게 한다.
-  const activePeriods = isWeekOfMonth ? womPeriods : trendPeriods;
-  const activeByCorner = isWeekOfMonth ? womByCorner : trendByCorner;
-  const activeCorners = isWeekOfMonth ? womCorners : trendCorners;
-  const activeIsLoading = isWeekOfMonth ? womQuery.isLoading || womMainMenuQuery.isLoading : trendQuery.isLoading;
-  const activeIsError = isWeekOfMonth ? womQuery.isError : trendQuery.isError;
-  const activeError = isWeekOfMonth ? womQuery.error : trendQuery.error;
-
-  // 지표별 시리즈가 범례 단순화를 위해 코너명 하나를 공유하므로(2026-07,
-  // "{코너} 식수"/"{코너} 만족도"로 항목이 2배라 보기 힘들다는 피드백), seriesId
-  // (`"{코너}::headcount"` 등)로 지표를 구분해 툴팁에 라벨을 붙인다. 주차별 모드에선
-  // 그날의 메인메뉴도 함께 보여준다.
-  function buildMetricTooltipFormatter(metricLabels: Record<string, string>) {
-    return (
-      params: { axisValue?: string; marker: string; seriesName: string; seriesId?: string; value: unknown }[],
-    ): string => {
-      const date = params[0]?.axisValue ?? "";
-      const header = isWeekOfMonth ? weekOfMonthLabel(date) : date;
-      const lines = params.map((p) => {
-        const value = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
-        const suffix = p.seriesId?.split("::")[1];
-        const metricLabel = suffix ? (metricLabels[suffix] ?? suffix) : "";
-        const cornerId = cornerIdByName.get(p.seriesName);
-        const menu = isWeekOfMonth && cornerId != null ? mainMenuByCornerDate.get(`${cornerId}|${date}`) : undefined;
-        return `${p.marker}${p.seriesName}${metricLabel ? ` ${metricLabel}` : ""}: ${formatTooltipNumber(
-          value as number | string,
-        )}${menu ? ` (메인: ${menu})` : ""}`;
-      });
-      return [header, ...lines].join("<br/>");
-    };
-  }
-
-  const trendXAxis = {
-    type: "category" as const,
-    data: activePeriods,
-    axisLine: { lineStyle: { color: chartTheme.axis } },
-    axisTick: { show: false },
-    axisLabel: isWeekOfMonth
-      ? { color: chartTheme.text, formatter: (v: string) => weekOfMonthLabel(v) }
-      : { color: chartTheme.text },
-  };
-
-  // 점유율(share) 계산 대상 코너 — Take Out·그린미트·미캠회관(전골) 제외(착석
-  // 취식 코너 간 경쟁 비교 목적, 2026-07). 점유율은 새 엔드포인트 없이 프론트에서
-  // 그때그때 계산한다(cornerAnalysisTrend가 이미 코너·기간별 headcount를 반환).
-  const shareEligibleCorners = activeCorners.filter(
-    (c) => !c.is_diet_corner && !SHARE_EXCLUDED_CORNER_NAMES.has(c.corner_name),
-  );
-  const periodShareTotals = new Map<string, number>();
-  for (const p of activePeriods) {
-    let total = 0;
-    for (const c of shareEligibleCorners) total += activeByCorner.get(c.corner_name)?.get(p)?.headcount ?? 0;
-    periodShareTotals.set(p, total);
-  }
-
-  // 지표 선택형 통합 그래프 — 기존엔 (식수+만족도)/(서브속도+점유율) 고정 조합
-  // 그래프 두 개가 따로 있었는데(2026-07, 42.3 — 그때는 비슷한 그래프가 여러 개
-  // 나오는 걸 줄이려 이렇게 통합했었다), 사용자가 좌/우 축에 넣을 지표를 직접
-  // 고르는 그래프 하나로 재설계했다(2026-08) — "이용자수 vs 서브속도"처럼 새
-  // 조합도 그래프를 새로 안 만들고 그대로 볼 수 있다.
-  function cornerMetricValue(metric: CornerMetricKey, cornerName: string, period: string): number | null {
-    const row = activeByCorner.get(cornerName)?.get(period);
-    if (metric === "headcount") return row?.headcount ?? null;
-    if (metric === "satisfaction") return row?.avg_taste_score ?? null;
-    if (metric === "throughput") return row?.avg_peak_throughput_per_min ?? null;
-    const total = periodShareTotals.get(period) ?? 0;
-    const headcount = row?.headcount;
-    return total > 0 && headcount != null ? Number(((headcount / total) * 100).toFixed(2)) : null;
-  }
-  const cornerMetricCorners =
-    leftMetric === "share" || (showSecondMetric && rightMetric === "share") ? shareEligibleCorners : activeCorners;
-  const cornerMetricTooltipFormatter = buildMetricTooltipFormatter(
-    showSecondMetric
-      ? { [leftMetric]: CORNER_METRIC_LABELS[leftMetric], [rightMetric]: CORNER_METRIC_LABELS[rightMetric] }
-      : { [leftMetric]: CORNER_METRIC_LABELS[leftMetric] },
-  );
-  // 서브속도가 축 중 하나면 전체 평균을 회색 점선으로 항상 표시한다(기존
-  // buildMenuThroughputOption의 "전체 평균" 패턴과 동일한 취지) — 코너별
-  // 시리즈 각각에 markLine을 달면 겹쳐 중복 렌더링되므로, 데이터 없는 전용
-  // 시리즈 하나에만 붙인다.
-  const overallThroughputAvg = (() => {
-    if (leftMetric !== "throughput" && !(showSecondMetric && rightMetric === "throughput")) return null;
-    const values: number[] = [];
-    for (const c of cornerMetricCorners) {
-      for (const p of activePeriods) {
-        const v = activeByCorner.get(c.corner_name)?.get(p)?.avg_peak_throughput_per_min;
-        if (v != null) values.push(v);
-      }
-    }
-    return values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : null;
-  })();
-  const throughputMarkLineSeries =
-    overallThroughputAvg != null
-      ? [
-          {
-            name: "전체 평균(서브속도)",
-            type: "line" as const,
-            yAxisIndex: leftMetric === "throughput" ? 0 : 1,
-            data: [] as number[],
-            silent: true,
-            symbol: "none" as const,
-            lineStyle: { opacity: 0 },
-            markLine: {
-              symbol: "none" as const,
-              label: { formatter: "전체 평균", color: chartTheme.text },
-              lineStyle: { color: chartTheme.axis, type: "dashed" as const },
-              data: [{ yAxis: overallThroughputAvg }],
-            },
-          },
-        ]
-      : [];
-  const cornerMetricOption = {
-    textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 56, right: 56, top: 40, bottom: 28 },
-    tooltip: { trigger: "axis", formatter: cornerMetricTooltipFormatter },
-    legend: { top: 0, textStyle: { color: chartTheme.text }, data: cornerMetricCorners.map((c) => c.corner_name) },
-    xAxis: trendXAxis,
-    yAxis: showSecondMetric
-      ? [
-          {
-            type: "value",
-            ...CORNER_METRIC_AXIS[leftMetric],
-            axisLabel: { color: chartTheme.text },
-            splitLine: { lineStyle: { color: chartTheme.grid } },
-          },
-          {
-            type: "value",
-            ...CORNER_METRIC_AXIS[rightMetric],
-            axisLabel: { color: chartTheme.text },
-            splitLine: { show: false },
-          },
-        ]
-      : [
-          {
-            type: "value",
-            ...CORNER_METRIC_AXIS[leftMetric],
-            axisLabel: { color: chartTheme.text },
-            splitLine: { lineStyle: { color: chartTheme.grid } },
-          },
-        ],
-    series: [
-      ...cornerMetricCorners.flatMap((c) => {
-        const color = resolveColor(cornerColor.get(c.corner_id) ?? "var(--series-1)");
-        const leftSeries = {
-          id: `${c.corner_name}::${leftMetric}`,
-          name: c.corner_name,
-          type: "line" as const,
-          yAxisIndex: 0,
-          symbol: "circle",
-          symbolSize: 8,
-          lineStyle: { width: 2, color },
-          itemStyle: { color, borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
-          data: activePeriods.map((p) => cornerMetricValue(leftMetric, c.corner_name, p)),
-        };
-        if (!showSecondMetric) return [leftSeries];
-        return [
-          leftSeries,
-          {
-            id: `${c.corner_name}::${rightMetric}`,
-            name: c.corner_name,
-            type: "line" as const,
-            yAxisIndex: 1,
-            symbol: "diamond",
-            symbolSize: 8,
-            lineStyle: { width: 2, type: "dashed" as const, color },
-            itemStyle: { color, borderColor: resolveColor("var(--surface)"), borderWidth: 2 },
-            data: activePeriods.map((p) => cornerMetricValue(rightMetric, c.corner_name, p)),
-          },
-        ];
-      }),
-      ...throughputMarkLineSeries,
-    ],
-  };
 
   return (
     <div className="space-y-6">
-      <Card title="코너별 분석 — 지표 비교 (식수 / 만족도 / 피크타임 서브속도 / 점유율)">
+      <Card title="코너별 분석 — 지표 비교 (식수 / 만족도 / 피크타임 서브속도)">
         <div className="mb-4">
           <SegmentedControl
             value={classification}
@@ -453,9 +185,7 @@ export function CornerMetricComparisonSection() {
         {query.data && query.data.length === 0 && (
           <div className="space-y-2">
             <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-              데이터가 없습니다. 배치 집계(daily_corner_stats)가 먼저 필요합니다 — 취식 데이터를 과거 기간
-              한꺼번에 적재한 경우, 스케줄러는 매일 새벽 전날치만 계산하므로 최근 180일치를 한 번에 다시
-              계산해야 합니다.
+              이 기간 데이터가 없습니다 — 배치 집계가 안 됐을 수 있어요.
             </p>
             <Button variant="secondary" onClick={() => recomputeDailyStats.mutate()} disabled={recomputeDailyStats.isPending}>
               {recomputeDailyStats.isPending ? "계산 중..." : "최근 180일 배치 집계 재계산"}
@@ -464,122 +194,58 @@ export function CornerMetricComparisonSection() {
           </div>
         )}
         {query.data && query.data.length > 0 && (
-          <>
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                기간 단위 — 아래 두 추이 그래프에 공통 적용됩니다.
-                {isWeekOfMonth && " 그래프의 각 점에 마우스를 올리면 그날의 메인메뉴가 함께 표시됩니다."}
-              </p>
-              <div className="flex flex-wrap items-center gap-2">
-                {isWeekOfMonth && (
-                  <input
-                    type="month"
-                    value={weekOfMonthPeriod}
-                    onChange={(e) => e.target.value && setWeekOfMonthPeriod(e.target.value)}
-                    className="rounded-md border px-3 py-2 text-[13px]"
-                    style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                  />
-                )}
-                <SegmentedControl
-                  value={trendGranularity}
-                  options={[
-                    { label: "주간", value: "weekly" },
-                    { label: "월간", value: "monthly" },
-                    { label: "주차별", value: "weekly-of-month" },
-                  ]}
-                  onChange={setTrendGranularity}
-                />
-              </div>
-            </div>
-            <div className="mt-4">
-              <Button variant="secondary" onClick={() => setShowCornerTable((v) => !v)}>
-                {showCornerTable ? "표 숨기기" : "표로 보기"}
-              </Button>
-              {showCornerTable && (
-                <div className="mt-3">
-                  <Table
-                    columns={[
-                      { key: "corner", label: "코너" },
-                      { key: "diet", label: "그린미트" },
-                      { key: "headcount", label: "누적 식수", align: "right" },
-                      { key: "score", label: "평균 만족도", align: "right" },
-                      { key: "throughput", label: "피크타임 분당 서브", align: "right" },
-                    ]}
-                    rows={query.data.map((c) => ({
-                      corner: c.corner_name,
-                      diet: c.is_diet_corner ? "예" : "-",
-                      headcount: c.headcount_total.toLocaleString(),
-                      score: c.avg_taste_score?.toFixed(2) ?? "-",
-                      throughput: c.avg_peak_throughput_per_min?.toFixed(2) ?? "-",
-                    }))}
-                    rowKey={(r) => r.corner as string}
-                  />
-                </div>
-              )}
-            </div>
-            <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
-              <div className="mb-3">
-                <p className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                  기본은 지표 1개(코너당 선 1개)만 보여줍니다 — 점유율은 Take Out·그린미트·미캠회관(전골)을
-                  제외한 착석 취식 코너 기준입니다. 범례를 클릭하면 코너별로 켜고 끌 수 있습니다.
-                </p>
-              </div>
-              <>
-                  <div className="mb-3 flex flex-wrap items-center gap-3 text-[13px]">
-                    <label className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
-                      {showSecondMetric ? "왼쪽 축" : "지표"}
-                      <select
-                        value={leftMetric}
-                        onChange={(e) => handleLeftMetricChange(e.target.value as CornerMetricKey)}
-                        className="rounded-md border px-2 py-1 text-[13px]"
-                        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                      >
-                        {CORNER_METRIC_OPTIONS.map((o) => (
-                          <option key={o.value} value={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
-                      <input
-                        type="checkbox"
-                        checked={showSecondMetric}
-                        onChange={(e) => setShowSecondMetric(e.target.checked)}
+          <div className="mt-4">
+            <Button variant="secondary" onClick={() => setShowCornerTable((v) => !v)}>
+              {showCornerTable ? "표 숨기기" : "표로 보기"}
+            </Button>
+            {showCornerTable && (
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full text-[13px]" style={{ color: "var(--ink)" }}>
+                  <thead>
+                    <tr>
+                      <SortableHeader
+                        label="코너"
+                        active={sortKey === "corner"}
+                        dir={sortDir}
+                        onClick={() => toggleSort("corner")}
                       />
-                      두 번째 지표 비교
-                    </label>
-                    {showSecondMetric && (
-                      <label className="flex items-center gap-1.5" style={{ color: "var(--ink-secondary)" }}>
-                        오른쪽 축
-                        <select
-                          value={rightMetric}
-                          onChange={(e) => handleRightMetricChange(e.target.value as CornerMetricKey)}
-                          className="rounded-md border px-2 py-1 text-[13px]"
-                          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                        >
-                          {CORNER_METRIC_OPTIONS.map((o) => (
-                            <option key={o.value} value={o.value}>
-                              {o.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    )}
-                  </div>
-                  {activeIsLoading && <LoadingState />}
-                  {activeIsError && <ErrorState error={activeError} />}
-                  {activePeriods.length > 0 && cornerMetricCorners.length === 0 && (
-                    <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                      비교할 코너가 없습니다.
-                    </p>
-                  )}
-                  {activePeriods.length > 0 && cornerMetricCorners.length > 0 && (
-                    <ReactECharts option={cornerMetricOption} style={{ height: 380 }} />
-                  )}
-                </>
-            </div>
-          </>
+                      <SortableHeader
+                        label="누적 식수"
+                        active={sortKey === "headcount"}
+                        dir={sortDir}
+                        align="right"
+                        onClick={() => toggleSort("headcount")}
+                      />
+                      <SortableHeader
+                        label="평균 만족도"
+                        active={sortKey === "score"}
+                        dir={sortDir}
+                        align="right"
+                        onClick={() => toggleSort("score")}
+                      />
+                      <SortableHeader
+                        label="피크타임 분당 서브"
+                        active={sortKey === "throughput"}
+                        dir={sortDir}
+                        align="right"
+                        onClick={() => toggleSort("throughput")}
+                      />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedCornerRows.map((c) => (
+                      <tr key={c.corner_name} className="border-b" style={{ borderColor: "var(--border)" }}>
+                        <td className="py-2 pr-4">{c.corner_name}</td>
+                        <td className="py-2 pr-4 text-right">{c.headcount_total.toLocaleString()}</td>
+                        <td className="py-2 pr-4 text-right">{c.avg_taste_score?.toFixed(2) ?? "-"}</td>
+                        <td className="py-2 pr-4 text-right">{c.avg_peak_throughput_per_min?.toFixed(2) ?? "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         )}
       </Card>
     </div>
@@ -937,17 +603,8 @@ function MenuQuadrantTab() {
   return (
     <Card title="메뉴별 분석 — 인기메뉴 / 숨은강자 / 개선시급 / 퇴출후보">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        가로축(만족도)과 세로축(1회 제공당 평균 식수, 수요)이 각각 기준값보다 큰지
-        작은지로 네 가지로 나눠 배경 음영과 점선 십자선으로 표시합니다. 기준값은
-        기본적으로 전체 메뉴의 중앙값이며, 아래 슬라이더로 직접 조절할 수 있습니다
-        (표본부족 판정은 평가건수 기준으로 별도 처리되어 조절 대상이 아닙니다). 점
-        옆에 "메뉴명 (코너명)"을 표기합니다(흐린 점 = 최근 {LOW_APPEARANCE_THRESHOLD}
-        회 미만 제공이라 수요 수치가 우연한 결과로 튈 수 있음, 원 크기는 제공 횟수).
-        점이 너무 몰려 라벨이 겹치면 일부는 자동으로 숨겨지는데, 안 보이는 점도
-        마우스를 올리면 툴팁으로 확인할 수 있습니다(만족도 추세가 하락 중이거나
-        고정 고객이 있으면 배경 음영과 다른 분류로 표시될 수 있는데, 그 이유도
-        툴팁에 나옵니다). 위 분류 버튼을 클릭하면 보고 싶은 분류만 골라 볼 수
-        있고, "표시 개수"로 분류별 표시 개수를 조절할 수 있습니다.
+        가로축 만족도 × 세로축 수요 기준값(중앙값, 슬라이더로 조절 가능)으로 4분류합니다.
+        흐린 점은 최근 {LOW_APPEARANCE_THRESHOLD}회 미만 제공이라 수치가 불안정할 수 있습니다.
       </p>
       <div className="mb-3">
         <SegmentedControl
@@ -1244,8 +901,7 @@ function MenuFoodVectorAdminSection() {
   return (
     <Card title="메뉴 음식벡터 관리 (개인 취향 벡터 계산의 기초 데이터)">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-        신메뉴는 이름 키워드 규칙으로 1차 자동 태깅되고, 규칙이 못 잡은 메뉴는 아래 버튼으로 사내 LLM에 보강
-        요청할 수 있습니다. 값을 직접 조정하면 "관리자수동"으로 표시되어 이후 자동 재태깅 대상에서 제외됩니다.
+        신메뉴는 자동 태깅되고, 직접 조정하면 "관리자수동"으로 표시돼 재태깅에서 제외됩니다.
       </p>
       <div className="mb-3 flex items-center justify-between gap-3">
         <label className="flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -1270,8 +926,7 @@ function MenuFoodVectorAdminSection() {
         </div>
       </div>
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        식재료는 "한 끼 구성 중복 점검"이 쓰는 별도 값입니다(음식벡터와 다름). 새벽 배치가 매일 비어 있는
-        메뉴만 채우므로 평소엔 누르지 않아도 되고, 식단표를 방금 올린 직후 바로 반영하고 싶을 때 씁니다.
+        "한 끼 구성 중복 점검"이 쓰는 값입니다. 매일 자동으로 채워지며, 방금 올린 식단표를 바로 반영하고 싶을 때만 누르세요.
       </p>
       {tagWithLlm.data && (
         <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -1406,9 +1061,7 @@ function MenuComboSection() {
   return (
     <Card title="부찬 조합별 만족도 비교 — 메인메뉴 기준">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        메인 메뉴명을 검색하면, 그동안 짝지어 나온 부찬 조합별로 그 날짜의 평균 만족도를 비교합니다.
-        영양 프로필은 실제 칼로리·영양성분이 아니라 메뉴 특성(매운맛/단백질/채소 비중 등) 기반
-        추정치입니다.
+        메인 메뉴명을 검색하면 부찬 조합별 평균 만족도를 비교합니다. 영양 프로필은 추정치입니다.
       </p>
       <div className="mb-3 flex gap-2">
         <input
@@ -1439,10 +1092,8 @@ function MenuComboSection() {
       </div>
       <div className="mb-4 border-t pt-3" style={{ borderColor: "var(--border)" }}>
         <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-          <strong>부찬을 바꿀 때 효과가 큰 메인메뉴</strong> — 조합에 따라 만족도가 크게 갈리는 순서입니다.
-          편차가 작은 메뉴는 뭘 붙여도 결과가 같으니 손볼 필요가 없습니다. <strong>한쪽에만 있는
-          부찬은 음영으로 표시</strong>했습니다 — 그게 실제로 달라진 부분입니다. 행을 클릭하면 아래에
-          상세가 열립니다.
+          <strong>부찬을 바꿀 때 효과가 큰 메인메뉴</strong> — 조합별 만족도 편차가 큰 순서입니다.
+          음영은 한쪽에만 있는 부찬입니다. 행을 클릭하면 상세가 열립니다.
         </p>
         {rankingQuery.isLoading && <LoadingState />}
         {rankingQuery.isError && <ErrorState error={rankingQuery.error} />}
@@ -1914,8 +1565,7 @@ function WeeklyMenuReviewTab() {
     <div className="space-y-6">
       <Card title="주간 식단표 관리">
         <p className="mb-3 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-          식당에서 2주 전에 전달한 식단표를 확인하고, 셀 병합 등으로 메인/부찬이 잘못 나뉘었으면
-          셀을 클릭해 직접 고치세요. 각 날짜의 개선의견은 그 날짜의 7일 전(마감)까지 제출할 수 있습니다.
+          메인/부찬이 잘못 나뉘었으면 셀을 클릭해 고치세요. 개선의견은 해당 날짜 7일 전까지 제출 가능합니다.
         </p>
         <div className="mb-4 flex flex-wrap items-center gap-2">
           <Button variant="secondary" onClick={() => setSelectedMonday((d) => weeklyAddDays(d, -7))}>
@@ -2413,8 +2063,7 @@ function VoeAnalysisTab() {
       <Card title="월간 VOE 분류 (맛·간·위생·서비스)">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            카테고리를 클릭하면 해당 분류의 코멘트를 볼 수 있습니다. 한 코멘트가 여러 분류에 동시에 잡힐 수
-            있습니다. 매달 새벽에 사내 LLM이 자동으로 분류하며, 이번 달을 바로 반영하려면 재계산하세요.
+            카테고리를 클릭하면 코멘트를 볼 수 있습니다. 매일 자동 분류되며, 즉시 반영하려면 재계산하세요.
           </p>
           <Button
             variant="secondary"
@@ -2501,8 +2150,7 @@ function VoeAnalysisTab() {
       <Card title="이달의 VOE AI 브리핑">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            아래 "월간 VOE 클러스터링" 결과를 다시 임베딩하지 않고 그대로 재사용해, 이번 달 여러 주제를
-            사내 LLM이 한 번에 문단으로 요약합니다. 클러스터링이 먼저 계산돼 있어야 합니다.
+            아래 "월간 VOE 클러스터링" 결과를 요약합니다. 클러스터링이 먼저 계산돼 있어야 합니다.
           </p>
           <Button
             variant="secondary"
@@ -2542,8 +2190,7 @@ function VoeAnalysisTab() {
       <Card title="월간 VOE 클러스터링 (주제·키워드 기반)">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            고정 카테고리가 아니라 그 달 코멘트 내용 자체를 사내 LLM 임베딩으로 묶은 자유 주제 군집입니다.
-            매달 새벽 자동으로 계산되며, 이번 달을 바로 반영하려면 재계산하세요.
+            그 달 코멘트를 자유 주제로 묶은 군집입니다. 매일 자동 계산되며, 즉시 반영하려면 재계산하세요.
           </p>
           <Button
             variant="secondary"
@@ -2591,8 +2238,7 @@ function VoeAnalysisTab() {
         )}
         <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
           <p className="mb-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-            월별 VOE 코멘트 수 추이(최근 {VOE_TREND_MONTHS}개월) — 군집 라벨은 매달 새로 계산돼 주제 이름이
-            달마다 바뀔 수 있어, 여기서는 코멘트 총량 추이만 비교합니다.
+            월별 VOE 코멘트 수 추이(최근 {VOE_TREND_MONTHS}개월).
           </p>
           {monthlyVolumeQuery.isLoading && <LoadingState />}
           {monthlyVolumeQuery.isError && <ErrorState error={monthlyVolumeQuery.error} />}
@@ -2801,9 +2447,7 @@ function RotationCheckPanel() {
   return (
     <>
       <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-        기간 내 직전 편성 대비 가장 이르게(짧은 간격으로) 재편성된 메인 메뉴 Top5입니다. 아래 "편성
-        기준(일)"을 입력하면 그 기준보다 짧게 재편성된 메인 메뉴 전체를 확인할 수 있습니다(부찬·건강가든은
-        이 화면 대상이 아닙니다).
+        가장 이르게 재편성된 메인 메뉴 Top5입니다. "편성 기준(일)"을 입력하면 전체 목록도 볼 수 있습니다.
       </p>
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -2953,8 +2597,7 @@ function RepeatedSideDishPanel() {
   return (
     <>
       <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-        기간을 직접 골라 볼 수 있습니다. 같은 코너 안에서만 세고(다른 코너에 같은 반찬이
-        나온 건 중복이 아님), 건강가든은 공용이라 어느 코너와 겹쳐도 셉니다.
+        같은 코너 안에서만 반복으로 셉니다(건강가든은 코너 무관).
       </p>
       <div className="mb-3 flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3006,7 +2649,7 @@ function RepeatedSideDishPanel() {
       {repeatedItems.length > 0 && (
         <>
           <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-            메뉴명을 클릭하면 어느 날짜·코너·메인메뉴와 함께 편성됐는지 상세를 볼 수 있습니다.
+            메뉴명을 클릭하면 편성 상세를 볼 수 있습니다.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-[13px]">
@@ -3162,8 +2805,7 @@ function MealClashPanel() {
   return (
     <>
       <p className="mb-3 text-xs" style={{ color: "var(--ink-muted)" }}>
-        같은 날·같은 코너·같은 끼니 안에서 메인·부찬·건강가든끼리 재료가 겹치거나(콩나물국밥 +
-        콩나물무침) 특성이 겹치는지(둘 다 매움, 둘 다 탄수화물) 봅니다.
+        같은 날·코너·끼니 안에서 재료 또는 특성이 겹치는 조합을 보여줍니다.
       </p>
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <Button
@@ -3464,9 +3106,7 @@ function MenuPlanPerformanceSection() {
   return (
     <Card title="편성 빈도 × 성과 — 다음 주 편성 조정">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        <strong>1회 편성당 식수</strong>와 실제 반응(만족도)을 교차합니다 — 점 크기는 편성 횟수입니다.
-        편성 횟수는 담당자가 직접 통제하는 변수라 다음 주에 바꿀 수 있습니다. 기준선은 그 기간 전체의
-        중앙값이며, 취식 데이터가 메인메뉴 기준이라 <strong>메인메뉴만</strong> 봅니다.
+        <strong>1회 편성당 식수</strong> × 만족도. 점 크기는 편성 횟수, 기준선은 기간 중앙값입니다(메인메뉴만).
       </p>
       <div className="mb-3 flex flex-wrap items-center gap-3">
         <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3529,8 +3169,7 @@ function MenuPlanPerformanceSection() {
           {noIntake.length > 0 && (
             <div className="mt-4 border-t pt-3" style={{ borderColor: "var(--border)" }}>
               <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-                편성됐지만 취식 기록이 0인 메뉴 — 기존 "메뉴별 분석" 4분면에는 아예 안 나타나는
-                메뉴들입니다. 메뉴명 표기 불일치가 아닌지 먼저 확인하세요.
+                편성됐지만 취식 기록이 0인 메뉴 — 메뉴명 표기 불일치를 먼저 확인하세요.
               </p>
               <div className="flex flex-wrap gap-2">
                 {(showAllNoIntake ? noIntake : noIntake.slice(0, NO_INTAKE_PREVIEW_COUNT)).map((r) => (
@@ -3655,8 +3294,7 @@ function WeatherScenarioForecastSection({ onWeatherChange }: { onWeatherChange?:
   return (
     <Card title="날씨 시나리오 예측">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        날씨·끼니·날짜를 골라 예상 식수를 시뮬레이션합니다. 최근 8회 같은 분류·끼니 평균("평시")에
-        날씨별 v0 배수를 곱한 추정치입니다 — 실측 데이터가 쌓이면 정교화가 필요합니다.
+        날씨·끼니·날짜를 골라 예상 식수를 시뮬레이션합니다(추정치).
       </p>
       <div className="mb-4 flex flex-wrap items-end gap-4">
         <div className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3785,8 +3423,7 @@ export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: Weath
   return (
     <Card title="날씨·계절별 메뉴 식수 랭킹">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        날씨·계절에 따라 실제로 어떤 메인메뉴의 식수가 늘거나 줄었는지 과거 실측 데이터로 봅니다 —
-        아래 기간을 골라 날씨유형/계절/기온·강수량 상관관계 랭킹을 확인하세요.
+        기간을 골라 날씨유형/계절/기온·강수량별 메뉴 식수 랭킹을 확인하세요.
       </p>
       <div className="mb-3 flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3816,8 +3453,7 @@ export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: Weath
       <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
         <h3 className="text-[14px] font-semibold">메인메뉴 × 날씨유형 인기 랭킹 (중식 기준)</h3>
         <p className="mb-3 mt-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          부찬은 대상이 아닙니다 — 메인메뉴가 그 날씨유형의 날, 평상시 대비 식수가 얼마나 달랐는지
-          랭킹입니다. 주간 메인메뉴를 짤 때 참고용으로만 쓰세요.
+          메인메뉴가 그 날씨유형의 날 평상시 대비 식수가 얼마나 달랐는지 랭킹입니다(참고용).
         </p>
         <div className="mb-3 flex flex-wrap gap-2">
           {MENU_WEATHER_EVENT_TABS.map((eventOption) => (
@@ -3903,9 +3539,7 @@ export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: Weath
       <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
         <h3 className="text-[14px] font-semibold">메인메뉴 × 계절 인기 랭킹</h3>
         <p className="mb-3 mt-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          부찬은 대상이 아닙니다 — 메인메뉴가 그 계절에 전체 기간 평균 대비 식수가 얼마나 달랐는지
-          랭킹입니다("냉면은 여름에, 팥죽은 겨울에" 같은 패턴 참고용). 여러 해의 같은 계절을 합쳐
-          봅니다.
+          메인메뉴가 그 계절에 전체 기간 평균 대비 식수가 얼마나 달랐는지 랭킹입니다(여러 해 합산).
         </p>
         <div className="mb-3 flex flex-wrap gap-2">
           {MENU_SEASON_TABS.map((seasonOption) => (
@@ -3984,10 +3618,8 @@ export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: Weath
       <div className="mt-6 border-t pt-4" style={{ borderColor: "var(--border)" }}>
         <h3 className="text-[14px] font-semibold">기온/강수량 × 식수 상관관계</h3>
         <p className="mb-3 mt-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          부찬은 대상이 아닙니다 — 메인메뉴의 일별 식수와 그날의 기온(또는 강수량) 사이 상관계수(-1~1)
-          랭킹입니다. 계수가 +1에 가까울수록 그 값이 오를수록 식수도 같이 오르는 경향, -1에 가까울수록
-          반대 경향입니다. 상관관계일 뿐 인과관계가 아니고, 표본이 {correlationRankingQuery.data?.min_days ?? 5}
-          일 미만인 메뉴는 우연한 상관관계로 보고 제외했습니다.
+          메인메뉴 식수와 기온·강수량의 상관계수(-1~1)입니다. 인과관계 아님 — 표본{" "}
+          {correlationRankingQuery.data?.min_days ?? 5}일 미만은 제외했습니다.
         </p>
         <div className="mb-3 flex flex-wrap gap-2">
           {(
@@ -4114,13 +3746,12 @@ export function AdminPage() {
   return (
     <div className="space-y-6">
       <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        자주 쓰지 않는 관리 기능을 모아 둔 화면입니다. <strong>접근 권한이 걸려 있지는 않으며</strong>
-        (이 앱에는 로그인 체계가 없습니다), 일상 화면을 단순하게 유지하기 위해 분리해 둔 것입니다.
+        자주 쓰지 않는 관리 기능 모음입니다.
       </p>
       <MenuFoodVectorAdminSection />
       <Card title="전체 취식 데이터 다운로드 (기간 선택)">
         <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          요약이 아닌 개별 취식 기록(취식일시·사번·구분·회사명·식사구분·코너·메뉴·맛평가·의견)을 선택한 기간 그대로 엑셀로 내려받습니다.
+          선택한 기간의 개별 취식 기록을 엑셀로 내려받습니다.
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
