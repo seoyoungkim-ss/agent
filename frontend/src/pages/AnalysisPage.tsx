@@ -129,10 +129,13 @@ function useLightTextOn(bgRgb: [number, number, number] | undefined): boolean {
 // 현황(HomePage)으로 옮겼다. 그래서 탭이 아니라 export되는 섹션 컴포넌트다.
 // §85: 추이 그래프(지표 선택형 듀얼축)는 지우고 표만 남긴다 — 컬럼별 정렬 가능.
 export function CornerMetricComparisonSection() {
-  // §86: 주말에 운영 안 하는 코너가 있어 "평일 기준"이 기본이 더 유용하다는
-  // 피드백 — 기본값만 평일로 바꾸고, 다른 분류도 SegmentedControl로 볼 수 있게
-  // 그대로 둔다.
+  // §93: "이 코너가 평일 페이스를 유지한다면"이라는 §86의 ×5 추정 공식은
+  // 평일 분류에만 맞는 계산이라 주말+공휴일/패밀리데이/전체를 고르면
+  // 숫자가 왜곡됐다 — 조회 기간을 사용자가 고르는 특정 한 주로 좁히고,
+  // 그 주 안에서 분류에 맞는 날짜만 평균 내는 방식으로 다시 정리한다.
   const [classification, setClassification] = useState<Classification | "전체">("평일");
+  const [weekMonday, setWeekMonday] = useState(() => weeklyMondayOf(new Date()));
+  const weekSaturday = weeklyAddDays(weekMonday, 5); // 월~토(일요일 미운영 관례)
   const [sortKey, setSortKey] = useState<"corner" | "headcount" | "score" | "throughput">("headcount");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   function toggleSort(key: typeof sortKey) {
@@ -143,11 +146,11 @@ export function CornerMetricComparisonSection() {
     }
   }
   const query = useQuery({
-    queryKey: ["corner-analysis", classification],
+    queryKey: ["corner-analysis", classification, weekMonday],
     queryFn: () =>
       api.cornerAnalysis({
-        period_start: PERIOD_START,
-        period_end: PERIOD_END,
+        period_start: weekMonday,
+        period_end: weekSaturday,
         classification: classification === "전체" ? undefined : classification,
         exclude_take_out: true, // Take Out은 착석 취식이 아니라 혼잡도/만족도 분석 대상이 아님(홈 화면 식수 추이엔 남김)
       }),
@@ -161,11 +164,11 @@ export function CornerMetricComparisonSection() {
     onSuccess: () => query.refetch(),
   });
 
-  // §86: "누적 식수" 대신 "이 코너가 평일 페이스를 유지한다면 한 주에 낼
-  // 식수" 추정치(평일 하루 평균 × 5)를 보여준다 — day_count는 조회 기간·
-  // classification 필터가 이미 적용된 뒤의 실제 통계 일수다.
-  const weeklyAvg = (row: CornerAnalysisRow) =>
-    row.day_count > 0 ? Math.round((row.headcount_total / row.day_count) * 5) : null;
+  // §93: 선택한 주 안에서 그 분류(평일/주말+공휴일/패밀리데이/전체)에 해당하는
+  // 날짜만 골라 하루 평균을 낸다 — day_count는 그 주·분류에서 실제로 배치
+  // 집계가 있었던 일수(예: 패밀리데이가 없는 주는 0, "-"로 표시).
+  const avgHeadcount = (row: CornerAnalysisRow) =>
+    row.day_count > 0 ? Math.round(row.headcount_total / row.day_count) : null;
 
   const sortedCornerRows = [...(query.data ?? [])].sort((a, b) => {
     const dir = sortDir === "asc" ? 1 : -1;
@@ -176,7 +179,7 @@ export function CornerMetricComparisonSection() {
     }
     const metricValue = (row: typeof a) =>
       sortKey === "headcount"
-        ? (weeklyAvg(row) ?? -Infinity)
+        ? (avgHeadcount(row) ?? -Infinity)
         : sortKey === "score"
           ? (row.avg_taste_score ?? -Infinity)
           : (row.avg_peak_throughput_per_min ?? -Infinity);
@@ -186,7 +189,7 @@ export function CornerMetricComparisonSection() {
   return (
     <div className="space-y-6">
       <Card title="코너별 분석 — 지표 비교 (식수 / 만족도 / 피크타임 서브속도)">
-        <div className="mb-4">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <SegmentedControl
             value={classification}
             options={[
@@ -197,7 +200,25 @@ export function CornerMetricComparisonSection() {
             ]}
             onChange={setClassification}
           />
+          <div className="flex items-center gap-1.5">
+            <Button variant="secondary" onClick={() => setWeekMonday(weeklyAddDays(weekMonday, -7))}>
+              ◀ 이전 주
+            </Button>
+            <input
+              type="date"
+              value={weekMonday}
+              onChange={(e) => e.target.value && setWeekMonday(weeklyMondayOf(new Date(e.target.value)))}
+              className="rounded-md border px-3 py-2 text-[13px]"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            />
+            <Button variant="secondary" onClick={() => setWeekMonday(weeklyAddDays(weekMonday, 7))}>
+              다음 주 ▶
+            </Button>
+          </div>
         </div>
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          {weekMonday} ~ {weekSaturday} 중 선택한 분류에 해당하는 날짜의 일평균입니다.
+        </p>
         {query.isLoading && <LoadingState />}
         {query.isError && <ErrorState error={query.error} />}
         {query.data && query.data.length === 0 && (
@@ -223,7 +244,7 @@ export function CornerMetricComparisonSection() {
                     onClick={() => toggleSort("corner")}
                   />
                   <SortableHeader
-                    label="주간 평균 식수"
+                    label="일평균 식수"
                     active={sortKey === "headcount"}
                     dir={sortDir}
                     align="right"
@@ -249,7 +270,7 @@ export function CornerMetricComparisonSection() {
                 {sortedCornerRows.map((c) => (
                   <tr key={c.corner_name} className="border-b" style={{ borderColor: "var(--border)" }}>
                     <td className="py-2 pr-4">{c.corner_name}</td>
-                    <td className="py-2 pr-4 text-right">{weeklyAvg(c)?.toLocaleString() ?? "-"}</td>
+                    <td className="py-2 pr-4 text-right">{avgHeadcount(c)?.toLocaleString() ?? "-"}</td>
                     <td className="py-2 pr-4 text-right">{c.avg_taste_score?.toFixed(2) ?? "-"}</td>
                     <td className="py-2 pr-4 text-right">{c.avg_peak_throughput_per_min?.toFixed(2) ?? "-"}</td>
                   </tr>

@@ -50,7 +50,12 @@ export function StatTile({
         borderColor: "var(--border)",
         background: "var(--surface)",
         cursor: onClick ? "pointer" : undefined,
-        ...(toneColor ? { borderLeftColor: toneColor, borderLeftWidth: 3 } : {}),
+        // borderLeftColor/Width를 매 렌더 항상 같은 키로 넣는다 — tone 유무에 따라
+        // 키 자체를 넣었다 뺐다 하면(§92 규칙 이상여부 타일처럼 tone이 로딩 중
+        // undefined였다가 나중에 생기는 경우) React가 shorthand(borderColor)와
+        // longhand(borderLeftColor)를 섞어 쓴다고 콘솔 경고를 낸다.
+        borderLeftColor: toneColor ?? "var(--border)",
+        borderLeftWidth: toneColor ? 3 : 1,
       }}
       onClick={onClick}
     >

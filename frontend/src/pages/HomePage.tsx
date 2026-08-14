@@ -295,6 +295,20 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       }),
   });
 
+  // 총식수 꺾은선 전용 — 코너/회사구분/끼니/구분 필터(토글)와 무관하게 항상
+  // 전체 식수를 보여달라는 요청(2026-08)이라, 위 headcountTrend와 별개로
+  // 아무 필터도 안 걸고 group_by="total"만 써서 부른다.
+  const totalHeadcountTrend = useQuery({
+    queryKey: ["headcount-trend-total", trendPeriodStart, trendPeriodEnd, trendGranularity],
+    queryFn: () =>
+      api.headcountTrend({
+        period_start: trendPeriodStart,
+        period_end: trendPeriodEnd,
+        granularity: trendGranularity,
+        group_by: "total",
+      }),
+  });
+
   const recomputeDailyStats = useMutation({
     mutationFn: () =>
       api.recomputeDailyStats({ period_start: RECOMPUTE_PERIOD_START, period_end: RECOMPUTE_PERIOD_END }),
@@ -368,10 +382,12 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   }
   // 시리즈가 많으면(코너별 등) 색이 뒤섞이지 않게 series_key 기준으로 색을 고정한다.
   const trendSeriesKeys = [...trendSeriesMeta.keys()].sort();
-  // 막대(코너/끼니/회사구분별 분해) 위에 총식수 꺾은선을 겹쳐 전체 흐름을 한눈에 보여준다 —
-  // "OO 일자간 일평균 식수" 계산도 같은 합계를 쓰므로 여기서 한 번만 만든다.
+  // 막대(코너/끼니/회사구분별 분해) 위에 총식수 꺾은선을 겹쳐서 보여준다 — 코너
+  // 필터 등 토글이 꺼져 있어도 항상 전체 식수를 나타내야 하므로, 필터가 걸린
+  // trendRows가 아니라 별도로 부른 totalHeadcountTrend(무필터)를 쓴다.
+  // "OO 일자간 일평균 식수" 계산도 같은 값을 쓴다.
   const totalHeadcountByPeriod = new Map<string, number>();
-  for (const r of trendRows) totalHeadcountByPeriod.set(r.period, (totalHeadcountByPeriod.get(r.period) ?? 0) + r.headcount);
+  for (const r of totalHeadcountTrend.data ?? []) totalHeadcountByPeriod.set(r.period, r.headcount);
   const headcountTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 32, bottom: 28 },

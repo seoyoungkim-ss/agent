@@ -7048,3 +7048,128 @@ avg_taste_score=None)를 순서대로 반환한다.
 - `npx tsc -b` + `npx vite build` 클린.
 - 위 Playwright 확인.
 - 문서화(§92) 후 커밋·푸시.
+
+# §93. 총식수 꺾은선 필터 무관화 + 코너별 분석 지표 비교 재정리(주 선택 + 일평균) (2026-08)
+
+## Context
+
+담당자 요청 두 가지: (1) "총식수 꺾은선 그래프는 토글이 안 켜져있어도 전체
+식수기반으로 보여줘" — §91에서 추가한 홈 "식수 추이" 차트의 "총식수" 꺾은선이
+지금은 코너 필터/회사구분/끼니 체크박스(토글)로 걸러진 `trendRows`를 그대로
+합산해서 그리고 있어, 코너 필터가 기본값(§81의 7개 프리셋)만 켜진 상태에서는
+실제 전체 식수보다 적게 나온다. (2) "코너별 분석 지표보고에서 전체/평일/
+주말공휴일/패밀리데이 식수를 다시 정리해줘, 어떤 주간의 평균 식수인지 사용자가
+정할 수 있게 해줘" — `CornerMetricComparisonSection`의 "주간 평균 식수" 컬럼이
+§86에서 "평일 하루 평균 × 5"로 만든 추정 공식인데, 이 ×5는 평일 분류에만
+말이 되는 계산이라 주말+공휴일/패밀리데이/전체를 고르면 숫자가 왜곡된다.
+게다가 조회 기간이 고정 180일(`PERIOD_START`~`PERIOD_END`)이라 "어떤 주"의
+평균인지 사용자가 고를 수 없었다.
+
+## 설계
+
+### 1. 홈 "총식수" 꺾은선 — 무필터 전용 쿼리로 분리
+
+`frontend/src/pages/HomePage.tsx`: 기존에는 `totalHeadcountByPeriod`를
+필터가 걸린 `trendRows`에서 그대로 합산했다. 이제 `headcountTrend`(필터
+있음, 막대용)와 별개로 `totalHeadcountTrend`(무필터, 꺾은선 전용) 쿼리를
+새로 추가한다:
+
+```ts
+const totalHeadcountTrend = useQuery({
+  queryKey: ["headcount-trend-total", trendPeriodStart, trendPeriodEnd, trendGranularity],
+  queryFn: () =>
+    api.headcountTrend({
+      period_start: trendPeriodStart,
+      period_end: trendPeriodEnd,
+      granularity: trendGranularity,
+      group_by: "total",
+    }),
+});
+```
+
+`meal_types`/`corner_ids`/`divisions`/`classification` 전부 안 넘긴다 —
+백엔드 `headcount_trend`는 이 파라미터들이 없으면 전체를 합산해서 준다
+(기존 로직 그대로, 새 백엔드 변경 없음). `totalHeadcountByPeriod` map을
+이 쿼리 결과로 채우고, "총식수" 꺾은선과 "최근 N일 평균" 뱃지 둘 다 이
+값을 쓴다 — 코너 필터를 껐다 켜도, 끼니 체크박스를 조절해도 더 이상
+흔들리지 않는다.
+
+**부수 확인**: 백엔드 `GET /analysis/headcount-trend`는 이미 이 파라미터들을
+전부 optional로 받고 있어(§91 이전부터) 코드 변경이 필요 없었다 — 프론트
+쿼리 호출부만 하나 늘었다.
+
+### 2. `CornerMetricComparisonSection` — 주 선택 + 일평균으로 재정리
+
+`frontend/src/pages/AnalysisPage.tsx`: 조회 기간을 고정 180일에서 사용자가
+고르는 한 주(월~토, 이 앱의 "일요일 미운영" 관례)로 바꾼다:
+
+```ts
+const [weekMonday, setWeekMonday] = useState(() => weeklyMondayOf(new Date()));
+const weekSaturday = weeklyAddDays(weekMonday, 5);
+```
+
+`◀ 이전 주` / `<input type="date">` / `다음 주 ▶` 네비게이터를
+`HomePage.tsx`의 기존 주 선택 패턴과 동일하게 추가하고, `api.cornerAnalysis`
+호출의 `period_start`/`period_end`를 이 값으로 바꾼다. "누적 식수 ×5"
+공식(§86)을 지우고, 순수 일평균으로 교체한다:
+
+```ts
+const avgHeadcount = (row: CornerAnalysisRow) =>
+  row.day_count > 0 ? Math.round(row.headcount_total / row.day_count) : null;
+```
+
+`day_count`는 이미 선택한 주·분류(전체/평일/주말+공휴일/패밀리데이)로
+필터된 뒤의 실제 배치일수이므로, 분류가 뭐든 "그 분류에 해당하는 날짜의
+하루 평균 식수"로 일관되게 해석된다(평일 분류만 정확하고 나머지는 틀리던
+문제 해소). 컬럼 라벨을 "주간 평균 식수" → "일평균 식수"로 바꾸고, 캡션에
+현재 조회 중인 주 범위와 "선택한 분류에 해당하는 날짜의 일평균"이라는
+설명을 추가했다.
+
+### 3. 부수 수정 — `StatTile`의 `borderLeftColor`/`borderColor` 콘솔 경고 제거
+
+Playwright 검증 중 "금주 메뉴 편성 규칙 이상 여부" 타일(§92, tone이 로딩
+중 `undefined`였다가 나중에 `"critical"`/`"good"`으로 바뀜)에서 React가
+"don't mix shorthand and non-shorthand properties" 콘솔 경고를 내는 걸
+발견했다 — `ui.tsx`의 `StatTile`이 `borderLeftColor`/`borderLeftWidth`를
+`tone` 유무에 따라 스프레드로 껐다 켰다 해서, 렌더마다 그 스타일 키
+자체가 있다가 없다가 했기 때문(shorthand `borderColor`와 longhand
+`borderLeftColor`를 같이 쓰면서 후자가 렌더마다 사라짐/생김을 반복하면
+React가 경고한다). `borderLeftColor: toneColor ?? "var(--border)"`,
+`borderLeftWidth: toneColor ? 3 : 1`로 항상 같은 키를 넣도록 고쳐
+해결했다 — 이 컴포넌트를 쓰는 다른 모든 화면(타일 전반)에 공통 적용되는
+수정이라 부수적으로 콘솔이 깨끗해졌다.
+
+## 손대지 않은 것 (교차 확인)
+
+- `GET /analysis/headcount-trend` 백엔드 로직 — 무변경, 프론트가 파라미터
+  없이 한 번 더 부르는 것뿐.
+- `GET /analysis/corners`(`corner_analysis`) 백엔드 로직 — 무변경, 프론트가
+  기간 파라미터만 다르게 넘긴다.
+- `HomePage.tsx`의 "선택한 주"(`selectedMonday`) 네비게이터 — 독립 상태,
+  `CornerMetricComparisonSection`의 `weekMonday`와 서로 안 얽힌다.
+- 코너 필터/회사구분/끼니 체크박스와 그 토글 로직 자체 — 막대(분해) 쪽엔
+  그대로 적용, 총식수 꺾은선만 분리했다.
+
+## 테스트
+
+- 백엔드 변경 없음 — `pytest -q` 재실행 불필요(회귀 확인 차원에서
+  563개 재실행, 전부 통과).
+- `npx tsc -b` + `npx vite build` 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔 에러
+  0건): (1) 홈 "식수 추이" 네트워크 탭에 `group_by=total`이면서
+  `corner_ids`/`meal_types`/`divisions` 파라미터가 전혀 없는 요청이 별도로
+  나가는지 확인(막대용 필터 요청과 분리됐는지), (2) `CornerMetricComparisonSection`
+  에서 "이전 주"/"다음 주"/날짜 입력을 조작하면 `GET /analysis/corners`
+  요청의 `period_start`/`period_end`가 정확히 그 주(월~토)로 바뀌는지,
+  분류 탭을 바꾸면 `classification` 파라미터가 정확히 바뀌는지, (3) 실제
+  데이터가 있는 주(2026-07-27)로 이동하면 "일평균 식수" 컬럼이
+  `headcount_total / day_count`(반올림) 그대로인지 API 응답과 대조 확인
+  (한식 194/6일 → 32, 이전 ×5 공식이면 162로 나왔을 자리), (4) StatTile
+  콘솔 경고가 더 이상 안 뜨는지.
+
+## 검증
+
+- `pytest -q` 전체 회귀(563개 통과, 백엔드 변경 없음).
+- `npx tsc -b` + `npx vite build` 클린.
+- 위 Playwright 확인.
+- 문서화(§93) 후 커밋·푸시.
