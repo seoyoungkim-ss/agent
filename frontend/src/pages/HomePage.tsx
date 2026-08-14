@@ -363,6 +363,10 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   }
   // 시리즈가 많으면(코너별 등) 색이 뒤섞이지 않게 series_key 기준으로 색을 고정한다.
   const trendSeriesKeys = [...trendSeriesMeta.keys()].sort();
+  // 막대(코너/끼니/회사구분별 분해) 위에 총식수 꺾은선을 겹쳐 전체 흐름을 한눈에 보여준다 —
+  // "OO 일자간 일평균 식수" 계산도 같은 합계를 쓰므로 여기서 한 번만 만든다.
+  const totalHeadcountByPeriod = new Map<string, number>();
+  for (const r of trendRows) totalHeadcountByPeriod.set(r.period, (totalHeadcountByPeriod.get(r.period) ?? 0) + r.headcount);
   const headcountTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
     grid: { left: 48, right: 16, top: 32, bottom: 28 },
@@ -379,7 +383,11 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
         return [header, ...lines].join("<br/>");
       },
     },
-    legend: { top: 0, textStyle: { color: chartTheme.text }, data: trendSeriesKeys.map((k) => trendSeriesMeta.get(k)!) },
+    legend: {
+      top: 0,
+      textStyle: { color: chartTheme.text },
+      data: [...trendSeriesKeys.map((k) => trendSeriesMeta.get(k)!), "총식수"],
+    },
     xAxis: {
       type: "category",
       data: trendPeriods,
@@ -393,25 +401,36 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       axisLabel: { color: chartTheme.text },
       splitLine: { lineStyle: { color: chartTheme.grid } },
     },
-    series: trendSeriesKeys.map((key, i) => {
-      const color = resolveColor(`var(--series-${(i % 8) + 1})`);
-      return {
-        name: trendSeriesMeta.get(key)!,
-        // §80: 담당자 요청으로 선그래프 대신 누적 막대그래프로 표현한다
-        // (forecastByCornerOption에서 이미 쓰던 stack 패턴과 동일).
-        type: "bar" as const,
-        stack: "total",
-        itemStyle: { color },
-        data: trendPeriods.map((p) => trendValueBySeries.get(key)?.get(p) ?? 0),
-      };
-    }),
+    series: [
+      ...trendSeriesKeys.map((key, i) => {
+        const color = resolveColor(`var(--series-${(i % 8) + 1})`);
+        return {
+          name: trendSeriesMeta.get(key)!,
+          // §80: 담당자 요청으로 선그래프 대신 누적 막대그래프로 표현한다
+          // (forecastByCornerOption에서 이미 쓰던 stack 패턴과 동일).
+          type: "bar" as const,
+          stack: "total",
+          itemStyle: { color },
+          data: trendPeriods.map((p) => trendValueBySeries.get(key)?.get(p) ?? 0),
+        };
+      }),
+      {
+        // 코너/끼니/회사구분별로 쪼갠 막대 위에 총식수 흐름을 겹쳐서 한눈에 보이게.
+        name: "총식수",
+        type: "line" as const,
+        symbol: "circle",
+        symbolSize: 6,
+        lineStyle: { color: resolveColor("var(--ink)"), width: 2 },
+        itemStyle: { color: resolveColor("var(--ink)") },
+        z: 10,
+        data: trendPeriods.map((p) => totalHeadcountByPeriod.get(p) ?? 0),
+      },
+    ],
   };
 
   // §80: "OO 일자간 일평균 식수" — 일간 단위일 때만 최근 N일 평균을 보여준다
   // (이미 가져온 trendRows/trendPeriods를 클라이언트에서 합산하는 것뿐이라
   // 새 백엔드 호출이 필요 없다).
-  const totalHeadcountByPeriod = new Map<string, number>();
-  for (const r of trendRows) totalHeadcountByPeriod.set(r.period, (totalHeadcountByPeriod.get(r.period) ?? 0) + r.headcount);
   const trendRecentPeriods = trendPeriods.slice(-trendAvgWindow);
   const trendRecentAvg =
     trendRecentPeriods.length > 0
