@@ -510,6 +510,11 @@ function SortableHeader({
   );
 }
 
+// 담당자 요청(2026-08): 메뉴별 분석 4분면의 기본 기준값 — 1회 제공당
+// 평균 식수 200명 / 만족도 3.5점(5점 만점).
+const DEFAULT_DEMAND_THRESHOLD = 200;
+const DEFAULT_SCORE_THRESHOLD = 3.5;
+
 function MenuQuadrantTab() {
   const chartTheme = useChartTheme();
   const [expandedCorner, setExpandedCorner] = useState<string | null>(null);
@@ -545,11 +550,12 @@ function MenuQuadrantTab() {
     effectiveQuadrant: "",
   }));
 
-  const autoDemandThreshold = median(metrics.map((r) => r.demand));
-  const autoScoreThreshold = median(metrics.map((r) => r.satisfaction));
-  const demandThreshold = demandThresholdOverride ?? autoDemandThreshold;
-  const scoreThreshold = scoreThresholdOverride ?? autoScoreThreshold;
-  const maxDemand = Math.max(1, ...metrics.map((r) => r.demand));
+  // 담당자 요청(2026-08): 중앙값 자동 계산 대신 고정 기준값(1회 제공당
+  // 평균 식수 200명 / 만족도 3.5점)을 기본으로 쓴다. 슬라이더로는 계속
+  // 조절 가능 — "초기화"를 누르면 이 고정값으로 되돌아간다.
+  const demandThreshold = demandThresholdOverride ?? DEFAULT_DEMAND_THRESHOLD;
+  const scoreThreshold = scoreThresholdOverride ?? DEFAULT_SCORE_THRESHOLD;
+  const maxDemand = Math.max(1, DEFAULT_DEMAND_THRESHOLD, ...metrics.map((r) => r.demand));
 
   const classified: MenuQuadrantMetrics[] = metrics.map((r) => ({
     ...r,
@@ -606,7 +612,7 @@ function MenuQuadrantTab() {
   return (
     <Card title="메뉴별 분석 — 인기메뉴 / 숨은강자 / 개선시급 / 퇴출후보">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        가로축 만족도 × 세로축 수요 기준값(중앙값, 슬라이더로 조절 가능)으로 4분류합니다.
+        가로축 만족도(기본 {DEFAULT_SCORE_THRESHOLD}점) × 세로축 수요(기본 {DEFAULT_DEMAND_THRESHOLD}명, 슬라이더로 조절 가능)로 4분류합니다.
         흐린 점은 최근 {LOW_APPEARANCE_THRESHOLD}회 미만 제공이라 수치가 불안정할 수 있습니다.
       </p>
       <div className="mb-3">
@@ -2181,6 +2187,58 @@ function VoeAnalysisTab() {
         </div>
       </Card>
 
+      <Card title="VOE AI 브리핑">
+        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          아래 "VOE 클러스터링" 결과를 요약합니다. 그 달의 클러스터링이 먼저 계산돼 있어야 합니다.
+        </p>
+        {voeBriefingMulti.isLoading && <LoadingState />}
+        {voeBriefingMulti.isError && <ErrorState error={voeBriefingMulti.error} />}
+        <div className="space-y-6">
+          {voeBriefingMulti.data?.map(({ month, data }) => {
+            const isPendingThisMonth = recomputeVoeBriefing.isPending && recomputeVoeBriefing.variables === month;
+            return (
+              <div key={month} className="border-t pt-4 first:border-t-0 first:pt-0" style={{ borderColor: "var(--border)" }}>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <h3 className="text-[13px] font-semibold">{formatMonthLabel(month)}</h3>
+                  <Button
+                    variant="secondary"
+                    onClick={() => recomputeVoeBriefing.mutate(month)}
+                    disabled={isPendingThisMonth}
+                  >
+                    {isPendingThisMonth ? "요약 중..." : "재계산"}
+                  </Button>
+                </div>
+                {recomputeVoeBriefing.isError && recomputeVoeBriefing.variables === month && (
+                  <ErrorState error={recomputeVoeBriefing.error} />
+                )}
+                {!data.has_clusters && (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    먼저 아래 "VOE 클러스터링"을 계산하세요.
+                  </p>
+                )}
+                {data.has_clusters && !data.briefing && (
+                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+                    아직 브리핑이 계산되지 않았습니다. "재계산"을 눌러보세요.
+                  </p>
+                )}
+                {data.briefing && data.has_clusters && (
+                  <div>
+                    <p className="whitespace-pre-line text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                      {data.briefing}
+                    </p>
+                    {data.briefing_computed_at && (
+                      <p className="mt-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+                        {data.briefing_computed_at.replace("T", " ")} 기준
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
       <Card title="VOE 분류 (맛·간·위생·서비스)">
         <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
           카테고리를 클릭하면 코멘트를 볼 수 있습니다. 매일 자동 분류되며, 즉시 반영하려면 그 달을 재계산하세요.
@@ -2281,58 +2339,6 @@ function VoeAnalysisTab() {
                       </div>
                     )}
                   </>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </Card>
-
-      <Card title="VOE AI 브리핑">
-        <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          아래 "VOE 클러스터링" 결과를 요약합니다. 그 달의 클러스터링이 먼저 계산돼 있어야 합니다.
-        </p>
-        {voeBriefingMulti.isLoading && <LoadingState />}
-        {voeBriefingMulti.isError && <ErrorState error={voeBriefingMulti.error} />}
-        <div className="space-y-6">
-          {voeBriefingMulti.data?.map(({ month, data }) => {
-            const isPendingThisMonth = recomputeVoeBriefing.isPending && recomputeVoeBriefing.variables === month;
-            return (
-              <div key={month} className="border-t pt-4 first:border-t-0 first:pt-0" style={{ borderColor: "var(--border)" }}>
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                  <h3 className="text-[13px] font-semibold">{formatMonthLabel(month)}</h3>
-                  <Button
-                    variant="secondary"
-                    onClick={() => recomputeVoeBriefing.mutate(month)}
-                    disabled={isPendingThisMonth}
-                  >
-                    {isPendingThisMonth ? "요약 중..." : "재계산"}
-                  </Button>
-                </div>
-                {recomputeVoeBriefing.isError && recomputeVoeBriefing.variables === month && (
-                  <ErrorState error={recomputeVoeBriefing.error} />
-                )}
-                {!data.has_clusters && (
-                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                    먼저 아래 "VOE 클러스터링"을 계산하세요.
-                  </p>
-                )}
-                {data.has_clusters && !data.briefing && (
-                  <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                    아직 브리핑이 계산되지 않았습니다. "재계산"을 눌러보세요.
-                  </p>
-                )}
-                {data.briefing && data.has_clusters && (
-                  <div>
-                    <p className="whitespace-pre-line text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-                      {data.briefing}
-                    </p>
-                    {data.briefing_computed_at && (
-                      <p className="mt-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-                        {data.briefing_computed_at.replace("T", " ")} 기준
-                      </p>
-                    )}
-                  </div>
                 )}
               </div>
             );
