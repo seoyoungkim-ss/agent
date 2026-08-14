@@ -6717,3 +6717,38 @@ VOE 분류 → VOE 클러스터링. 카드 내부 로직(쿼리·재계산 뮤�
   "만족도·VoE" 탭에서 카드 순서가 주관식 VOE → VOE AI 브리핑 → VOE
   분류 → VOE 클러스터링인지 스크린샷으로 확인.
 - 문서화 후 커밋·푸시.
+
+## 추가 수정 — 메뉴별 분석 4분면을 중식 전용으로 고정 (같은 날)
+
+담당자가 이어서 "메뉴별 분석 사분면은 중식만 보여줘"라고 요청했다.
+`MenuQuadrantTab`은 원래 전체/조식/중식/석식 4개 탭(`mealTypeFilter`
+state)을 지원했다 — "전체"는 사전에 배치로 계산해 캐시해 둔
+`MenuPerformanceStats`(`api.menuPerformance`, "재계산" 버튼으로
+`api.recomputeMenuPerformance` 수동 트리거)를 읽고, 조식/중식/석식은
+그 자리에서 계산하는 `api.menuPerformanceByMealType`을 썼다.
+
+이번 요청으로 `mealTypeFilter` state와 그 `SegmentedControl`, "전체"
+전용 "재계산" 버튼을 전부 지우고, `query`가 항상
+`api.menuPerformanceByMealType({ ..., meal_type: "중식" })`만 호출하도록
+고정했다. 카드 안내 문구 맨 앞에 "중식 기준."을 추가해 §76(날씨유형
+랭킹 중식 고정)과 같은 톤으로 범위를 명시했다.
+
+**남겨둔 것**: `api.menuPerformance`/`api.recomputeMenuPerformance`
+(client.ts)와 백엔드 `GET /analysis/menu-performance`/
+`POST /analysis/menu-performance/recompute` 엔드포인트는 지우지
+않았다 — 이 화면에서만 안 쓰이게 됐을 뿐(grep으로 프론트 전체에서
+다른 호출부가 없음을 확인했지만), 그 기반 캐시 테이블
+(`MenuPerformanceStats`)과 이를 채우는 `aggregate_menu_performance`
+함수 자체는 `scheduler.py`의 새벽 배치가 계속 쓰고
+`weekly_menu_prediction.py`/`simulation.py`/`dashboard.py`도 그
+테이블을 읽는다 — 엔드포인트 삭제는 이번 요청 범위 밖의 더 큰
+변경이라 다음 정리 라운드로 남겨둔다.
+
+### 검증
+
+- `npx tsc -b` 클린.
+- Playwright: 카드 안내 문구가 "중식 기준."으로 시작하는지, 전체/
+  조식/석식 선택 버튼이 더 이상 안 보이는지, 네트워크 탭에서
+  `menu-performance/by-meal-type?...&meal_type=%EC%A4%91%EC%8B%9D`
+  요청 1건만 나가는지 확인(콘솔 에러 0건).
+- 문서화 후 커밋·푸시.

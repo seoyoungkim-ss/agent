@@ -524,22 +524,15 @@ function MenuQuadrantTab() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [visibleQuadrants, setVisibleQuadrants] = useState<Set<string>>(new Set(QUADRANT_LABELS));
   const [quadrantLimit, setQuadrantLimit] = useState<(typeof QUADRANT_LIMIT_OPTIONS)[number]["value"]>("10");
-  // 조식/중식/석식마다 나오는 메뉴가 달라 전체로 묶어 보면 비교가 안 맞는다 —
-  // "전체"는 기존 사전 recompute된 MenuPerformanceStats, 특정 끼니는 그 자리에서
-  // 계산하는 by-meal-type 엔드포인트로 전환한다(2026-07).
-  const [mealTypeFilter, setMealTypeFilter] = useState<MealType | "전체">("전체");
+  // 담당자 요청(2026-08): 조식/석식은 안 보고 중식만 본다 — 조식/중식/석식마다
+  // 나오는 메뉴가 달라 끼니를 고정해야 비교가 맞는다는 원래 취지(2026-07)를
+  // 중식 하나로 못박았다. by-meal-type 엔드포인트는 그 자리에서 계산하므로
+  // "전체"가 쓰던 사전 recompute 캐시(menuPerformance/recomputeMenuPerformance)는
+  // 더 이상 이 화면에서 안 쓴다.
   const query = useQuery({
-    queryKey: ["menu-performance", PERIOD_START, PERIOD_END, mealTypeFilter],
-    queryFn: () =>
-      mealTypeFilter === "전체"
-        ? api.menuPerformance({ period_start: PERIOD_START, period_end: PERIOD_END })
-        : api.menuPerformanceByMealType({
-            period_start: PERIOD_START,
-            period_end: PERIOD_END,
-            meal_type: mealTypeFilter,
-          }),
+    queryKey: ["menu-performance", PERIOD_START, PERIOD_END, "중식"],
+    queryFn: () => api.menuPerformanceByMealType({ period_start: PERIOD_START, period_end: PERIOD_END, meal_type: "중식" }),
   });
-  const recompute = () => api.recomputeMenuPerformance({ period_start: PERIOD_START, period_end: PERIOD_END });
 
   const rows = query.data ?? [];
   const metrics: MenuQuadrantMetrics[] = rows.map((r) => ({
@@ -612,21 +605,9 @@ function MenuQuadrantTab() {
   return (
     <Card title="메뉴별 분석 — 인기메뉴 / 숨은강자 / 개선시급 / 퇴출후보">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        가로축 만족도(기본 {DEFAULT_SCORE_THRESHOLD}점) × 세로축 수요(기본 {DEFAULT_DEMAND_THRESHOLD}명, 슬라이더로 조절 가능)로 4분류합니다.
+        중식 기준. 가로축 만족도(기본 {DEFAULT_SCORE_THRESHOLD}점) × 세로축 수요(기본 {DEFAULT_DEMAND_THRESHOLD}명, 슬라이더로 조절 가능)로 4분류합니다.
         흐린 점은 최근 {LOW_APPEARANCE_THRESHOLD}회 미만 제공이라 수치가 불안정할 수 있습니다.
       </p>
-      <div className="mb-3">
-        <SegmentedControl
-          value={mealTypeFilter}
-          options={[
-            { label: "전체", value: "전체" },
-            { label: "조식", value: "조식" },
-            { label: "중식", value: "중식" },
-            { label: "석식", value: "석식" },
-          ]}
-          onChange={setMealTypeFilter}
-        />
-      </div>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-4 text-xs">
           {QUADRANT_LABELS.map((label) => {
@@ -652,17 +633,6 @@ function MenuQuadrantTab() {
             <span>표시 개수</span>
             <SegmentedControl value={quadrantLimit} options={QUADRANT_LIMIT_OPTIONS} onChange={setQuadrantLimit} />
           </div>
-          {mealTypeFilter === "전체" && (
-            <Button
-              variant="secondary"
-              onClick={async () => {
-                await recompute();
-                query.refetch();
-              }}
-            >
-              재계산
-            </Button>
-          )}
         </div>
       </div>
       <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
