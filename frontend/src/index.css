@@ -68,6 +68,14 @@
   --hero-bg: #0f1b33;
   --hero-ink-muted: #93a4c3;
   --hero-accent: #7db8ff;
+
+  /* §103: 주간 편성 규칙 검증 카드 + 격자 하이라이트 전용 팔레트 —
+     기존 --accent(블루) 체계와 별개로, 이 섹션에서만 쓴다. */
+  --rule-primary: #4f46e5;
+  --rule-decrease: #e11d48;
+  --rule-neutral: #94a3b8;
+  --rule-highlight-bg: #fef3c7;
+  --rule-pulse-ring: rgba(225, 29, 72, 0.35);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -105,7 +113,28 @@
 
     --chart-gridline: #2c2c2a;
     --chart-axis: #383835;
+
+    --rule-primary: #818cf8;
+    --rule-decrease: #fb7185;
+    --rule-neutral: #94a3b8;
+    --rule-highlight-bg: #3f2e12;
+    --rule-pulse-ring: rgba(251, 113, 133, 0.35);
   }
+}
+
+/* §103: 규칙 위반으로 새로 강조된 격자 셀에 짧게 시선을 유도하는 펄스 —
+   앱 첫 CSS 애니메이션. 배경/보더 자체는 인라인 스타일로 계속 유지되고,
+   이 애니메이션은 0.3초짜리 링 이펙트만 얹는다. */
+@keyframes rule-cell-pulse-ring {
+  0% {
+    box-shadow: inset 3px 0 0 var(--rule-decrease), 0 0 0 0 var(--rule-pulse-ring);
+  }
+  100% {
+    box-shadow: inset 3px 0 0 var(--rule-decrease), 0 0 0 6px transparent;
+  }
+}
+.rule-cell-pulse {
+  animation: rule-cell-pulse-ring 0.3s ease-out;
 }
 
 body {

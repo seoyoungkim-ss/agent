@@ -7902,3 +7902,161 @@ VOE/편성·운영 4개 축을 한 카드에 모아 보여주는 가장 가까�
   Tailwind 표준 유틸이고 이미 앱 다른 곳에서도 쓰이는 패턴이라
   다건일 때도 정상 동작함을 코드로 확인.
 - 문서화(§102) 후 커밋·푸시(§101과 함께).
+
+---
+
+# §103. 주간 편성 규칙 검증 카드화 + 격자 하이라이트 연동 + 재편성 Top5 카드화 (2026-08)
+
+## Context
+
+담당자가 메뉴 편성·운영 탭의 세 영역을 구체적인 UI 스펙과 함께 개편
+요청했다: (1) "주간 편성 규칙 검증" 패널을 텍스트 나열식에서 PASS/FAIL
+카드로, (2) 규칙 카드 클릭 시 아래 주간 식단표 격자를 스크롤+하이라이트
++펄스 애니메이션으로 연동, (3) 격자의 빈 셀 시각 노이즈 감소, (4) "메뉴
+중복 점검"의 "재편성 Top5" 리스트를 카드화(핵심 지표 1개 크게+보조
+지표 3개).
+
+Explore 조사 결과, 세 영역 전부 `frontend/src/pages/AnalysisPage.tsx`의
+`WeeklyMenuReviewTab`(규칙 검증+격자)과 `RotationCheckPanel`(재편성
+Top5) 안에 있었고, 기존에 이미 셀 클릭↔선택 연동 인프라
+(`selectedSlotKeys` Set, `selectSlot`, `renderMatchChip`)가 §78/§81/§89
+라운드에서 만들어져 있어 이번 라운드는 그 인프라를 재사용하면서
+프레젠테이션(카드 UI, 스크롤, 펄스, 헤더 배지)만 새로 얹었다. 스크롤
+이동·펄스 애니메이션은 앱 전체에 선례가 없어(그렙 0건) 이번에 처음
+도입했다.
+
+AskUserQuestion으로 "재편성 Top5" 카드의 핵심 지표를 확정했다: 이
+리스트 자체가 이미 `gap_days`(직전 대비, "N일 후") 오름차순으로
+정렬돼 있어 순위의 근거이기도 해서, "직전 대비"(gap_days)를 큰
+숫자로 강조하기로 했다(평균 재편성 주기·만족도는 보조 지표).
+
+담당자가 제시한 색상 팔레트(Primary #4F46E5, 감소/위반 #E11D48, 평균/
+회색 #94A3B8, 하이라이트 배경 #FEF3C7)는 그렙 결과 이 앱에 한 번도
+쓰인 적이 없는 새 리터럴이었다 — 기존 앱은 전부 `--accent`(블루,
+Toss풍) 기반 별도 색 체계를 쓴다. 새 팔레트는 이번에 새로 만드는
+요소(규칙 카드, 격자 하이라이트)에만 새 토큰(`--rule-*`)으로 추가하고,
+앱 전역의 기존 accent 블루 체계는 건드리지 않았다.
+
+Explore 조사로 "재편성 Top5에 동일 메뉴가 중복 표기"되는 현상도
+확인했다 — **집계 버그가 아니라 의도된 동작**이다:
+`weekly_menu_rotation()`(`backend/app/api/analysis.py`)은
+`WeeklyMenuPlan` 슬롯 하나당 한 행을 반환하도록 의도적으로 설계돼
+있고(그룹핑 없음), `build_corner_menu_dates`(`backend/app/services/
+menu_rotation.py`)는 `(corner_name, menu_name)` 단위로 편성 이력을
+추적한다. 즉 같은 메뉴가 **다른 코너**에서 나왔거나, 같은 코너에서
+기간 내 **두 번 이상 재편성**됐으면 두 행이 뜨는 게 정상 동작이다(각
+행이 서로 다른 재편성 "사건"을 가리킴, React `key`도
+`corner_id-menu_id-plan_date`로 이를 반영). 이번 라운드에서는 이 부분에
+코드 변경을 하지 않았다.
+
+## 설계
+
+### 1. 새 CSS 토큰(`frontend/src/index.css`)
+
+`:root`와 dark 미디어쿼리에 `--rule-primary`/`--rule-decrease`/
+`--rule-neutral`/`--rule-highlight-bg`/`--rule-pulse-ring` 5개 토큰을
+추가(라이트: `#4f46e5`/`#e11d48`/`#94a3b8`/`#fef3c7`/`rgba(225,29,72,
+0.35)`, 다크: `#818cf8`/`#fb7185`/`#94a3b8`/`#3f2e12`/`rgba(251,113,
+133,0.35)`). "증가" 색(#059669)은 이번 3개 영역 어디에도 실제로 쓰일
+자리가 없어(모두 위반/경고 방향) 토큰을 만들지 않았다(§101에서 안 쓰는
+`--hero-ink` 토큰을 제거한 것과 같은 이유). 같은 파일에 앱 첫 CSS
+애니메이션(`@keyframes rule-cell-pulse-ring` + `.rule-cell-pulse`
+클래스)도 추가 — 규칙 위반으로 새로 강조된 셀에 0.3초짜리 링 펄스를
+얹는다(배경/보더 자체는 인라인 스타일로 계속 정적으로 유지됨).
+
+### 2. 규칙 검증 패널 카드화(`WeeklyMenuReviewTab`)
+
+기존 `selectedSlotKeys`/`selectSlot`(단일 셀 클릭→편집 패널)는 그대로
+두고, 새 상태 `activeRuleKey: string | null`을 추가했다. 기존
+`selectRuleMatches`/`isRuleSelected`(§81/§89)는 `selectRule(ruleKey,
+matches)` 하나로 통합 — 같은 규칙을 다시 클릭하면 해제(§81 토글 로직
+계승), `activeRuleKey`가 카드 "선택됨" 표시와 격자/헤더 하이라이트
+종류 판별을 겸한다.
+
+기존 `renderRuleChip`+`renderDailyRuleRow`+규칙4 전용 인라인 블록을
+`RuleCardConfig` 타입 + `buildDailyRuleCard`/`buildLowHeadcountRuleCard`
+빌더 + `renderRuleCard` 렌더러로 통합했다. 규칙 4개(해장/면류/매운맛/
+저조식수 재편성)를 전부 같은 구조로 카드화 — 좌측 규칙명, 우측 PASS/
+FAIL 아이콘(`lucide-react`의 `CheckCircle2`/`AlertTriangle`, §98에서
+도입한 아이콘 시스템과 통일 — 원 스펙의 ✅/⚠️ 이모지 대신 채택), 아이콘
+옆 요일 5개 dot(위반일만 `--rule-decrease` 채움, 나머지는
+`--border-strong` outline만). 위반 칩 목록은 `activeRuleKey ===
+cfg.key`일 때만(펼침 상태) 렌더링. `noodle`/`spicy_red_broth`(하루
+최대 N개형)만 `isCountType: true`로 표시 — 부재형 규칙(해장 최소
+1개)이나 개별 매치 기반 규칙(저조 식수 재사용)은 초과분 카운트 개념이
+없어 헤더 배지 대상에서 제외.
+
+### 3. 격자 하이라이트 연동
+
+`overflow-x-auto` 래퍼 div에 `gridRef`를 달고
+`useEffect(() => activeRuleKey && gridRef.current?.scrollIntoView({behavior:"smooth", block:"start"}), [activeRuleKey])`
+로 규칙 카드 클릭 시 격자로 자동 스크롤.
+
+요일 헤더(`<th>`)는 두 레이어: (1) 상시 — 4개 규칙 전체의 위반일 합집합
+(`datesWithAnyViolation`)에 포함되면 작은 빨간 dot을 항상 표시(규칙을
+안 눌러도 스캔 가능), (2) 선택 시 — `activeRuleCard`의 위반일이면 헤더
+배경을 `--rule-highlight-bg`로 강조, `isCountType`이면 같은 헤더에
+`{count}/{limit}개 초과` 배지도 얹음.
+
+격자 셀(`<td>`)은 `isRuleHighlighted = isSelected && activeRuleKey !=
+null`을 새로 판별 — 참이면 노란 배경(`--rule-highlight-bg`) + 좌측
+빨간 바(`inset 3px 0 0 var(--rule-decrease)`) + `rule-cell-pulse`
+클래스. 단순 셀 클릭(단일 편집 선택, `isSelected && !isRuleHighlighted`)
+은 기존 파란 `--surface-2`+`--accent` 스타일 그대로 — 두 선택 방식을
+시각적으로 구분해 "이 슬롯 편집" vs "규칙 위반 하이라이트"가 안
+헷갈리게 했다. `<td>`의 `key`를 하이라이트 상태일 때
+`` `${d}-${activeRuleKey}` ``로 바꿔, 다른 규칙을 연달아 클릭해도 같은
+셀에서 펄스가 매번 재생되게 했다(React가 새 key로 리마운트 — 이
+`<td>`는 내부 상태가 없어 비용 없음). "다른 규칙 클릭 시 이전
+하이라이트 해제"는 `selectedSlotKeys`가 이미 "항상 하나의 집합만
+유지"하는 기존 동작(§81)이라 별도 구현 없이 그대로 충족됨.
+
+### 4. 빈 셀 시각 노이즈 감소
+
+빈 셀(`-`)의 기존 `var(--ink-muted)` 색은 유지하고 `opacity: 0.45`만
+추가 — 실제 메뉴가 있는 셀(`var(--ink)` + `font-medium`)은 무변경이라
+상대적으로 더 두드러져 보인다.
+
+### 5. 재편성 Top5 카드화(`RotationCheckPanel.renderRotationRow`)
+
+`avg_satisfaction`/`recent_avg_headcount`/`avg_interval_days`/
+`gap_days` 4개가 한 줄 그리드였던 걸: 상단에 메뉴명·코너명+`gap_days`를
+30px bold("{N}일 후 재편성", `var(--ink)` — §39.12 "색은 점에만"
+관례 유지, 우측 flag `Badge`의 점이 tone을 담당)로 크게, `previous_date`
+요일 변환 문구는 그 아래 보조줄로. 만족도/식수/평균 주기 3개는
+`grid-cols-3`(4→3, gap_days가 위로 승격됨)의 작은 라벨+값 보조 정보로
+하단 배치. 이 함수는 Top5 리스트와 "재편성 기준일 미달 목록" 두 곳에서
+공유돼(`rank` prop 유무로 구분) 두 리스트 다 동일하게 적용됨.
+
+## 손대지 않는 것 (교차 확인)
+
+- 단일 셀 클릭(편집 패널 열기) 동작과 그 시각 스타일 — 무변경.
+- `predictedByPlanId` 히트맵 배경 — 무변경, `isRuleHighlighted`/
+  `isSelected`가 여전히 우선순위를 가짐.
+- Top5 리스트의 "동일 메뉴 중복 표기" — Context에서 설명한 대로 의도된
+  동작이라 데이터/집계 로직(`weekly_menu_rotation`,
+  `build_corner_menu_dates`, `classify_rotation`) 무변경.
+- `rank_by_shortest_cycle`/`shortest_cycle_menus`/`overdue_menus`(§86,
+  이 Top5와 무관한 별도 기능) — 무변경.
+- 앱 전역의 기존 `--accent` 블루 색 체계, 사이드바(§98), 홈 KPI
+  카드(§99/§101), 메인 차트 콜아웃(§100) — 무변경.
+
+## 테스트/검증
+
+- 백엔드 변경이 없으므로 `pytest` 재실행 불필요.
+- `npx tsc -b` + `npx vite build` 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건, 라이트/다크 모두): 규칙 4개가 카드로 분리돼 PASS(초록
+  체크)/FAIL(빨간 경고 삼각형) 아이콘 + 요일 dot으로 보임을 확인. 위반
+  있는 "면류" 카드 클릭 → 카드가 펼쳐지고 좌측 보더가 인디고로 바뀌며,
+  격자가 자동 스크롤되고 08-10(월) 요일 헤더에 amber 배경+"5/4개 초과"
+  배지가 뜨고 해당 5개 코너 셀 전부 노란 배경+빨간 좌측 바로 강조됨을
+  실측 확인. 다른 규칙("최근 저조 식수") 클릭 시 이전 하이라이트(5개
+  셀)가 사라지고 새 규칙의 3개 셀만 강조되는 배타적 전환도 확인. 같은
+  카드 재클릭으로 완전 해제(카드 보더·격자 하이라이트 전부 원복,
+  헤더의 상시 빨간 dot만 남음) 확인. 빈 셀이 실제 메뉴 셀보다 눈에
+  띄게 옅게 보임을 확인. "재편성 점검" 탭의 Top5 카드가 "1 일 후
+  재편성" 큰 숫자 + 만족도/식수/평균 주기 보조 3열 레이아웃으로 바뀜을
+  확인. 다크모드에서도 amber 배경(짙은 갈색 톤)·빨간 바·카드 아이콘
+  전부 대비 유지됨을 확인.
+- 문서화(§103) 후 커밋·푸시.
