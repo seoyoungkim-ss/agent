@@ -1,4 +1,6 @@
 import { useState } from "react";
+import type { LucideIcon } from "lucide-react";
+import { Bot, CloudSun, LayoutDashboard, MessageSquareHeart, Settings, UtensilsCrossed } from "lucide-react";
 import { HomePage } from "./pages/HomePage";
 import { AdminPage, MenuPlanningPage, SatisfactionVoePage, SimulationPage } from "./pages/AnalysisPage";
 import { ChatPage } from "./pages/ChatPage";
@@ -10,17 +12,17 @@ import { WeeklyMenuVoeDetailPage } from "./pages/WeeklyMenuVoeDetailPage";
 // §81: 날씨 관련 화면은 "시뮬레이션" 탭으로 다시 분리했다 — 위 흡수 결정은
 // 그대로 두고(사내 행사 토글은 복원하지 않음), 날씨 콘텐츠만 별도 탭으로
 // 옮겨달라는 명시적 요청이라 이 부분만 되돌린다.
-// "weekly-voe"는 상단 내비게이션엔 안 보이는 화면 — 홈의 "금주 메뉴 과거 VOE"
-// 카드를 클릭했을 때만 진입한다(뒤로가기 버튼으로 홈에 복귀).
+// "weekly-voe"는 사이드바 내비게이션엔 안 보이는 화면 — 홈의 "금주 메뉴 과거
+// VOE" 카드를 클릭했을 때만 진입한다(뒤로가기 버튼으로 홈에 복귀).
 type Tab = "home" | "menu-planning" | "simulation" | "satisfaction" | "chat" | "admin" | "weekly-voe";
 
-const TABS: { value: Tab; label: string }[] = [
-  { value: "home", label: "현황" },
-  { value: "menu-planning", label: "메뉴 편성·운영" },
-  { value: "simulation", label: "시뮬레이션" },
-  { value: "satisfaction", label: "만족도·VoE" },
-  { value: "chat", label: "Agent 채팅" },
-  { value: "admin", label: "관리" },
+const TABS: { value: Tab; label: string; icon: LucideIcon }[] = [
+  { value: "home", label: "현황", icon: LayoutDashboard },
+  { value: "menu-planning", label: "메뉴 편성·운영", icon: UtensilsCrossed },
+  { value: "simulation", label: "시뮬레이션", icon: CloudSun },
+  { value: "satisfaction", label: "만족도·VoE", icon: MessageSquareHeart },
+  { value: "chat", label: "Agent 채팅", icon: Bot },
+  { value: "admin", label: "관리", icon: Settings },
 ];
 
 function App() {
@@ -30,46 +32,55 @@ function App() {
   const [weeklyVoeMonday, setWeeklyVoeMonday] = useState<string | undefined>(undefined);
 
   return (
-    <div className="min-h-screen" style={{ background: "var(--page)", color: "var(--ink)" }}>
-      <header className="border-b" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
-        <div className="mx-auto flex max-w-6xl items-center gap-8 px-6">
-          <span className="py-4 text-[15px] font-semibold tracking-tight">카페테리아 운영 관리</span>
-          <nav className="flex gap-6">
-            {TABS.map((t) => (
+    <div className="flex min-h-screen" style={{ background: "var(--page)", color: "var(--ink)" }}>
+      <aside
+        className="flex w-60 shrink-0 flex-col border-r px-3 py-5"
+        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+      >
+        <span className="mb-6 px-3 text-[15px] font-semibold tracking-tight">카페테리아 운영 관리</span>
+        <nav className="flex flex-col gap-1">
+          {TABS.map((t) => {
+            const Icon = t.icon;
+            const active = tab === t.value;
+            return (
               <button
                 key={t.value}
                 onClick={() => setTab(t.value)}
-                className="border-b-2 py-4 text-[13px] font-medium transition-colors"
+                className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-[13px] font-medium transition-colors"
                 style={{
-                  borderColor: tab === t.value ? "var(--accent)" : "transparent",
-                  color: tab === t.value ? "var(--ink)" : "var(--ink-secondary)",
+                  background: active ? "var(--surface-2)" : "transparent",
+                  color: active ? "var(--ink)" : "var(--ink-secondary)",
+                  boxShadow: active ? "inset 3px 0 0 var(--accent)" : undefined,
                 }}
               >
+                <Icon size={17} strokeWidth={2} />
                 {t.label}
               </button>
-            ))}
-          </nav>
+            );
+          })}
+        </nav>
+      </aside>
+      <main className="flex-1 px-8 py-8">
+        <div className="max-w-6xl">
+          {tab === "home" && (
+            <HomePage
+              onOpenWeeklyVoe={(monday) => {
+                // 홈에서 보고 있던 주를 그대로 넘긴다 — 안 넘기면 상세 화면이
+                // 오늘 기준으로 다시 계산해 다른 주를 연다(2026-08 신고).
+                setWeeklyVoeMonday(monday);
+                setTab("weekly-voe");
+              }}
+            />
+          )}
+          {tab === "menu-planning" && <MenuPlanningPage />}
+          {tab === "simulation" && <SimulationPage />}
+          {tab === "satisfaction" && <SatisfactionVoePage />}
+          {tab === "chat" && <ChatPage />}
+          {tab === "admin" && <AdminPage />}
+          {tab === "weekly-voe" && (
+            <WeeklyMenuVoeDetailPage monday={weeklyVoeMonday} onBack={() => setTab("home")} />
+          )}
         </div>
-      </header>
-      <main className="mx-auto max-w-6xl px-6 py-6">
-        {tab === "home" && (
-          <HomePage
-            onOpenWeeklyVoe={(monday) => {
-              // 홈에서 보고 있던 주를 그대로 넘긴다 — 안 넘기면 상세 화면이
-              // 오늘 기준으로 다시 계산해 다른 주를 연다(2026-08 신고).
-              setWeeklyVoeMonday(monday);
-              setTab("weekly-voe");
-            }}
-          />
-        )}
-        {tab === "menu-planning" && <MenuPlanningPage />}
-        {tab === "simulation" && <SimulationPage />}
-        {tab === "satisfaction" && <SatisfactionVoePage />}
-        {tab === "chat" && <ChatPage />}
-        {tab === "admin" && <AdminPage />}
-        {tab === "weekly-voe" && (
-          <WeeklyMenuVoeDetailPage monday={weeklyVoeMonday} onBack={() => setTab("home")} />
-        )}
       </main>
     </div>
   );

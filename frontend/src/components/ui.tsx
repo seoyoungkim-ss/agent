@@ -8,7 +8,7 @@ export function Card({ title, children, className }: { title?: string; children:
       style={{ borderColor: "var(--border)", background: "var(--surface)" }}
     >
       {title && (
-        <h3 className="mb-3 text-[15px] font-semibold" style={{ color: "var(--ink)" }}>
+        <h3 className="mb-2 text-[12px] font-semibold tracking-wide" style={{ color: "var(--ink-muted)" }}>
           {title}
         </h3>
       )}
@@ -43,7 +43,7 @@ export function StatTile({
   return (
     <Tag
       className={clsx(
-        "w-full rounded-2xl border p-5 text-left shadow-sm transition-colors",
+        "w-full rounded-2xl border p-6 text-left shadow-sm transition-colors",
         onClick && "hover:border-current",
       )}
       style={{
