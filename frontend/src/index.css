@@ -60,6 +60,14 @@
      해석하지 못하므로, ECharts 옵션 쪽에서는 이 값을 resolveColor()로 직접 읽어 쓴다. */
   --chart-gridline: #e1e0d9;
   --chart-axis: #c3c2b7;
+
+  /* §101: 다크 강조 카드 전용 — OS 다크모드 여부와 무관하게 항상 고정.
+     --surface/--ink 등 역할 토큰은 다크모드에서 반전되므로 그대로 쓰면
+     OS가 다크모드일 때 다른 카드와 구분이 안 된다(아래 dark media
+     쿼리에서 재정의하지 않는다). */
+  --hero-bg: #0f1b33;
+  --hero-ink-muted: #93a4c3;
+  --hero-accent: #7db8ff;
 }
 
 @media (prefers-color-scheme: dark) {

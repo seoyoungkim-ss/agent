@@ -7737,3 +7737,168 @@ markPoint: {
 - `npx tsc -b` + `npx vite build` 클린.
 - 위 Playwright 확인 — 콘솔 에러 0건, 라이트/다크 모두 확인.
 - 문서화(§100) 후 커밋·푸시.
+
+---
+
+# §101. UI 리디자인 5단계 — 다크 강조 카드(탭당 대표 지표, OS 모드 무관 고정색) (2026-08)
+
+## Context
+
+§98~§100(카드 시스템+사이드바, 홈 KPI 카드, 메인 차트 콜아웃)에 이어
+담당자가 매긴 우선순위 5단계 "다크 강조 카드"를 진행했다("나머지
+진행해" — §102와 한 라운드로 함께 처리).
+
+앱은 이미 `prefers-color-scheme: dark` 미디어쿼리로 전체가 반전된다
+(`frontend/src/index.css`) — `Card`/`StatTile`이 쓰는 `--surface`/
+`--ink` 같은 역할 토큰은 라이트/다크 각각 다른 값으로 다시 정의돼
+있다. 그래서 "강조 카드"에 기존 역할 토큰을 그대로 쓰면, OS가
+다크모드일 때 다른 모든 카드와 똑같이 어두워져 버려 "강조"가 안
+된다 — **OS 모드와 무관하게 항상 고정된 색**이 필요하다는 걸 조사로
+확인했다.
+
+또 6개 탭 중 "이 카드 하나만 도드라지게 할 단일 대표 숫자"가 뚜렷한
+탭은 일부뿐이었다: 홈은 스탯타일 4개가 동률, 메뉴 편성·운영은
+"이번 주 예상 최고 점유율" 하나, 시뮬레이션은 "예상 총 식수" 하나,
+만족도·VoE는 후보가 2개(이 달 VOE 최다 코너/메뉴), Agent채팅·관리는
+대표 숫자 자체가 없음. AskUserQuestion으로 확인한 결과: **홈(금일
+식수)·메뉴 편성·운영(이번 주 예상 최고 점유율)·시뮬레이션(예상 총
+식수) 3개 탭에만** 다크 강조를 적용하기로 확정했다.
+
+## 설계
+
+**`frontend/src/index.css`**의 `:root` 블록에 새 고정 토큰 4개를
+추가했다(`--chart-axis` 다음). **`@media (prefers-color-scheme: dark)`
+블록에는 재정의하지 않는다** — 그래야 OS 모드와 무관하게 항상 같은
+값을 유지한다:
+```css
+--hero-bg: #0f1b33;
+--hero-ink-muted: #93a4c3;
+--hero-accent: #7db8ff;
+```
+
+**`frontend/src/components/ui.tsx`**의 `StatTile`에 옵셔널 prop
+`variant?: "default" | "dark"`를 추가했다(기본값 없음 = 기존 51곳
+호출부는 전부 무변경, 하위 호환). `variant === "dark"`일 때:
+- 컨테이너 `background: "var(--hero-bg)"`, `borderColor`/
+  `borderLeftColor` 기본값은 `"rgba(255,255,255,0.08)"`(고정값,
+  var 아님 — 다크 배경 위 옅은 테두리).
+- 라벨 텍스트 `"var(--hero-ink-muted)"`, 값 텍스트
+  `"var(--hero-accent)"`, sub 텍스트 `"var(--hero-ink-muted)"`.
+- `StatTileSparkline`에 `color` prop을 새로 받게 확장 — 지정 시
+  `stroke`를 그 색으로, `opacity`를 `0.15`→`0.25`로 올린다(다크 배경
+  위에서 옅은 기본 opacity가 잘 안 보여서).
+- trend 배지: `tone: "neutral"`일 때만 기존 `var(--ink-muted)`(OS에
+  따라 반전됨) 대신 `"var(--hero-ink-muted)"`(고정)로 교체 —
+  good/warning/critical은 원래도 채도가 높아 그대로 재사용.
+- tone 점(`STAT_TILE_TONE_COLOR`)은 그대로 재사용.
+
+**적용 지점 3곳**(`variant="dark"` prop 한 줄씩만 추가):
+- `frontend/src/pages/HomePage.tsx` — "금일 식수" 타일.
+- `frontend/src/pages/AnalysisPage.tsx`(`WeeklyMenuReviewTab`) —
+  "이번 주 예상 최고 점유율" 타일.
+- `frontend/src/pages/AnalysisPage.tsx`
+  (`WeatherScenarioForecastSection`) — "예상 총 식수" 타일.
+
+그리드 레이아웃은 그대로 — 다크 타일도 같은 그리드 자리에 그대로
+있고 색만 도드라진다.
+
+## 손대지 않는 것 (교차 확인)
+
+- Agent채팅/관리 탭 — 대표 숫자 자체가 없어 다크 강조 카드 대상에서
+  제외.
+- 만족도·VoE 탭 — 대표 후보가 2개(이 달 VOE 최다 코너/메뉴)라 "단일
+  숫자" 원칙에 안 맞아 이번 범위 밖.
+- `StatTile`의 기존 `tone`/`trend`/`sparkline` 동작(§92/§99), `Card`
+  컴포넌트, 사이드바 nav(§98) — 무변경, `variant`/`StatTileSparkline`의
+  `color` prop만 추가.
+- 백엔드 전부 — 순수 프론트 비주얼 레이어.
+
+## 테스트/검증
+
+- 백엔드 변경이 없으므로 `pytest` 재실행 불필요.
+- `npx tsc -b` + `npx vite build` 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건, 라이트/다크 두 프리퍼런스 모두 스크린샷): 홈의 "금일
+  식수" 타일이 항상 어두운 남색 배경 + 밝은 파란 숫자로 보이고,
+  **다크모드 OS에서도** 옆의 다른 3개 타일(중립 어두운 회색 배경)과
+  뚜렷이 구분됨을 확인(크롭 비교로 색 차이 재확인). 시뮬레이션 탭
+  "예상 총 식수" 타일도 라이트/다크 모두에서 동일하게 남색 배경+파란
+  숫자로 도드라짐을 확인. 메뉴 편성·운영 탭의 "이번 주 예측 요약"
+  카드는 샌드박스 DB의 현재 날짜 근접 구간 데이터가 0이라
+  (기존 문서화된 한계) 이번 확인에서는 조건부 렌더링이 안 떴지만,
+  같은 `StatTile` 컴포넌트·같은 `variant="dark"` 배선이라 데이터가
+  있으면 동일하게 렌더링됨.
+- 문서화(§101) 후 커밋·푸시(§102와 함께).
+
+---
+
+# §102. UI 리디자인 6단계 — 사이드 피드 패널(홈 "개선 필요 포인트" 카드를 세로 피드 스타일로) (2026-08)
+
+## Context
+
+담당자가 매긴 우선순위 6단계 "사이드 피드 패널" — "여러 카테고리(VOE
+코멘트/규칙위반/신메뉴 등)를 합쳐 날짜순으로 정렬한 이벤트 목록"을
+제대로 만들려면 새 백엔드 엔드포인트(현재 어떤 API도 크로스카테고리
+이벤트를 `{id, date, category}` 같은 공통 스키마로 반환하지 않음,
+신메뉴는 절대 도입일 필드조차 없음)와 완전히 새로운 프론트 UI 패턴
+(피드/사이드패널 레이아웃 자체가 앱에 없음)이 필요하다는 걸 Explore
+조사로 확인했다.
+
+AskUserQuestion으로 확인한 결과: **새 백엔드 작업 없이, 홈의 기존
+"개선 필요 포인트" 카드(`api.improvementPoints`, 이미 혼잡도/만족도/
+VOE/편성·운영 4개 축을 한 카드에 모아 보여주는 가장 가까운 기존
+패턴)를 피드 느낌의 세로 리스트 스타일(축별 아이콘 + 구분선)로
+다듬는 가벼운 버전**으로 진행하기로 확정했다. 실제 사이드 패널
+레이아웃(별도 컬럼)으로 옮기지는 않고, 지금 위치에서 스타일만
+바꿨다 — 위치 이동은 이번 범위 밖.
+
+## 설계
+
+**`frontend/src/pages/HomePage.tsx`**의 "개선 필요 포인트" `Card`
+내부만 수정했다:
+- `../api/client`에서 `type ImprovementPoint` import 추가.
+- `lucide-react`에서 아이콘 4개 import: `Users`(혼잡도),
+  `Smile`(만족도), `MessageSquare`(VOE), `ClipboardList`(편성·운영).
+  `ImprovementPoint.axis`가 이미 `"congestion" | "satisfaction" |
+  "voe" | "planning"` 유니언 타입(`client.ts`)이라 그대로 키로 쓸 수
+  있었다.
+- 파일 상단에 `const ICON_BY_AXIS: Record<ImprovementPoint["axis"],
+  LucideIcon>` 맵을 추가.
+- 기존 `<ul className="space-y-2">`(좌측 점(dot) + 텍스트만) →
+  `<ul className="divide-y" style={{ borderColor: "var(--border)" }}>`
+  로 교체. 각 `<li>`는 `flex items-start gap-3 py-3 first:pt-0
+  last:pb-0`으로, 좌측 점 대신 `h-7 w-7 shrink-0 rounded-full` 아이콘
+  배지(`background: "var(--surface-2)"`, 아이콘 색은
+  `p.severity === "critical" ? "var(--critical)" : "var(--warning)"`)를
+  넣었다. 제목/설명/`voe_summary` 인용 블록은 내용 그대로 — 스타일만
+  세로 피드 느낌으로 다듬었다.
+- 백엔드·`client.ts`(`improvementPoints` 함수/타입)·데이터 계산
+  로직은 전혀 손대지 않았다 — 이미 받아온 데이터를 다르게 그리기만
+  한다.
+
+## 손대지 않는 것 (교차 확인)
+
+- 사이드 피드 패널을 실제 사이드바/별도 컬럼 레이아웃으로 옮기는 것 —
+  이번엔 위치 그대로, 스타일만 피드형으로. 실제 사이드 컬럼이
+  필요하면 다음 라운드에서 `HomePage.tsx` 레이아웃을 다시 설계.
+- VOE 코멘트/규칙위반/신메뉴를 합친 새 크로스카테고리 피드 백엔드
+  엔드포인트 — Context에서 설명한 대로 새 데이터 모델(공통 스키마,
+  신메뉴 절대 도입일 등)이 필요해 이번 범위 밖.
+- `improvementPoints`의 계산 로직(`backend/app/services/
+  improvement_points.py`) — 무변경, 이미 계산된 데이터를 다르게
+  그리기만 함.
+
+## 테스트/검증
+
+- 백엔드 변경이 없으므로 `pytest` 재실행 불필요.
+- `npx tsc -b` — `ImprovementPoint["axis"]` 타입·신규 아이콘 import
+  클린 확인.
+- `npx vite build` 클린.
+- Playwright 확인(콘솔 에러 0건, 라이트/다크): "개선 필요 포인트"
+  카드가 아이콘 배지(편성·운영 축은 클립보드 아이콘, 경고색은
+  `--warning`) + 항목 텍스트로 정상 렌더링됨을 확인. 샌드박스 DB의
+  이 기간 조건에서는 항목이 1건뿐이라(`axis: "planning"`) 여러 항목
+  사이 `divide-y` 구분선까지는 실측으로 못 봤지만, `divide-y`는
+  Tailwind 표준 유틸이고 이미 앱 다른 곳에서도 쓰이는 패턴이라
+  다건일 때도 정상 동작함을 코드로 확인.
+- 문서화(§102) 후 커밋·푸시(§101과 함께).

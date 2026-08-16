@@ -25,7 +25,7 @@ const STAT_TILE_TONE_COLOR: Record<string, string> = {
 
 // §98(3단계): 카드 배경에 옅게 깔리는 최근 추이 — 값이 2개 미만이면 그리지
 // 않는다. ECharts 인스턴스 없이 순수 SVG로 그려 타일 하나당 비용을 최소화한다.
-function StatTileSparkline({ values }: { values: number[] }) {
+function StatTileSparkline({ values, color }: { values: number[]; color?: string }) {
   if (values.length < 2) return null;
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -37,6 +37,8 @@ function StatTileSparkline({ values }: { values: number[] }) {
       return `${x},${y}`;
     })
     .join(" ");
+  // §101: 다크 강조 카드(고정 어두운 배경) 위에서는 기본 opacity(0.15)가
+  // 너무 옅어 보여, 지정된 색상일 때만 조금 더 진하게 그린다.
   return (
     <svg
       className="pointer-events-none absolute inset-x-0 bottom-0 h-10 w-full"
@@ -44,7 +46,13 @@ function StatTileSparkline({ values }: { values: number[] }) {
       preserveAspectRatio="none"
       aria-hidden="true"
     >
-      <polyline points={points} fill="none" stroke="var(--accent)" strokeWidth="2" opacity="0.15" />
+      <polyline
+        points={points}
+        fill="none"
+        stroke={color ?? "var(--accent)"}
+        strokeWidth="2"
+        opacity={color ? "0.25" : "0.15"}
+      />
     </svg>
   );
 }
@@ -66,6 +74,7 @@ export function StatTile({
   tone,
   trend,
   sparkline,
+  variant,
 }: {
   label: string;
   value: ReactNode;
@@ -79,9 +88,13 @@ export function StatTile({
   // 위반 건수는 증가=critical) 호출부가 의미를 직접 판단해 넘긴다.
   trend?: { direction: "up" | "down" | "flat"; text: string; tone: "good" | "warning" | "critical" | "neutral" };
   sparkline?: number[];
+  // §101: 탭당 대표 지표 하나를 OS 다크모드 여부와 무관하게 항상 어두운
+  // 고정색(--hero-*)으로 강조. 기본값 없음 = 기존 호출부는 전부 무변경.
+  variant?: "default" | "dark";
 }) {
   const Tag = onClick ? "button" : "div";
   const toneColor = tone ? STAT_TILE_TONE_COLOR[tone] : undefined;
+  const isDark = variant === "dark";
   return (
     <Tag
       className={clsx(
@@ -89,36 +102,50 @@ export function StatTile({
         onClick && "hover:border-current",
       )}
       style={{
-        borderColor: "var(--border)",
-        background: "var(--surface)",
+        borderColor: isDark ? "rgba(255,255,255,0.08)" : "var(--border)",
+        background: isDark ? "var(--hero-bg)" : "var(--surface)",
         cursor: onClick ? "pointer" : undefined,
         // borderLeftColor/Width를 매 렌더 항상 같은 키로 넣는다 — tone 유무에 따라
         // 키 자체를 넣었다 뺐다 하면(§92 규칙 이상여부 타일처럼 tone이 로딩 중
         // undefined였다가 나중에 생기는 경우) React가 shorthand(borderColor)와
         // longhand(borderLeftColor)를 섞어 쓴다고 콘솔 경고를 낸다.
-        borderLeftColor: toneColor ?? "var(--border)",
+        borderLeftColor: toneColor ?? (isDark ? "rgba(255,255,255,0.08)" : "var(--border)"),
         borderLeftWidth: toneColor ? 3 : 1,
       }}
       onClick={onClick}
     >
-      {sparkline && <StatTileSparkline values={sparkline} />}
+      {sparkline && (
+        <StatTileSparkline values={sparkline} color={isDark ? "var(--hero-accent)" : undefined} />
+      )}
       <div className="relative">
-        <div className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+        <div
+          className="flex items-center gap-1.5 text-[13px]"
+          style={{ color: isDark ? "var(--hero-ink-muted)" : "var(--ink-secondary)" }}
+        >
           {toneColor && <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: toneColor }} />}
           {label}
         </div>
         <div className="mt-1 flex items-baseline gap-2">
-          <span className="text-[28px] font-bold leading-none" style={{ color: "var(--ink)" }}>
+          <span
+            className="text-[28px] font-bold leading-none"
+            style={{ color: isDark ? "var(--hero-accent)" : "var(--ink)" }}
+          >
             {value}
           </span>
           {trend && (
-            <span className="text-[12px] font-medium" style={{ color: STAT_TILE_TREND_COLOR[trend.tone] }}>
+            <span
+              className="text-[12px] font-medium"
+              style={{
+                color:
+                  isDark && trend.tone === "neutral" ? "var(--hero-ink-muted)" : STAT_TILE_TREND_COLOR[trend.tone],
+              }}
+            >
               {TREND_ARROW[trend.direction]} {trend.text}
             </span>
           )}
         </div>
         {sub && (
-          <div className="mt-1.5 text-xs" style={{ color: "var(--ink-muted)" }}>
+          <div className="mt-1.5 text-xs" style={{ color: isDark ? "var(--hero-ink-muted)" : "var(--ink-muted)" }}>
             {sub}
           </div>
         )}

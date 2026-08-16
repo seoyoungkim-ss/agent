@@ -1,12 +1,15 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
+import type { LucideIcon } from "lucide-react";
+import { ClipboardList, MessageSquare, Smile, Users } from "lucide-react";
 import {
   api,
   type Classification,
   type Division,
   type Granularity,
   type HeadcountGroupBy,
+  type ImprovementPoint,
   type MealType,
   type MenuTrendEntry,
 } from "../api/client";
@@ -47,6 +50,15 @@ const CLASSIFICATION_OPTIONS: { label: string; value: Classification | "전체" 
 ];
 
 const MEAL_TYPE_OPTIONS: MealType[] = ["조식", "중식", "석식"];
+
+// §102: "개선 필요 포인트" 카드를 피드 느낌의 세로 리스트로 다듬을 때
+// 항목마다 축(axis)을 한눈에 구분할 아이콘.
+const ICON_BY_AXIS: Record<ImprovementPoint["axis"], LucideIcon> = {
+  congestion: Users,
+  satisfaction: Smile,
+  voe: MessageSquare,
+  planning: ClipboardList,
+};
 
 /**
  * 만족도 급상승/급하락 목록.
@@ -579,6 +591,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
           sub={weeklyAvgHeadcount != null ? `최근 7일 일평균 ${Math.round(weeklyAvgHeadcount).toLocaleString()}명` : undefined}
           trend={homeDailySummaryQuery.isLoading ? undefined : todayHeadcountTrend}
           sparkline={homeDailySummaryQuery.isLoading ? undefined : headcountSparkline}
+          variant="dark"
         />
         <StatTile
           label="금일 맛평가 점수"
@@ -617,29 +630,37 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
           </p>
         )}
         {improvementPoints.data && improvementPoints.data.length > 0 && (
-          <ul className="space-y-2">
-            {improvementPoints.data.map((p, i) => (
-              <li key={i} className="flex items-start gap-2">
-                <span
-                  className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
-                  style={{ background: p.severity === "critical" ? "var(--critical)" : "var(--warning)" }}
-                />
-                <div>
-                  <div className="text-[13px] font-medium">{p.title}</div>
-                  <div className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                    {p.detail}
-                  </div>
-                  {p.voe_summary && (
-                    <div
-                      className="mt-1 rounded border-l-2 pl-2 text-xs italic"
-                      style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
-                    >
-                      "{p.voe_summary}"
+          // §102: 세로 피드 느낌으로 — 항목마다 축(axis) 아이콘 배지 +
+          // 구분선(divide-y). 데이터/문구는 그대로, 스타일만 다듬는다.
+          <ul className="divide-y" style={{ borderColor: "var(--border)" }}>
+            {improvementPoints.data.map((p, i) => {
+              const Icon = ICON_BY_AXIS[p.axis];
+              const severityColor = p.severity === "critical" ? "var(--critical)" : "var(--warning)";
+              return (
+                <li key={i} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
+                  <span
+                    className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
+                    style={{ background: "var(--surface-2)" }}
+                  >
+                    <Icon size={14} style={{ color: severityColor }} />
+                  </span>
+                  <div>
+                    <div className="text-[13px] font-medium">{p.title}</div>
+                    <div className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                      {p.detail}
                     </div>
-                  )}
-                </div>
-              </li>
-            ))}
+                    {p.voe_summary && (
+                      <div
+                        className="mt-1 rounded border-l-2 pl-2 text-xs italic"
+                        style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+                      >
+                        "{p.voe_summary}"
+                      </div>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </Card>

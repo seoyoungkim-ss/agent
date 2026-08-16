@@ -1982,6 +1982,7 @@ function WeeklyMenuReviewTab() {
               label="이번 주 예상 최고 점유율"
               value={`${topPredicted.corner_name ?? "-"} · ${topPredicted.menu_name ?? "-"}`}
               sub={`${weekdayLabel(topPredicted.plan_date)} · 점유율 ${(topPredicted.prediction.predicted_share * 100).toFixed(1)}%`}
+              variant="dark"
             />
           </div>
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -3371,6 +3372,7 @@ function WeatherScenarioForecastSection({ onWeatherChange }: { onWeatherChange?:
             label="예상 총 식수"
             value={`${Math.round(predictedSum).toLocaleString()}명`}
             sub={pctDiff == null ? "평시 데이터 없음" : `평시 대비 ${pctArrow} ${Math.abs(pctDiff).toFixed(1)}%`}
+            variant="dark"
           />
           <button
             className="mt-3 text-xs underline"
