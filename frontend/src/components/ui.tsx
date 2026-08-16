@@ -23,12 +23,49 @@ const STAT_TILE_TONE_COLOR: Record<string, string> = {
   critical: "var(--critical)",
 };
 
+// §98(3단계): 카드 배경에 옅게 깔리는 최근 추이 — 값이 2개 미만이면 그리지
+// 않는다. ECharts 인스턴스 없이 순수 SVG로 그려 타일 하나당 비용을 최소화한다.
+function StatTileSparkline({ values }: { values: number[] }) {
+  if (values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min;
+  const points = values
+    .map((v, i) => {
+      const x = (i / (values.length - 1)) * 100;
+      const y = range === 0 ? 20 : 36 - ((v - min) / range) * 32;
+      return `${x},${y}`;
+    })
+    .join(" ");
+  return (
+    <svg
+      className="pointer-events-none absolute inset-x-0 bottom-0 h-10 w-full"
+      viewBox="0 0 100 40"
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <polyline points={points} fill="none" stroke="var(--accent)" strokeWidth="2" opacity="0.15" />
+    </svg>
+  );
+}
+
+const STAT_TILE_TREND_COLOR: Record<string, string> = {
+  good: "var(--good)",
+  warning: "var(--warning)",
+  critical: "var(--critical)",
+  neutral: "var(--ink-muted)",
+};
+
+const TREND_ARROW: Record<"up" | "down" | "flat", string> = { up: "▲", down: "▼", flat: "―" };
+
 export function StatTile({
   label,
   value,
   sub,
   onClick,
   tone,
+  trend,
+  sparkline,
 }: {
   label: string;
   value: ReactNode;
@@ -37,13 +74,18 @@ export function StatTile({
   // 핵심 수치가 상태(주의/위험 등)를 나타낼 때만 지정 — 값 텍스트에는 색을 넣지
   // 않고 라벨 옆 점(dot)에만 싣는다(QuadrantBadge와 동일한 "색은 점에만" 규칙).
   tone?: "good" | "warning" | "critical";
+  // §98(3단계): 전일/전주 대비 방향 배지. direction(화살표 모양)과
+  // tone(색상)을 분리했다 — "증가가 항상 좋은 신호"는 아니라서(예: 규칙
+  // 위반 건수는 증가=critical) 호출부가 의미를 직접 판단해 넘긴다.
+  trend?: { direction: "up" | "down" | "flat"; text: string; tone: "good" | "warning" | "critical" | "neutral" };
+  sparkline?: number[];
 }) {
   const Tag = onClick ? "button" : "div";
   const toneColor = tone ? STAT_TILE_TONE_COLOR[tone] : undefined;
   return (
     <Tag
       className={clsx(
-        "w-full rounded-2xl border p-6 text-left shadow-sm transition-colors",
+        "relative w-full overflow-hidden rounded-2xl border p-6 text-left shadow-sm transition-colors",
         onClick && "hover:border-current",
       )}
       style={{
@@ -59,18 +101,28 @@ export function StatTile({
       }}
       onClick={onClick}
     >
-      <div className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-        {toneColor && <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: toneColor }} />}
-        {label}
-      </div>
-      <div className="mt-1 text-[28px] font-bold leading-none" style={{ color: "var(--ink)" }}>
-        {value}
-      </div>
-      {sub && (
-        <div className="mt-1.5 text-xs" style={{ color: "var(--ink-muted)" }}>
-          {sub}
+      {sparkline && <StatTileSparkline values={sparkline} />}
+      <div className="relative">
+        <div className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          {toneColor && <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: toneColor }} />}
+          {label}
         </div>
-      )}
+        <div className="mt-1 flex items-baseline gap-2">
+          <span className="text-[28px] font-bold leading-none" style={{ color: "var(--ink)" }}>
+            {value}
+          </span>
+          {trend && (
+            <span className="text-[12px] font-medium" style={{ color: STAT_TILE_TREND_COLOR[trend.tone] }}>
+              {TREND_ARROW[trend.direction]} {trend.text}
+            </span>
+          )}
+        </div>
+        {sub && (
+          <div className="mt-1.5 text-xs" style={{ color: "var(--ink-muted)" }}>
+            {sub}
+          </div>
+        )}
+      </div>
     </Tag>
   );
 }

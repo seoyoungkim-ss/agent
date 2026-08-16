@@ -185,6 +185,33 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       ? daysWithScore.reduce((sum, d) => sum + (d.avg_taste_score as number), 0) / daysWithScore.length
       : null;
 
+  // §98(3단계): "금일 식수"/"금일 맛평가 점수" KPI 카드의 증감 화살표+스파크라인.
+  // 이미 받아온 트레일링 7일 데이터로만 계산 — 새 API 호출 없음. 오차/노이즈로
+  // 화살표가 계속 깜빡이지 않게 작은 변화(식수 ±1%, 맛평가 ±0.05점)는 "―"로 둔다.
+  const sortedDailySummaryDays = [...homeDailySummaryDays].sort((a, b) => a.date.localeCompare(b.date));
+  const headcountSparkline = sortedDailySummaryDays.map((d) => d.headcount);
+  const tasteScoreSparkline = sortedDailySummaryDays
+    .filter((d) => d.avg_taste_score != null)
+    .map((d) => d.avg_taste_score as number);
+  const todayHeadcountTrend =
+    weeklyAvgHeadcount != null && weeklyAvgHeadcount > 0
+      ? (() => {
+          const diffPct = ((todayHeadcount - weeklyAvgHeadcount) / weeklyAvgHeadcount) * 100;
+          const direction: "up" | "down" | "flat" = diffPct > 1 ? "up" : diffPct < -1 ? "down" : "flat";
+          const tone: "good" | "warning" | "neutral" = direction === "up" ? "good" : direction === "down" ? "warning" : "neutral";
+          return { direction, tone, text: `평균 대비 ${diffPct >= 0 ? "+" : ""}${diffPct.toFixed(0)}%` };
+        })()
+      : undefined;
+  const tasteScoreTrend =
+    todayDailySummary?.avg_taste_score != null && weeklyAvgTasteScore != null
+      ? (() => {
+          const diff = todayDailySummary.avg_taste_score! - weeklyAvgTasteScore;
+          const direction: "up" | "down" | "flat" = diff > 0.05 ? "up" : diff < -0.05 ? "down" : "flat";
+          const tone: "good" | "warning" | "neutral" = direction === "up" ? "good" : direction === "down" ? "warning" : "neutral";
+          return { direction, tone, text: `평균 대비 ${diff >= 0 ? "+" : ""}${diff.toFixed(2)}점` };
+        })()
+      : undefined;
+
   // §92: "금주 메뉴 편성 규칙 이상 여부" — 이미 있는 규칙검증 엔드포인트(주간
   // 식단표 관리 탭의 검증 패널과 동일)를 선택한 주로 그대로 호출해, 위반 유무만
   // 요약해서 보여준다.
@@ -198,6 +225,33 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       weeklyRuleCheckQuery.data.spicy_red_broth.filter((d) => !d.ok).length +
       weeklyRuleCheckQuery.data.low_headcount_reuse.violations.length
     : 0;
+
+  // §98(3단계): "금주 메뉴 편성 규칙 이상 여부" 카드의 "지난 주 대비" 화살표 —
+  // 같은 엔드포인트를 지난 주 기간으로 한 번 더 호출한다(선택한 주가 바뀌어도
+  // 캐시 키가 같이 바뀌어 자연스럽게 재조회됨). 위반 건수는 늘면 나쁜 신호라
+  // direction="up"일 때 tone="critical"로, 다른 KPI 카드와 색 의미가 반대다.
+  const prevMonday = addDays(selectedMonday, -7);
+  const prevSaturday = addDays(prevMonday, 5);
+  const prevWeeklyRuleCheckQuery = useQuery({
+    queryKey: ["weekly-menu-plan-rule-check", prevMonday, prevSaturday],
+    queryFn: () => api.weeklyMenuPlanRuleCheck({ period_start: prevMonday, period_end: prevSaturday }),
+  });
+  const prevRuleViolationCount = prevWeeklyRuleCheckQuery.data
+    ? prevWeeklyRuleCheckQuery.data.hangover.filter((d) => !d.ok).length +
+      prevWeeklyRuleCheckQuery.data.noodle.filter((d) => !d.ok).length +
+      prevWeeklyRuleCheckQuery.data.spicy_red_broth.filter((d) => !d.ok).length +
+      prevWeeklyRuleCheckQuery.data.low_headcount_reuse.violations.length
+    : null;
+  const ruleViolationTrend =
+    prevRuleViolationCount != null && weeklyRuleCheckQuery.data
+      ? (() => {
+          const direction: "up" | "down" | "flat" =
+            ruleViolationCount > prevRuleViolationCount ? "up" : ruleViolationCount < prevRuleViolationCount ? "down" : "flat";
+          const tone: "good" | "critical" | "neutral" =
+            direction === "up" ? "critical" : direction === "down" ? "good" : "neutral";
+          return { direction, tone, text: `지난 주 ${prevRuleViolationCount}건` };
+        })()
+      : undefined;
 
   const menuHistory = useQuery({
     queryKey: ["menu-history", searchedMenu],
@@ -505,6 +559,8 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
           label="금일 식수"
           value={homeDailySummaryQuery.isLoading ? "…" : todayHeadcount.toLocaleString()}
           sub={weeklyAvgHeadcount != null ? `최근 7일 일평균 ${Math.round(weeklyAvgHeadcount).toLocaleString()}명` : undefined}
+          trend={homeDailySummaryQuery.isLoading ? undefined : todayHeadcountTrend}
+          sparkline={homeDailySummaryQuery.isLoading ? undefined : headcountSparkline}
         />
         <StatTile
           label="금일 맛평가 점수"
@@ -514,6 +570,8 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
               : (todayDailySummary?.avg_taste_score != null ? todayDailySummary.avg_taste_score.toFixed(2) : "-")
           }
           sub={weeklyAvgTasteScore != null ? `최근 7일 일평균 ${weeklyAvgTasteScore.toFixed(2)}점` : "최근 7일 평가 없음"}
+          trend={homeDailySummaryQuery.isLoading ? undefined : tasteScoreTrend}
+          sparkline={homeDailySummaryQuery.isLoading ? undefined : tasteScoreSparkline}
         />
         <StatTile
           label="금주 메뉴 과거 VOE"
@@ -528,6 +586,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
           }
           sub="해장·면류·매운맛 편성 기준 + 저조 식수 재편성"
           tone={weeklyRuleCheckQuery.isLoading ? undefined : ruleViolationCount > 0 ? "critical" : "good"}
+          trend={weeklyRuleCheckQuery.isLoading ? undefined : ruleViolationTrend}
         />
       </div>
 
