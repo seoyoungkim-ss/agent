@@ -485,6 +485,24 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
         itemStyle: { color: resolveColor("var(--ink)") },
         z: 10,
         data: trendPeriods.map((p) => totalHeadcountByPeriod.get(p) ?? 0),
+        // §100: 이 기간 중 총식수가 가장 높았던 지점을 핀 콜아웃으로 자동
+        // 표시. type:"max"는 데이터가 바뀔 때마다(필터·기간 변경) 자동
+        // 재계산되어 별도 상태 관리가 필요 없다.
+        markPoint: {
+          symbol: "pin",
+          symbolSize: 36,
+          itemStyle: { color: resolveColor("var(--accent)") },
+          // 핀 안쪽(기본 label.position)은 텍스트가 잘려 보여 핀 위쪽으로 뺀다.
+          label: {
+            position: "top" as const,
+            distance: 8,
+            color: resolveColor("var(--ink)"),
+            fontSize: 11,
+            fontWeight: "bold" as const,
+            formatter: (p: { value: number }) => `최고 ${Math.round(p.value).toLocaleString()}명`,
+          },
+          data: [{ type: "max" as const, name: "최고" }],
+        },
       },
     ],
   };
