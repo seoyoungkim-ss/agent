@@ -2226,6 +2226,10 @@ def test_corner_meal_type_headcount_matches_report_layout(client):
     assert hansik["meals"]["중식"]["headcount"] == 2
     assert hansik["meals"]["중식"]["menu_name"] == "제육볶음"
     assert hansik["meals"]["중식"]["share_of_traffic"] == pytest.approx(2 / 6)
+    # §106: 주간 식단표엔 조식 슬롯이 아예 없어(위 ingest는 중식만 등록) 기존엔
+    # 취식 숫자는 있는데 메뉴명이 빈칸이었다 — meal_log에 실제 찍힌 메뉴로 채워야 함.
+    assert hansik["meals"]["조식"]["headcount"] == 1
+    assert hansik["meals"]["조식"]["menu_name"] == "토스트"
 
     dodam = next(row for row in body["take_in"] if row["corner_name"] == "도담찌개")
     assert dodam["meals"]["중식"]["headcount"] == 1

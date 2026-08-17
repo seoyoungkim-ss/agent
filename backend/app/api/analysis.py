@@ -949,6 +949,26 @@ def corner_meal_type_headcount(target_date: dt.date, db: Session = Depends(get_d
         (corner_id, meal_type): menu_name for corner_id, meal_type, menu_name in main_menu_rows
     }
 
+    # §106: 주간 식단표(WeeklyMenuPlan)는 대개 중식만 입력돼 있어, 위
+    # main_menu_by_corner_meal 조회가 조식/석식엔 항상 비어 있었다 — 취식
+    # 숫자(headcount)는 나오는데 메뉴명 칸만 "-"로 빈다는 신고(2026-08)의
+    # 원인. 식단표에 없는 슬롯은 그 끼니에 실제로 가장 많이 찍힌 meal_log
+    # 메뉴로 대신 채운다(취식 기록 자체엔 조식/석식도 항상 있음).
+    actual_menu_counts = (
+        db.query(MealLog.corner_id, MealLog.meal_type, MealLog.menu_id, func.count().label("cnt"))
+        .filter(MealLog.eaten_at >= day_start, MealLog.eaten_at < day_end, MealLog.menu_id.isnot(None))
+        .group_by(MealLog.corner_id, MealLog.meal_type, MealLog.menu_id)
+        .all()
+    )
+    menu_names_by_id = dict(db.query(MenuMaster.menu_id, MenuMaster.menu_name).all())
+    actual_menu_by_corner_meal: dict[tuple[int, MealType], str] = {}
+    actual_menu_best_count: dict[tuple[int, MealType], int] = {}
+    for corner_id, meal_type, menu_id, cnt in actual_menu_counts:
+        key = (corner_id, meal_type)
+        if cnt > actual_menu_best_count.get(key, 0):
+            actual_menu_best_count[key] = cnt
+            actual_menu_by_corner_meal[key] = menu_names_by_id.get(menu_id)
+
     corners = sorted(
         db.query(CornerMaster).all(), key=lambda c: corner_display_sort_key(c.corner_id, c.corner_name)
     )
@@ -956,8 +976,11 @@ def corner_meal_type_headcount(target_date: dt.date, db: Session = Depends(get_d
 
     def _cell(corner_id: int, meal_type: MealType) -> dict:
         cnt = headcount_by_corner_meal.get((corner_id, meal_type), 0)
+        menu_name = main_menu_by_corner_meal.get((corner_id, meal_type)) or actual_menu_by_corner_meal.get(
+            (corner_id, meal_type)
+        )
         return {
-            "menu_name": main_menu_by_corner_meal.get((corner_id, meal_type)),
+            "menu_name": menu_name,
             "headcount": cnt,
             "share_of_traffic": compute_share_of_traffic(cnt, total_by_meal.get(meal_type, 0)),
         }

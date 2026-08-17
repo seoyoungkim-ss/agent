@@ -455,6 +455,13 @@ export function HomePage({
   }
   // 시리즈가 많으면(코너별 등) 색이 뒤섞이지 않게 series_key 기준으로 색을 고정한다.
   const trendSeriesKeys = [...trendSeriesMeta.keys()].sort();
+  // §106: dataviz 스킬 원칙 "색은 순위가 아니라 개체를 따라간다"(AnalysisPage.tsx의
+  // cornerColor와 동일 컨벤션) — 예전엔 지금 화면에 보이는 시리즈 목록 안에서의
+  // 배열 위치(i % 8)로 색을 정해서, 코너 필터를 켜고 끌 때마다 같은 코너의 색이
+  // 바뀌었다("색상이 안 예쁘다"는 신고의 실체). 코너 목록 전체(cornerListQuery,
+  // 담당자가 정한 고정 순서)에서의 위치로 고정해, 필터와 무관하게 코너마다 항상
+  // 같은 색을 쓴다.
+  const cornerColorRank = new Map((cornerListQuery.data ?? []).map((c, i) => [c.corner_id, i]));
   // 막대(코너/끼니/회사구분별 분해) 위에 총식수 꺾은선을 겹쳐서 보여준다 — 코너
   // 필터 등 토글이 꺼져 있어도 항상 전체 식수를 나타내야 하므로, 필터가 걸린
   // trendRows가 아니라 별도로 부른 totalHeadcountTrend(무필터)를 쓴다.
@@ -463,7 +470,11 @@ export function HomePage({
   for (const r of totalHeadcountTrend.data ?? []) totalHeadcountByPeriod.set(r.period, r.headcount);
   const headcountTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    grid: { left: 48, right: 16, top: 32, bottom: 28 },
+    // §106: "최고 N명" 핀 라벨이 캔버스 맨 위에서 잘려 보인다는 신고 — 범례(top:0,
+    // ~20px)와 핀(symbolSize 36) + 그 위 라벨(distance 8 + 글자 높이)이 겹쳐서
+    // 32px로는 둘 다 담을 공간이 없었다. top을 넉넉히 늘려 범례·핀·라벨이 전부
+    // grid 위쪽 여백 안에 들어가게 한다.
+    grid: { left: 48, right: 16, top: 88, bottom: 28 },
     tooltip: {
       trigger: "axis",
       formatter: (params: { axisValue?: string; marker: string; seriesName: string; value: unknown }[]) => {
@@ -495,7 +506,8 @@ export function HomePage({
     },
     series: [
       ...trendSeriesKeys.map((key, i) => {
-        const color = resolveColor(`var(--series-${(i % 8) + 1})`);
+        const rank = trendGroupBy === "corner" ? (cornerColorRank.get(Number(key)) ?? i) : i;
+        const color = resolveColor(`var(--series-${(rank % 8) + 1})`);
         return {
           name: trendSeriesMeta.get(key)!,
           // §80: 담당자 요청으로 선그래프 대신 누적 막대그래프로 표현한다
@@ -798,7 +810,7 @@ export function HomePage({
                     color: active ? "var(--ink)" : "var(--ink-secondary)",
                   }}
                 >
-                  <CornerLogo cornerName={c.corner_name} height={16} bare />
+                  <CornerLogo cornerName={c.corner_name} height={16} />
                 </button>
               );
             })}
