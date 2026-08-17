@@ -654,6 +654,13 @@ export function HomePage({
       </div>
 
       <Card title="개선 필요 포인트 — 혼잡도 / 만족도 / VOE / 편성·운영">
+        {/* §107: "어떤 시기 기준인지 모르겠다" 신고 대응 — 이 카드는 두 가지
+            다른 시간 기준을 섞어 쓰는데(혼잡도·만족도·편성·운영은 최근 180일
+            누적, VOE만 이번 달 vs 지난달 비교) 그동안 화면 어디에도 이 기준이
+            적혀 있지 않았다. 데이터/로직은 그대로 두고 안내 문구만 추가한다. */}
+        <p className="mb-3 text-[12px]" style={{ color: "var(--ink-muted)" }}>
+          혼잡도·만족도·편성·운영: 최근 180일 누적 데이터 기준 · VOE: 이번 달 vs 지난달 비교
+        </p>
         {improvementPoints.isLoading && <LoadingState />}
         {improvementPoints.isError && <ErrorState error={improvementPoints.error} />}
         {improvementPoints.data && improvementPoints.data.length === 0 && (
