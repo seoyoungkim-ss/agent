@@ -2095,6 +2095,12 @@ def weekly_menu_rotation(
     }
 
 
+# §116: "부찬 반복 랭킹"에서 담당자가 콕 짚어 제외해달라고 한 부찬들 —
+# 코너마다 거의 매번 곁들이는 범용 반찬/음료라 "자주 돌려막기됐다"는 랭킹의
+# 취지와 무관하게 항상 상위에 낀다.
+REPEATED_SIDE_DISH_EXCLUDED_MENU_NAMES = {"포기김치", "음료", "수제피클", "할라피뇨"}
+
+
 @router.get("/weekly-menu/repeated-side-dishes")
 def weekly_menu_repeated_side_dishes(
     period_start: dt.date,
@@ -2120,7 +2126,10 @@ def weekly_menu_repeated_side_dishes(
     남긴다 — 기존 화면이 이미 "부찬 · 건강가든"을 한 그룹으로 묶어 보여주는
     경계와 같다. 순위는 이미 `find_overused_menus`가 매긴 `-count` 정렬을 그대로 쓴다.
     """
-    filters = [WeeklyMenuPlan.plan_date.between(period_start, period_end)]
+    filters = [
+        WeeklyMenuPlan.plan_date.between(period_start, period_end),
+        MenuMaster.menu_name.notin_(REPEATED_SIDE_DISH_EXCLUDED_MENU_NAMES),
+    ]
     if corner_id is not None:
         filters.append(WeeklyMenuPlan.corner_id == corner_id)
     rows = (

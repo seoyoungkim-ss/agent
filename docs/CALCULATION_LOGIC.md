@@ -9224,3 +9224,57 @@ VOE·신메뉴 반응 등 다른 메뉴 관련 기능에는 영향이 없다.
   적어 눈에 띄는 변화는 아니었지만, 쿼리 자체가 정상 동작함을 확인).
   순수 백엔드 필터 변경이라 프론트/tsc/build 재검증 불필요.
 - 문서화(§115) 후 커밋·푸시.
+
+## §116 — 부찬 반복 랭킹에서 범용 부찬 4종 제외
+
+### Context
+
+담당자 요청: "부찬반복랭킹에서 포기김치랑 음료, 수제피클, 할라피뇨는
+제외해줘". "부찬 반복 랭킹"은 메뉴 편성·운영 → 메뉴 중복 점검 →
+"부찬 반복 랭킹" 탭(`RepeatedSideDishPanel`)이 쓰는 `GET
+/analysis/weekly-menu/repeated-side-dishes` 하나뿐(비슷한 이름의 다른
+기능은 없음, "자주 반복되는 부찬 랭킹"은 이 기능을 가리키는 설명일 뿐
+같은 엔드포인트다). 이 랭킹은 "부찬이 얼마나 자주 돌려막기됐는지"를
+보여주는 게 목적인데, 포기김치·음료·수제피클·할라피뇨는 거의 모든 코너가
+매번 곁들이는 범용 반찬/음료라 그 취지와 무관하게 항상 상위에 낀다.
+
+### 설계
+
+`backend/app/api/analysis.py`에 `weekly_menu_repeated_side_dishes` 바로
+위, 새 상수 `REPEATED_SIDE_DISH_EXCLUDED_MENU_NAMES = {"포기김치", "음료",
+"수제피클", "할라피뇨"}`를 추가하고, 엔드포인트의 `WeeklyMenuPlan`+
+`MenuMaster` 조인 쿼리 필터에 `MenuMaster.menu_name.notin_(...)`을
+얹었다 — 기존 `PLACEHOLDER_MENU_NAMES` 제외 패턴(`master_data.py`)과
+같은 방식이지만, 이건 이 랭킹 하나에만 해당하는 목록이라 로컬 상수로
+뒀다(이 4개 메뉴가 다른 기능에서까지 제외돼야 한다는 요청이 아님).
+
+기존 테스트 `test_repeated_side_dishes_corner_filter_narrows_results`가
+테스트 메뉴로 "포기김치"를 쓰고 있어(§132 코너별 분리 집계 검증용, 이번
+제외와는 무관한 목적) "오이무침"으로 교체했다 — 검증하려는 로직(코너별로
+따로 세는지)은 메뉴명과 무관해 이름만 바꾸면 그대로 유효하다.
+
+### 손대지 않는 것 (교차 확인)
+
+- `find_overused_menus`/`classify_rotation`(menu_rotation.py) — 무변경,
+  이 4개 메뉴명 제외는 쿼리 단계에서 미리 걸러 이 함수들엔 아예 넘어가지
+  않는다.
+- `/weekly-menu/rotation`(재편성 점검), `PLACEHOLDER_MENU_NAMES` 기반의
+  다른 제외 지점들(4분면 분석 등) — 무관, 이 4개 메뉴는 이 랭킹에서만
+  제외된다(다른 화면에선 여전히 정상적으로 집계됨).
+- `find_main_menu_pairings_for_side_dish`/`summarize_side_dish_pairings`
+  (연결 메인 만족도 계산) — 무변경, 이미 제외된 메뉴에 대해서만
+  호출되지 않게 되는 부수 효과가 있을 뿐 로직 자체는 그대로.
+
+### 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에
+  `test_repeated_side_dishes_excludes_generic_items` 추가 — 4개 제외
+  메뉴가 아무리 자주 편성돼도 응답에서 전부 빠지고, 같은 기간의 다른
+  부찬("무생채")은 그대로 남는지 확인. 기존
+  `test_repeated_side_dishes_corner_filter_narrows_results`는 테스트
+  메뉴명을 "오이무침"으로 교체. 둘 다 통과.
+- `pytest` 전체 571개 통과.
+- **실제 개발 DB로 직접 확인**: `GET /weekly-menu/repeated-side-dishes`를
+  넓은 기간(6/1~8/17)으로 호출해 응답 57건 중 4개 제외 메뉴가 전혀 없음을
+  확인. 순수 백엔드 필터 변경이라 프론트/tsc/build 재검증 불필요.
+- 문서화(§116) 후 커밋·푸시.

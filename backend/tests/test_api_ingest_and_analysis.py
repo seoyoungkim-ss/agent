@@ -2784,12 +2784,32 @@ def test_repeated_side_dishes_excludes_main_menu(client):
     assert all(i["menu_name"] != "돈까스" for i in data["items"])
 
 
-def test_repeated_side_dishes_corner_filter_narrows_results(client, db_session):
-    """포기김치가 다른 코너에서 각각 나온 건 그 코너 안에서만 세야 한다(§132)."""
+def test_repeated_side_dishes_excludes_generic_items(client):
+    """§116: 담당자 요청("포기김치랑 음료, 수제피클, 할라피뇨는 제외해줘") —
+    코너마다 늘 곁들이는 범용 반찬/음료라 자주 돌려막기됐다는 랭킹 취지와
+    무관하게 항상 상위에 낀다."""
+    excluded_names = ["포기김치", "음료", "수제피클", "할라피뇨"]
     rows = [
-        _plan_row(MONDAY + dt.timedelta(days=i), "포기김치", "부찬", corner_name="한식") for i in range(3)
+        _plan_row(MONDAY + dt.timedelta(days=i % 5), name, "부찬")
+        for name in excluded_names
+        for i in range(5)
+    ] + [_plan_row(MONDAY + dt.timedelta(days=i), "무생채", "부찬") for i in range(3)]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+
+    data = _repeated(
+        client, period_start=MONDAY.isoformat(), period_end=(MONDAY + dt.timedelta(days=6)).isoformat()
+    )
+    names = {i["menu_name"] for i in data["items"]}
+    assert names.isdisjoint(excluded_names)
+    assert "무생채" in names
+
+
+def test_repeated_side_dishes_corner_filter_narrows_results(client, db_session):
+    """오이무침이 다른 코너에서 각각 나온 건 그 코너 안에서만 세야 한다(§132)."""
+    rows = [
+        _plan_row(MONDAY + dt.timedelta(days=i), "오이무침", "부찬", corner_name="한식") for i in range(3)
     ] + [
-        _plan_row(MONDAY + dt.timedelta(days=i), "포기김치", "부찬", corner_name="일품") for i in range(2)
+        _plan_row(MONDAY + dt.timedelta(days=i), "오이무침", "부찬", corner_name="일품") for i in range(2)
     ]
     client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
     hansik_id = _corner_id(db_session, "한식")
