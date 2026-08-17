@@ -4144,6 +4144,137 @@ def test_weekly_menu_plan_rule_check_low_headcount_violations_carry_grid_matches
     assert isinstance(match["corner_id"], int)
 
 
+def test_weekly_menu_plan_rule_check_low_headcount_shows_actual_past_appearance_date(client):
+    """§111: "7/14 재편성인데 7/14에 143식이었다고 나옴"(실제로는 5/14에
+    143식) 신고 재현 — last_appearance_date/headcount는 이번 주 재편성일이
+    아니라 과거에 실제로 저조했던 그 날짜·그 날의 식수여야 한다."""
+    past_low_date = MONDAY - dt.timedelta(days=61)  # "5/14"에 해당하는 먼 과거 등장일
+    for i in range(2):
+        _ingest_meal_log(client, f"P{i}", "맛남", eaten_date=past_low_date, menu_name="고기전골", corner_name="한식")
+
+    rows = [_plan_row(MONDAY, "고기전골", "메인", corner_name="한식")]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/plan-rule-check",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=4)).isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    violations = resp.json()["low_headcount_reuse"]["violations"]
+    target = next(v for v in violations if v["menu_name"] == "고기전골")
+    # 과거 저조 등장일 — 이번 주 재편성일(MONDAY)과 달라야 한다.
+    assert target["last_appearance_date"] == past_low_date.isoformat()
+    assert target["last_appearance_date"] != MONDAY.isoformat()
+    assert target["last_appearance_headcount"] == 2
+    # 이번 주 재편성 슬롯은 matches에 그대로 남아 있다(격자 하이라이트용).
+    assert target["matches"][0]["plan_date"] == MONDAY.isoformat()
+
+
+def test_weekly_menu_plan_rule_check_low_headcount_uses_most_recent_appearance_only(client):
+    """등장이 여러 번이어도 평균이 아니라 **가장 최근 1회**만 본다 — 옛날에
+    저조했어도 최근엔 회복됐으면 위반이 아니어야 하고, 반대로 최근에만
+    저조해졌으면(과거엔 인기였어도) 위반이어야 한다."""
+    old_popular_date = MONDAY - dt.timedelta(days=100)
+    recent_low_date = MONDAY - dt.timedelta(days=10)
+    for i in range(300):
+        _ingest_meal_log(client, f"OLD{i}", "맛남", eaten_date=old_popular_date, menu_name="변덕메뉴", corner_name="한식")
+    for i in range(3):
+        _ingest_meal_log(client, f"NEW{i}", "맛남", eaten_date=recent_low_date, menu_name="변덕메뉴", corner_name="한식")
+
+    rows = [_plan_row(MONDAY, "변덕메뉴", "메인", corner_name="한식")]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    resp = client.get(
+        "/api/analysis/weekly-menu/plan-rule-check",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=4)).isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    violations = resp.json()["low_headcount_reuse"]["violations"]
+    target = next(v for v in violations if v["menu_name"] == "변덕메뉴")
+    # 평균(300+3)/2 ≈ 151명이면 위반이 아니어야 하는데, 실제로는 "가장 최근
+    # 1회"(recent_low_date, 3명)만 보므로 위반으로 잡혀야 한다.
+    assert target["last_appearance_date"] == recent_low_date.isoformat()
+    assert target["last_appearance_headcount"] == 3
+
+
+def test_what_if_uses_data_driven_weather_multiplier_when_sample_sufficient(client, db_session):
+    """§112: "날씨 시나리오 예측의 배수는 무슨 기준이냐"는 담당자 질문 대응 —
+    올해 실측 평상시 5일(식수 20명)·비 5일(식수 10명)을 시딩하면, 비 배수는
+    v0 가정치(0.90)가 아니라 실측 비율(10/20=0.5)로 계산돼야 한다."""
+    from app.models.enums import MealType
+    from app.models.master import CornerMaster
+    from app.models.stats import DailyCornerStats, DailyWeather
+
+    _ingest_meal_log(client, "E0", "맛남", corner_name="한식")
+    corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    normal_dates = [MONDAY - dt.timedelta(days=50 + i) for i in range(5)]
+    rain_dates = [MONDAY - dt.timedelta(days=30 + i) for i in range(5)]
+    for d in normal_dates:
+        db_session.add(DailyWeather(stat_date=d, precip_mm=0.0, snow_cm=0.0, max_temp_c=20.0, min_temp_c=10.0))
+        db_session.add(
+            DailyCornerStats(stat_date=d, corner_id=corner.corner_id, meal_type=MealType.LUNCH, headcount=20, is_holiday=False)
+        )
+    for d in rain_dates:
+        db_session.add(DailyWeather(stat_date=d, precip_mm=15.0, snow_cm=0.0, max_temp_c=20.0, min_temp_c=10.0))
+        db_session.add(
+            DailyCornerStats(stat_date=d, corner_id=corner.corner_id, meal_type=MealType.LUNCH, headcount=10, is_holiday=False)
+        )
+    db_session.commit()
+
+    future_date = MONDAY + dt.timedelta(days=8)
+    resp = client.post(
+        "/api/simulation/what-if",
+        json={"target_date": future_date.isoformat(), "meal_type": "중식", "weather": "비"},
+    )
+    assert resp.status_code == 200, resp.text
+    hansik = next(c for c in resp.json()["corners"] if c["corner_name"] == "한식")
+    # 베이스라인 계산(최근 이력 윈도우)은 이 테스트의 관심사가 아니다 — 배수가
+    # 실측 비율 10/20=0.5로 적용됐는지만 본다. v0 가정치(0.90)였다면 이 비율이
+    # 나오지 않는다.
+    assert hansik["predicted_headcount"] == round(hansik["baseline_headcount"] * 0.5, 1)
+    assert "실측 데이터 기반" in resp.json()["note"]
+
+
+def test_what_if_falls_back_to_v0_weather_multiplier_when_sample_insufficient(client, db_session):
+    """§112: 표본이 `_MIN_WEATHER_EVENT_SAMPLE_DAYS`(5일) 미만인 유형은 실측
+    비율로 과적합시키지 않고 v0 가정치(0.90)로 폴백해야 한다."""
+    from app.models.enums import MealType
+    from app.models.master import CornerMaster
+    from app.models.stats import DailyCornerStats, DailyWeather
+
+    _ingest_meal_log(client, "E0", "맛남", corner_name="한식")
+    corner = db_session.query(CornerMaster).filter_by(corner_name="한식").one()
+
+    normal_dates = [MONDAY - dt.timedelta(days=50 + i) for i in range(5)]
+    for d in normal_dates:
+        db_session.add(DailyWeather(stat_date=d, precip_mm=0.0, snow_cm=0.0, max_temp_c=20.0, min_temp_c=10.0))
+        db_session.add(
+            DailyCornerStats(stat_date=d, corner_id=corner.corner_id, meal_type=MealType.LUNCH, headcount=20, is_holiday=False)
+        )
+    # 비 오는 날은 2일뿐 — _MIN_WEATHER_EVENT_SAMPLE_DAYS(5) 미달.
+    rain_dates = [MONDAY - dt.timedelta(days=30 + i) for i in range(2)]
+    for d in rain_dates:
+        db_session.add(DailyWeather(stat_date=d, precip_mm=15.0, snow_cm=0.0, max_temp_c=20.0, min_temp_c=10.0))
+        db_session.add(
+            DailyCornerStats(stat_date=d, corner_id=corner.corner_id, meal_type=MealType.LUNCH, headcount=1, is_holiday=False)
+        )
+    db_session.commit()
+
+    future_date = MONDAY + dt.timedelta(days=8)
+    resp = client.post(
+        "/api/simulation/what-if",
+        json={"target_date": future_date.isoformat(), "meal_type": "중식", "weather": "비"},
+    )
+    assert resp.status_code == 200, resp.text
+    hansik = next(c for c in resp.json()["corners"] if c["corner_name"] == "한식")
+    # 비 표본이 2일뿐이라 실측 비율 대신 v0 가정치(0.90)로 폴백돼야 한다.
+    assert hansik["predicted_headcount"] == round(hansik["baseline_headcount"] * 0.90, 1)
+    assert "실측 데이터 기반" in resp.json()["note"]
+
+
 def test_recompute_llm_analyses_populates_menu_highlight_cause(client):
     """§78: "현황에서 메뉴하이라이트llm에 분석이 아무것도 없어" — 로컬처럼
     새벽 배치 스케줄러가 안 떠 있어도 이 엔드포인트로 캐시를 수동으로 채우면

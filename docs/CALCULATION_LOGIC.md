@@ -8860,3 +8860,176 @@ VOE 코멘트 요약과 같은 비용), 이 캐시를 읽는 곳이 없어졌다
   재현이 안 돼(항상 어떤 축이든 이슈가 있음) 코드 리뷰 + 백엔드
   유닛테스트로 확인.
 - 문서화(§110) 후 커밋·푸시.
+
+## §111 — 소계/Take Out 표시 순서 · 메뉴 이력 검색 카드 삭제 · 저조 식수 규칙 실제 등장일 표시
+
+### Context
+
+담당자가 한 메시지로 3가지를 신고했다:
+1. "코너별 조식/중식/석식 식수 현황"에서 "소계" 행이 Take Out보다 위에
+   있어야 함 — 현재는 Take Out 아래에 있음.
+2. "이번 주 메뉴 이력 검색(과거 만족도·코멘트)" 기능 삭제.
+3. "주간 편성 규칙 검증"의 "최근 저조 식수(200식 이하) 재편성" 규칙이
+   과거 저조했던 실제 날짜 대신 이번 주 재편성일과 같이 표시돼 마치
+   "그 날짜에 저조했다"는 것처럼 보임(예: 실제로는 5/14에 143식이었는데,
+   화면엔 7/14 재편성 슬롯 옆에 143식이 붙어 나옴) — 실제 등장일을
+   보여줘야 함.
+
+### 설계
+
+**1. 소계/Take Out 순서** — `HomePage.tsx`의 표 `<tbody>`에서 "소계" 행을
+"Take Out" 행보다 위로 옮겼다(take_in 코너 행들 → 소계 → Take Out → 합계).
+백엔드 `corner_meal_type_headcount`가 계산하는 `subtotal`은 원래도
+Take Out을 제외한 사내 코너 합이라(관련 로직 무변경) 순수 렌더링 순서만
+바꿨다 — 소계 + Take Out = 합계라는 관계가 화면에서 자연스럽게 읽히도록.
+
+**2. 메뉴 이력 검색 카드 삭제** — `HomePage.tsx`에서 `menuName`/
+`searchedMenu` state, `menuHistory` 쿼리, "이번 주 메뉴 이력 검색(과거
+만족도·코멘트)" `Card` 전체(검색 입력·버튼·표)를 삭제했다. `api.menuHistory`
+클라이언트 함수 자체는 "금주 메뉴 과거 VOE" 집계(`weeklyVoeHistory`,
+`Promise.all` 기반)가 여전히 쓰고 있어 `client.ts`는 무변경.
+
+**3. 저조 식수 규칙 — 실제 등장일 표시** — 원인은 두 개의 서로 다른
+헤드카운트 헬퍼가 있었기 때문: 기존 `_recent_avg_headcount_by_menu`는
+180일 창 안의 **여러 등장일 평균**을 계산하는데, 화면은 그 평균 식수를
+"이번 주 재편성 슬롯의 날짜"와 나란히 붙여 보여주고 있었다 — 두 값이
+서로 다른 날짜의 정보인데 하나처럼 보인 것.
+
+`backend/app/api/analysis.py`에 신규 헬퍼 `_last_appearance_headcount_by_menu(
+db, menu_ids, history_start, history_end) -> dict[int, tuple[date, int]]`를
+추가했다 — 메뉴별로 history 기간 안에서 **가장 최근 등장일 하루**와 그날의
+실제 식수만 반환한다(날짜별 `MealLog` 카운트를 `menu_id, date(eaten_at)`로
+묶어 최신 날짜만 남김). `weekly_menu_plan_rule_check`의 저조 식수 위반
+블록이 이 헬퍼를 쓰도록 교체했고, 응답 필드도 `recent_avg_headcount`
+(평균, 단일 숫자)에서 `last_appearance_date`/`last_appearance_headcount`
+(실제 과거 등장일 + 그날 식수)로 바꿨다.
+
+`_recent_avg_headcount_by_menu` 자체와 그 유일한 다른 호출부(`weekly_menu_rotation`
+엔드포인트의 "재편성 Top5" 목록, `AnalysisPage.tsx`의 `r.recent_avg_headcount`
+표시)는 이번 규칙과 무관한 별개 기능이라 손대지 않았다 — 그 기능은 의도적으로
+평균을 원한다.
+
+`frontend/src/api/client.ts`의 `LowHeadcountViolation` 인터페이스를
+`last_appearance_date`/`last_appearance_headcount` 필드로 갱신하고,
+`frontend/src/components/RuleCard.tsx`의 `buildLowHeadcountRuleCard`가
+칩 라벨을 `"메뉴명(코너명, MM-DD에 N식)"`(등장이 없을 때) 또는
+`"메뉴명(코너명, MM-DD에 N식 → MM-DD 재편성)"`(과거 저조일 → 이번 주
+재편성일, 화살표로 명확히 구분)로 렌더링하도록 고쳤다.
+
+### 손대지 않는 것 (교차 확인)
+
+- 백엔드 `corner_meal_type_headcount`의 `subtotal`/`total` 계산 로직 —
+  무변경, item 1은 순수 프론트 렌더링 순서만.
+- `api.menuHistory` 클라이언트 함수·`GET /dashboard/menu-history/{name}`
+  엔드포인트 — 무변경, "금주 메뉴 과거 VOE" 집계가 계속 사용.
+- `_recent_avg_headcount_by_menu`와 `weekly_menu_rotation`의 "재편성
+  Top5" 기능 — 무변경, 평균이 필요한 별개 기능.
+- `menu_plan_rules.py`의 나머지 3개 규칙(해장/면류/매운 빨간국물) —
+  무변경, 저조 식수 규칙만 대상.
+
+### 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에 2개 신규 테스트:
+  `test_weekly_menu_plan_rule_check_low_headcount_shows_actual_past_appearance_date`
+  (7/14 재편성 슬롯 옆에 실제로는 61일 전 등장일이 표시되는지, 재편성일과
+  다른지), `test_weekly_menu_plan_rule_check_low_headcount_uses_most_recent_appearance_only`
+  (100일 전 300건 인기 등장 + 10일 전 3건 저조 등장이 섞여 있을 때, 평균이
+  아니라 가장 최근 1회(10일 전, 3식)만 봐서 위반으로 잡히는지) — 둘 다
+  통과.
+- `pytest` 전체 578개 통과.
+- `npx tsc -b` + `npx vite build` 클린(삭제된 카드가 쓰던 `QuadrantBadge`
+  import 제거 필요 — 처리 완료).
+- **실제 개발 DB + Playwright**: 코너별 조식/중식/석식 식수 현황 표에서
+  소계 행이 Take Out 행보다 위에 오는 것을 스크린샷으로 확인, "이번 주
+  메뉴 이력 검색" 카드가 화면에서 완전히 사라진 것을 확인(콘솔 에러 0건).
+
+## §112 — 날씨 시나리오 예측 배수를 실측 데이터 기반으로 교체
+
+### Context
+
+담당자 질문: "시뮬레이션에서 날씨에 따른 추정치는 무슨 기준이야? 올해
+데이터를 기준으로 분석한 결과를 보여줘야 함." 확인 결과 `simulation.py`의
+`_WEATHER_MULTIPLIER`는 코드 주석에 이미 "v0 휴리스틱... 실측 근거 없음"
+이라고 명시된 하드코딩 가정치 표였고(맑음 1.00/흐림 0.97/비 0.90/눈 0.85/
+폭염 0.95/한파 0.95), `what_if()`(날씨 시나리오 예측 카드)와
+`weekly_congestion_forecast()`(홈의 "금주 예상 식수") 둘 다 이 표를
+그대로 곱해 쓰고 있었다.
+
+### 설계
+
+`Weather`(사용자에게 보여주는 6개 선택지: 맑음/흐림/비/눈/폭염/한파)와
+`WeatherEvent`(실측 날씨를 분류하는 5개 유형, `weather_event.py`: 평상시/
+비/폭설/폭염/한파)는 스키마가 다르다 — 관측 데이터(`DailyWeather`)에
+구름량·일조량 필드가 없어 맑음과 흐림을 실측으로 구분할 방법이 없다.
+그래서 맑음(기준선 1.0 그대로 유지)·흐림(v0 가정치 유지)은 손대지 않고,
+`WeatherEvent`로 깔끔히 매핑되는 나머지 4개(비→RAIN, 눈→HEAVY_SNOW,
+폭염→HEATWAVE, 한파→COLDWAVE)만 실측 배수로 계산한다.
+
+`backend/app/api/simulation.py`에 `_data_driven_weather_multipliers(db,
+meal_type) -> dict[Weather, float]`를 신규 추가:
+1. 올해(1/1~오늘) `DailyWeather` 행을 전부 조회해 `classify_weather_event`로
+   날짜별 `WeatherEvent`를 매긴다.
+2. 같은 기간 `DailyCornerStats`를 `meal_type`으로 필터해 날짜별 전체
+   코너 합산 식수를 구한다.
+3. 날씨유형별로 그 날짜들의 식수를 모아 평균을 낸다. "평상시" 평균 대비
+   각 유형 평균의 비율이 그 유형의 실측 배수가 된다(예: 비 오는 날 평균이
+   평상시의 절반이면 배수 0.5).
+4. **표본 부족 게이트** — 평상시 표본 자체가 `_MIN_WEATHER_EVENT_SAMPLE_DAYS`
+   (5일) 미만이면 전부 v0로 폴백하고, 개별 유형(비/눈/폭염/한파)도 표본이
+   5일 미만이면(예: 아직 그 해에 폭설이 없었던 경우) 그 유형만 v0 값을
+   유지한다 — 하루이틀 표본으로 과적합된 배수를 쓰지 않기 위해(§110의
+   `_CORNER_SATISFACTION_GAP_THRESHOLD` 게이트와 같은 원칙). 요청 하나
+   에서 반복 호출될 수 있어 `db.info`에 캐시한다.
+
+`what_if()`(코너 루프 밖에서 `meal_type` 하나로 한 번 계산)와
+`weekly_congestion_forecast()`(날짜 루프 밖에서 한 번 계산)의 두 호출부
+모두 `_WEATHER_MULTIPLIER[weather]` 직접 참조를
+`_data_driven_weather_multipliers(db, meal_type)[weather]`로 교체했다.
+두 엔드포인트의 응답 `"note"` 필드도 "날씨 배수는 올해 실측 데이터 기반
+(표본 부족 유형은 v0 가정치로 대체) — 신메뉴/사내행사/연휴 전후 배수는
+아직 v0 휴리스틱"으로 갱신해, 무엇이 실측 기반이고 무엇이 아직 가정치인지
+명확히 구분했다.
+
+`AnalysisPage.tsx`의 "날씨 시나리오 예측" 카드 캡션도 이 기준을 직접
+설명하도록 확장했다("비·눈·폭염·한파 배수는 올해 실측 날씨·식수 데이터를
+대조해 계산하며, 표본이 부족한 유형은 잠정 가정치로 대체됩니다. 맑음·흐림은
+관측 데이터에 구름량이 없어 실측으로 구분할 수 없어 가정치를 유지합니다.")
+— 담당자 질문에 화면에서 바로 답하도록.
+
+### 손대지 않는 것 (교차 확인)
+
+- 맑음(1.00 고정)·흐림(v0 0.97 유지) — 구름량 미관측으로 실측 구분 불가,
+  의도적으로 v0 유지.
+- 신메뉴 배수(`_MENU_QUADRANT_MULTIPLIER`/`_DEFAULT_NEW_MENU_MULTIPLIER`),
+  사내행사 배수(0.90 고정), 연휴 전후 배수(`_HOLIDAY_ADJACENCY_MULTIPLIER`)
+  — 이번 요청은 "날씨" 배수로 범위가 한정, 나머지는 여전히 v0 휴리스틱
+  (주석·note 문구에 명시).
+- `_baseline_headcount`/`_fetch_classification_history`(평일/휴일/
+  패밀리데이 분류별 최근 이력 평균) — 무변경, 배수를 곱하는 대상인
+  베이스라인 자체는 그대로.
+- `weather_event.py`의 `classify_weather_event`/`WeatherEvent` — 무변경,
+  §71에서 만든 기존 순수 함수를 그대로 재사용.
+
+### 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에 2개 신규 테스트:
+  `test_what_if_uses_data_driven_weather_multiplier_when_sample_sufficient`
+  (평상시 5일(식수 20)·비 5일(식수 10) 실측을 시딩하면 예측 식수가
+  베이스라인 × 실측 비율 0.5로 나오는지 — v0(0.90)를 썼다면 나오지 않을
+  값), `test_what_if_falls_back_to_v0_weather_multiplier_when_sample_insufficient`
+  (비 표본이 2일뿐이면 v0(0.90)로 폴백하는지) — 둘 다 통과. 기존
+  `test_what_if_applies_cloudy_weather_multiplier`/
+  `test_what_if_applies_snow_weather_multiplier`(실측 날씨 데이터를 심지
+  않는 테스트)도 그대로 통과 — 실측 데이터가 없으면 전부 v0로 폴백하는
+  경로가 검증됨.
+- `pytest` 전체 578개 통과.
+- `npx tsc -b` + `npx vite build` 클린.
+- **실제 개발 DB + Playwright**: 개발 DB에는 2026년 6~8월 실측
+  `daily_weather` 25건이 있어(6/1~6/5 비, 6/6~6/10 맑음 등) 표본 조건을
+  이미 충족 — `curl`로 `/api/simulation/what-if`를 직접 호출해 응답의
+  `"note"`가 새 문구("실측 데이터 기반...")로 바뀐 것을 확인. 프론트
+  시뮬레이션 탭에서 새 캡션 문구가 정확히 렌더링되는 것을 스크린샷으로
+  확인(콘솔 에러 0건). 실측 비율이 항상 "비가 오면 식수가 준다"는 직관과
+  일치하지는 않았는데(개발 DB의 합성 데이터 특성상), 이는 코드 버그가
+  아니라 설계 의도대로 "실제 데이터가 보여주는 그대로"를 반영한 결과다.
+- 문서화(§111/§112) 후 커밋·푸시.

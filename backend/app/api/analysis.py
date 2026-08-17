@@ -1758,6 +1758,39 @@ def _recent_avg_headcount_by_menu(
     return {menu_id: statistics.fmean(counts) for menu_id, counts in by_menu.items()}
 
 
+def _last_appearance_headcount_by_menu(
+    db: Session, menu_ids: set[int], history_start: dt.date, history_end: dt.date
+) -> dict[int, tuple[dt.date, int]]:
+    """§111: "최근 저조 식수 재편성 금지" 규칙 전용 — 메뉴별로 history 기간
+    안에서 **가장 최근에 나간 날짜 하루**와 그날의 실제 식수만 본다.
+    `_recent_avg_headcount_by_menu`(여러 등장일의 평균 — weekly_menu_rotation
+    Top5 목록이 쓴다)와 달리, 이 규칙은 "지난번 나왔을 때 200식 이하였다"는
+    구체적인 한 시점을 근거로 삼아야 해서(담당자: "5/14에 143이었는데 다시
+    나왔다"처럼 실제 등장일을 보여줘야 함) 평균을 쓰면 그 날짜 정보가
+    사라진다."""
+    if not menu_ids:
+        return {}
+    period_start_dt = dt.datetime.combine(history_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(history_end + dt.timedelta(days=1), dt.time())
+    date_col = func.date(MealLog.eaten_at).label("stat_date")
+    rows = (
+        db.query(MealLog.menu_id, date_col, func.count().label("cnt"))
+        .filter(
+            MealLog.menu_id.in_(menu_ids),
+            MealLog.eaten_at >= period_start_dt,
+            MealLog.eaten_at < period_end_exclusive,
+        )
+        .group_by(MealLog.menu_id, date_col)
+        .all()
+    )
+    latest: dict[int, tuple[dt.date, int]] = {}
+    for menu_id, stat_date, cnt in rows:
+        current = latest.get(menu_id)
+        if current is None or stat_date > current[0]:
+            latest[menu_id] = (stat_date, cnt)
+    return latest
+
+
 def _avg_satisfaction_by_menu(
     db: Session, menu_ids: set[int], period_start: dt.date, period_end: dt.date
 ) -> dict[int, float]:
@@ -1803,7 +1836,10 @@ def weekly_menu_plan_rule_check(
     역할만(부찬은 취식 기록에 없어 식수를 알 수 없다), 예외 코너
     (`LOW_HEADCOUNT_EXEMPT_CORNER_NAMES`)는 대상에서 뺀다. 이력이 아예 없는
     메뉴(진짜 신메뉴)는 판단 근거가 없으니 조용히 건너뛴다(다른 곳의 신메뉴
-    예외 관례와 동일).
+    예외 관례와 동일). §111부터 "최근"은 여러 등장일의 평균이 아니라
+    **지난번 나왔을 때 딱 한 번**을 본다 — 응답의 `last_appearance_date`/
+    `last_appearance_headcount`가 그 실제 등장일과 그날 식수다(이번 주
+    재편성일과는 다른 날짜).
     """
     plan_rows = (
         db.query(
@@ -1838,20 +1874,27 @@ def weekly_menu_plan_rule_check(
     }
     history_end = period_start - dt.timedelta(days=1)
     history_start = history_end - dt.timedelta(days=_HISTORY_WINDOW_DAYS)
-    avg_by_menu = _recent_avg_headcount_by_menu(
+    # §111: 평균이 아니라 "지난번 나왔을 때" 딱 그 한 번의 실제 등장일·식수를
+    # 본다 — 담당자 신고("7/14일에 143식"처럼 이번 주 재편성일과 과거 평균이
+    # 뒤섞여 보임) 대응. `_last_appearance_headcount_by_menu`가 history 기간
+    # 안에서 가장 최근 등장일 하루만 골라준다.
+    last_appearance_by_menu = _last_appearance_headcount_by_menu(
         db, {menu_id for menu_id, _menu_name, _corner_name in main_candidates}, history_start, history_end
     )
 
     low_headcount_violations = []
     for menu_id, menu_name, corner_name in main_candidates:
-        avg = avg_by_menu.get(menu_id)
-        if avg is None:
+        last_appearance = last_appearance_by_menu.get(menu_id)
+        if last_appearance is None:
             continue
-        if avg <= 200:
+        last_date, last_headcount = last_appearance
+        if last_headcount <= 200:
             # §86: 규칙 라벨 클릭 시 격자표 하이라이트를 위해 이 위반이 실제로
             # 어느 요일·코너 슬롯에서 나왔는지 plan_rows를 다시 훑어 붙인다
             # (main_candidates는 메뉴 단위로 dedupe돼 있어 plan_date/slot 정보가
-            # 없다 — 새 쿼리 없이 이미 가져온 plan_rows를 재사용).
+            # 없다 — 새 쿼리 없이 이미 가져온 plan_rows를 재사용). 이 matches는
+            # **이번 주** 재편성 슬롯이고, last_date/last_headcount는 그 이전에
+            # 저조했던 실제 등장일이다 — 둘을 섞어 표시하지 않는다.
             matches = [
                 {
                     "plan_date": plan_date.isoformat(),
@@ -1866,11 +1909,12 @@ def weekly_menu_plan_rule_check(
                 {
                     "menu_name": menu_name,
                     "corner_name": corner_name,
-                    "recent_avg_headcount": round(avg, 1),
+                    "last_appearance_date": last_date.isoformat(),
+                    "last_appearance_headcount": last_headcount,
                     "matches": matches,
                 }
             )
-    low_headcount_violations.sort(key=lambda v: v["recent_avg_headcount"])
+    low_headcount_violations.sort(key=lambda v: v["last_appearance_headcount"])
 
     def _daily_rule_payload(results):
         return [

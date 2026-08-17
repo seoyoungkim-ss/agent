@@ -76,10 +76,14 @@ export function buildLowHeadcountRuleCard(
   const chips: RuleCardConfig["chips"] = [];
   const unclickableNotes: { key: string | number; label: string }[] = [];
   data.violations.forEach((v, vi) => {
+    // §111: "5/14에 143이었는데 다시 나왔다"처럼 실제 저조 등장일(과거)과
+    // 이번 주 재편성일(matches)을 분명히 구분해서 보여준다 — 평균이나
+    // 이번 주 날짜만으로는 "언제 저조했는지"가 사라진다.
+    const lastAppearance = `${v.last_appearance_date.slice(5)}에 ${v.last_appearance_headcount}식`;
     if (v.matches.length === 0) {
       unclickableNotes.push({
         key: vi,
-        label: `${v.menu_name}(${v.corner_name}, 최근 평균 ${v.recent_avg_headcount}식)`,
+        label: `${v.menu_name}(${v.corner_name}, ${lastAppearance})`,
       });
       return;
     }
@@ -88,7 +92,7 @@ export function buildLowHeadcountRuleCard(
       highlightMatches.push({ plan_date: m.plan_date, corner_id: m.corner_id });
       chips.push({
         match: m,
-        label: `${v.menu_name}(${v.corner_name}, 최근 평균 ${v.recent_avg_headcount}식, ${m.plan_date.slice(5)})`,
+        label: `${v.menu_name}(${v.corner_name}, ${lastAppearance} → ${m.plan_date.slice(5)} 재편성)`,
         renderKey: `${vi}_${mi}`,
       });
     });

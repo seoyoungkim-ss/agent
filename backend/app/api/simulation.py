@@ -4,6 +4,7 @@ from enum import Enum
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.analysis import _corner_id_by_menu_from_meal_log
@@ -12,10 +13,11 @@ from app.db import get_db
 from app.models.enums import MealType, MenuQuadrant, MenuRole
 from app.models.logs import WeeklyMenuPlan
 from app.models.master import CornerMaster
-from app.models.stats import DailyCornerStats, MenuPerformanceStats
+from app.models.stats import DailyCornerStats, DailyWeather, MenuPerformanceStats
 from app.services.corner_aliases import corner_display_sort_key
 from app.services.holidays import DayClassification, HolidayAdjacency, HolidayService, is_family_day
 from app.services.menu_throughput import build_corner_daily_peak_share, compute_peak_share_ratio, window_minutes
+from app.services.weather_event import WeatherEvent, classify_weather_event
 from app.services.weekly_menu_prediction import compute_expected_wait_minutes
 
 router = APIRouter(prefix="/simulation", tags=["simulation"])
@@ -142,6 +144,91 @@ _HOLIDAY_ADJACENCY_MULTIPLIER = {
     HolidayAdjacency.NONE: 1.00,
 }
 
+# §112(2026-08): "날씨 시나리오 예측의 배수는 무슨 기준이냐"는 담당자 질문
+# 대응 — 위 _WEATHER_MULTIPLIER는 실측 근거 없는 v0 가정치였다. 올해(1/1~오늘)
+# 실측 날씨(daily_weather)와 실제 식수(daily_corner_stats)를 대조해 비/눈/폭염/
+# 한파는 실측 배수로 교체하고, 표본이 부족한 유형만 v0 값으로 폴백한다.
+_MIN_WEATHER_EVENT_SAMPLE_DAYS = 5
+# Weather(시뮬레이션이 사용자에게 보여주는 6개 선택지)와 WeatherEvent(실측 날씨를
+# 분류하는 5개 유형, weather_event.py)는 스키마가 다르다 — 관측 데이터에 구름량/
+# 일조량이 없어 맑음과 흐림을 실측으로 구분할 방법이 없다. 그래서 맑음(=기준선
+# 1.0)·흐림(v0 가정치 유지, 아래 폴백 처리로 자연히 남는다)은 손대지 않고 나머지
+# 넷만 대응하는 WeatherEvent로 매핑해 실측 배수를 구한다.
+_WEATHER_TO_EVENT = {
+    Weather.RAIN: WeatherEvent.RAIN,
+    Weather.SNOW: WeatherEvent.HEAVY_SNOW,
+    Weather.HEATWAVE: WeatherEvent.HEATWAVE,
+    Weather.COLDWAVE: WeatherEvent.COLDWAVE,
+}
+
+
+def _data_driven_weather_multipliers(db: Session, meal_type: MealType) -> dict[Weather, float]:
+    """올해 실측 날씨×식수로 계산한 배수. 표본이 `_MIN_WEATHER_EVENT_SAMPLE_DAYS`
+    일 미만인 유형(예: 이 연도에 폭설이 한 번도 없었던 경우)은 하루이틀
+    표본으로 과적합된 값을 쓰지 않도록 v0 가정치(`_WEATHER_MULTIPLIER`)로
+    폴백한다 — "평상시" 표본 자체가 부족하면(연초라 데이터가 거의 없는 경우
+    등) 전부 v0로 폴백한다.
+
+    요청 하나에서 같은 (db, meal_type)로 반복 호출될 수 있어(what_if는 코너
+    루프 밖에서 한 번만 부르지만, congestion_forecast/weekly는 날짜 루프
+    밖에서 한 번만 부르는 식으로 각자 이미 신경 쓰고 있다 — 여기서도 방어적으로
+    요청 단위 캐시를 둔다) `db.info`에 캐시한다.
+    """
+    cache = db.info.setdefault("_data_driven_weather_multiplier_cache", {})
+    if meal_type in cache:
+        return cache[meal_type]
+
+    today = dt.date.today()
+    year_start = dt.date(today.year, 1, 1)
+    settings = get_settings()
+
+    weather_rows = db.query(DailyWeather).filter(DailyWeather.stat_date.between(year_start, today)).all()
+    event_by_date = {
+        w.stat_date: classify_weather_event(
+            precip_mm=w.precip_mm,
+            snow_cm=w.snow_cm,
+            max_temp_c=w.max_temp_c,
+            min_temp_c=w.min_temp_c,
+            settings=settings,
+        )
+        for w in weather_rows
+    }
+
+    result = dict(_WEATHER_MULTIPLIER)
+    if not event_by_date:
+        cache[meal_type] = result
+        return result
+
+    headcount_by_date = dict(
+        db.query(DailyCornerStats.stat_date, func.sum(DailyCornerStats.headcount))
+        .filter(
+            DailyCornerStats.meal_type == meal_type,
+            DailyCornerStats.stat_date.between(year_start, today),
+        )
+        .group_by(DailyCornerStats.stat_date)
+        .all()
+    )
+
+    by_event: dict[WeatherEvent, list[int]] = {}
+    for stat_date, event in event_by_date.items():
+        total = headcount_by_date.get(stat_date)
+        if total is not None:
+            by_event.setdefault(event, []).append(total)
+
+    normal_samples = by_event.get(WeatherEvent.NORMAL, [])
+    if len(normal_samples) < _MIN_WEATHER_EVENT_SAMPLE_DAYS:
+        cache[meal_type] = result
+        return result
+    normal_avg = statistics.fmean(normal_samples)
+
+    for weather, event in _WEATHER_TO_EVENT.items():
+        samples = by_event.get(event, [])
+        if len(samples) >= _MIN_WEATHER_EVENT_SAMPLE_DAYS:
+            result[weather] = round(statistics.fmean(samples) / normal_avg, 3) if normal_avg > 0 else result[weather]
+
+    cache[meal_type] = result
+    return result
+
 
 class WhatIfRequest(BaseModel):
     target_date: dt.date
@@ -234,10 +321,13 @@ def what_if(payload: WhatIfRequest, db: Session = Depends(get_db)):
     corners = sorted(
         db.query(CornerMaster).all(), key=lambda c: corner_display_sort_key(c.corner_id, c.corner_name)
     )
+    # §112: 날씨 배수는 더 이상 고정 가정치가 아니라 올해 실측 데이터 기반 —
+    # meal_type 하나로 고정이라 코너 루프 밖에서 한 번만 계산한다.
+    weather_multipliers = _data_driven_weather_multipliers(db, payload.meal_type)
     results = []
     for corner in corners:
         baseline = _baseline_headcount(db, corner.corner_id, payload.meal_type, classification)
-        multiplier = _WEATHER_MULTIPLIER[payload.weather]
+        multiplier = weather_multipliers[payload.weather]
         if payload.has_company_event:
             multiplier *= 0.90  # 사내 행사가 있으면 카페테리아 이용이 다소 줄어든다는 가정(v0)
         if payload.planned_menu_id is not None and payload.new_menu_corner_id == corner.corner_id:
@@ -259,7 +349,9 @@ def what_if(payload: WhatIfRequest, db: Session = Depends(get_db)):
         "target_date": payload.target_date.isoformat(),
         "classification": classification.value,
         "corners": results,
-        "note": "v0 휴리스틱 예측 — 데이터가 쌓이면 회귀모델(lightgbm)로 고도화 필요",
+        # §112: 날씨 배수는 올해 실측 데이터 기반(표본 부족 시 v0 폴백) — 나머지
+        # 신메뉴/사내행사/연휴 전후 배수는 여전히 v0 가정치.
+        "note": "날씨 배수는 올해 실측 데이터 기반(표본 부족 유형은 v0 가정치로 대체) — 신메뉴/사내행사/연휴 전후 배수는 아직 v0 휴리스틱, 데이터가 쌓이면 회귀모델(lightgbm)로 고도화 필요",
     }
 
 
@@ -373,7 +465,10 @@ def weekly_congestion_forecast(
     holiday_svc = HolidayService(db)
     # 사내 행사 배수는 what_if와 같은 값을 쓴다 — 시뮬레이션 탭이 없어지면서
     # 그 화면의 유일한 실질 입력이던 "사내 행사"를 여기로 흡수했다(2026-08).
-    weather_multiplier = _WEATHER_MULTIPLIER[weather] * (0.90 if has_company_event else 1.0)
+    # §112: 날씨 배수는 올해 실측 데이터 기반(표본 부족 시 v0 폴백).
+    weather_multiplier = _data_driven_weather_multipliers(db, meal_type)[weather] * (
+        0.90 if has_company_event else 1.0
+    )
 
     days = []
     cursor = period_start
@@ -404,5 +499,7 @@ def weekly_congestion_forecast(
         "weather": weather.value,
         "has_company_event": has_company_event,
         "days": days,
-        "note": "v0 휴리스틱 — 날씨/연휴 전후 배수는 실측 보정 전 가정치입니다.",
+        # §112: 날씨 배수는 올해 실측 데이터 기반(표본 부족 유형은 v0 폴백) —
+        # 연휴 전후 배수는 아직 실측 보정 전 가정치.
+        "note": "날씨 배수는 올해 실측 데이터 기반(표본 부족 유형은 v0 가정치로 대체) — 연휴 전후 배수는 아직 실측 보정 전 가정치입니다.",
     }

@@ -18,7 +18,6 @@ import {
   Card,
   ErrorState,
   LoadingState,
-  QuadrantBadge,
   resolveColor,
   SegmentedControl,
   StatTile,
@@ -166,8 +165,6 @@ export function HomePage({
       return [...prev, mealType];
     });
   }
-  const [menuName, setMenuName] = useState("");
-  const [searchedMenu, setSearchedMenu] = useState<string | null>(null);
   const [selectedMonday, setSelectedMonday] = useState(mondayOf(new Date()));
   // 식당은 일요일에 운영하지 않으므로 월~토 6일만 조회한다.
   const saturdayOfSelected = addDays(selectedMonday, 5);
@@ -271,12 +268,6 @@ export function HomePage({
           return { direction, tone, text: `지난 주 ${prevRuleViolationCount}건` };
         })()
       : undefined;
-
-  const menuHistory = useQuery({
-    queryKey: ["menu-history", searchedMenu],
-    queryFn: () => api.menuHistory(searchedMenu as string),
-    enabled: !!searchedMenu,
-  });
 
   const cornerSummary = useQuery({
     queryKey: ["corner-summary", selectedMonday, saturdayOfSelected],
@@ -962,6 +953,34 @@ export function HomePage({
                     })}
                   </tr>
                 ))}
+                {/* §111: "소계"(Take Out 제외 사내 코너 합)는 Take Out보다 위에 —
+                    Take Out까지 합친 게 "합계"이니, 그 사이에 있어야 두 숫자의
+                    관계(소계 + Take Out = 합계)가 자연스럽게 읽힌다. */}
+                <tr>
+                  <td className="border px-2 py-1.5 font-medium" style={{ borderColor: "var(--border)" }}>
+                    소계
+                  </td>
+                  {MEAL_TYPE_OPTIONS.map((mt) => {
+                    const bucket = cornerMealTypeHeadcountQuery.data!.subtotal[mt];
+                    return (
+                      <Fragment key={mt}>
+                        <td className="border px-2 py-1.5" style={{ borderColor: "var(--border)" }} />
+                        <td
+                          className="border px-2 py-1.5 text-right font-medium"
+                          style={{ borderColor: "var(--border)" }}
+                        >
+                          {(bucket?.headcount ?? 0).toLocaleString()}
+                        </td>
+                        <td
+                          className="border px-2 py-1.5 text-right"
+                          style={{ borderColor: "var(--border)", color: "var(--ink-muted)" }}
+                        >
+                          {bucket?.share_of_traffic != null ? `${(bucket.share_of_traffic * 100).toFixed(1)}%` : "-"}
+                        </td>
+                      </Fragment>
+                    );
+                  })}
+                </tr>
                 {cornerMealTypeHeadcountQuery.data.take_out && (
                   <tr>
                     <td
@@ -997,31 +1016,6 @@ export function HomePage({
                     })}
                   </tr>
                 )}
-                <tr>
-                  <td className="border px-2 py-1.5 font-medium" style={{ borderColor: "var(--border)" }}>
-                    소계
-                  </td>
-                  {MEAL_TYPE_OPTIONS.map((mt) => {
-                    const bucket = cornerMealTypeHeadcountQuery.data!.subtotal[mt];
-                    return (
-                      <Fragment key={mt}>
-                        <td className="border px-2 py-1.5" style={{ borderColor: "var(--border)" }} />
-                        <td
-                          className="border px-2 py-1.5 text-right font-medium"
-                          style={{ borderColor: "var(--border)" }}
-                        >
-                          {(bucket?.headcount ?? 0).toLocaleString()}
-                        </td>
-                        <td
-                          className="border px-2 py-1.5 text-right"
-                          style={{ borderColor: "var(--border)", color: "var(--ink-muted)" }}
-                        >
-                          {bucket?.share_of_traffic != null ? `${(bucket.share_of_traffic * 100).toFixed(1)}%` : "-"}
-                        </td>
-                      </Fragment>
-                    );
-                  })}
-                </tr>
                 <tr>
                   <td
                     className="border px-2 py-1.5 font-semibold"
@@ -1156,44 +1150,6 @@ export function HomePage({
               )}
             </div>
           </div>
-        )}
-      </Card>
-
-      <Card title="이번 주 메뉴 이력 검색 (과거 만족도·코멘트)">
-        <div className="mb-3 flex gap-2">
-          <input
-            className="w-64 rounded-md border px-3 py-2 text-[13px]"
-            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-            placeholder="메뉴명 (예: 제육볶음)"
-            value={menuName}
-            onChange={(e) => setMenuName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && setSearchedMenu(menuName)}
-          />
-          <Button onClick={() => setSearchedMenu(menuName)}>검색</Button>
-        </div>
-        {menuHistory.isLoading && <LoadingState />}
-        {menuHistory.isError && <ErrorState error={menuHistory.error} />}
-        {menuHistory.data && menuHistory.data.length === 0 && (
-          <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            이력이 없습니다 (recompute가 필요할 수 있습니다).
-          </p>
-        )}
-        {menuHistory.data && menuHistory.data.length > 0 && (
-          <Table
-            columns={[
-              { key: "period", label: "기간" },
-              { key: "score", label: "만족도(표본보정)", align: "right" },
-              { key: "count", label: "평가건수", align: "right" },
-              { key: "quadrant", label: "4분면" },
-            ]}
-            rows={menuHistory.data.map((h) => ({
-              period: `${h.period_start} ~ ${h.period_end}`,
-              score: h.adjusted_score?.toFixed(2) ?? "-",
-              count: h.evaluation_count,
-              quadrant: <QuadrantBadge label={h.quadrant} />,
-            }))}
-            rowKey={(r) => r.period as string}
-          />
         )}
       </Card>
 

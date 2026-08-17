@@ -564,7 +564,10 @@ export interface DailyMenuPlanRuleResult {
 export interface LowHeadcountViolation {
   menu_name: string;
   corner_name: string;
-  recent_avg_headcount: number;
+  // §111: 평균이 아니라 "지난번 나왔을 때" 실제 등장일 하나 — 이번 주
+  // 재편성 슬롯(matches)과는 다른 날짜다, 섞어서 표시하지 않는다.
+  last_appearance_date: string;
+  last_appearance_headcount: number;
   matches: MenuPlanRuleMatch[];
 }
 

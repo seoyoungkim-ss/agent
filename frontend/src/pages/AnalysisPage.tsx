@@ -3319,7 +3319,10 @@ function WeatherScenarioForecastSection({ onWeatherChange }: { onWeatherChange?:
   return (
     <Card title="날씨 시나리오 예측">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        날씨·끼니·날짜를 골라 예상 식수를 시뮬레이션합니다(추정치).
+        날씨·끼니·날짜를 골라 예상 식수를 시뮬레이션합니다(추정치). 비·눈·폭염·한파
+        배수는 올해 실측 날씨·식수 데이터를 대조해 계산하며, 표본이 부족한
+        유형(예: 아직 발생하지 않은 날씨)은 잠정 가정치로 대체됩니다. 맑음·흐림은
+        관측 데이터에 구름량이 없어 실측으로 구분할 수 없어 가정치를 유지합니다.
       </p>
       <div className="mb-4 flex flex-wrap items-end gap-4">
         <div className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
