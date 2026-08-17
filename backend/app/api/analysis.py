@@ -102,11 +102,9 @@ from app.services.menu_rotation import (
     classify_rotation,
     build_corner_menu_dates,
     count_in_window,
-    find_overdue_menus,
     find_overused_menus,
     is_over_frequency,
     max_in_window_for_role,
-    rank_by_shortest_cycle,
 )
 from app.services.weekly_menu_review import (
     add_feedback,
@@ -2066,14 +2064,6 @@ def weekly_menu_rotation(
 
     overused = find_overused_menus(planned_in_period)
 
-    # §86: "편성 빈도 × 성과"용 MAIN 전용 랭킹 — 이 화면은 처음부터 MAIN 메뉴만
-    # 다뤘으므로(기존 menu-plan/performance 엔드포인트도 MAIN 전용이었다), 부찬/
-    # 건강가든까지 섞인 위 dates_by_corner_menu와는 별개로 다시 빌드한다.
-    main_planned = [p for p in all_planned if p[3] == "메인"]
-    dates_by_corner_menu_main = build_corner_menu_dates(main_planned)
-    shortest_cycle_menus = rank_by_shortest_cycle(dates_by_corner_menu_main)[:10]
-    overdue_menus = find_overdue_menus(dates_by_corner_menu_main, as_of=period_end)
-
     return {
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
@@ -2090,26 +2080,6 @@ def weekly_menu_rotation(
                 "dates": [d.isoformat() for d in o.dates],
             }
             for o in overused
-        ],
-        "shortest_cycle_menus": [
-            {
-                "corner_name": s.corner_name,
-                "menu_name": s.menu_name,
-                "avg_interval_days": round(s.avg_interval_days, 1),
-                "occurrence_count": s.occurrence_count,
-                "last_date": s.last_date.isoformat(),
-            }
-            for s in shortest_cycle_menus
-        ],
-        "overdue_menus": [
-            {
-                "corner_name": o.corner_name,
-                "menu_name": o.menu_name,
-                "avg_interval_days": round(o.avg_interval_days, 1),
-                "last_date": o.last_date.isoformat(),
-                "days_since_last": o.days_since_last,
-            }
-            for o in overdue_menus
         ],
     }
 

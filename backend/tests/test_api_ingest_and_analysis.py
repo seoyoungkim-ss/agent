@@ -3388,43 +3388,6 @@ def test_rotation_frequency_threshold_is_looser_for_side_dishes(client):
     assert item["over_frequency"] is False
 
 
-def test_weekly_menu_rotation_reports_shortest_cycle_menus(client):
-    """§86: 편성 빈도×성과 재설계 — 메인메뉴 중 평균 편성 주기가 짧은 순으로
-    랭킹한 shortest_cycle_menus가 응답에 있어야 한다."""
-    rows = [
-        _plan_row(MONDAY - dt.timedelta(days=14), "새우까스", "메인"),
-        _plan_row(MONDAY - dt.timedelta(days=7), "새우까스", "메인"),
-        _plan_row(MONDAY, "새우까스", "메인"),  # 평균 7일 주기
-        _plan_row(MONDAY - dt.timedelta(days=60), "갈비탕", "메인"),
-        _plan_row(MONDAY, "갈비탕", "메인"),  # 평균 60일 주기
-    ]
-    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
-    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
-    names = [r["menu_name"] for r in data["shortest_cycle_menus"]]
-    assert names.index("새우까스") < names.index("갈비탕")
-    shortest = next(r for r in data["shortest_cycle_menus"] if r["menu_name"] == "새우까스")
-    assert shortest["avg_interval_days"] == 7.0
-    assert shortest["occurrence_count"] == 3
-
-
-def test_weekly_menu_rotation_reports_overdue_menus(client):
-    """§86: 평균 주기 대비 한참 안 나온(나올 때가 됐는데 안 나온) 메뉴는
-    이 기간에 재편성된 행이 하나도 없어도 overdue_menus에 잡혀야 한다 —
-    items(요일별 재편성 판정)는 이 기간에 재편성된 행만 훑기 때문에 이 메뉴를
-    구조적으로 담을 수 없다."""
-    rows = [
-        _plan_row(MONDAY - dt.timedelta(days=120), "오래된메뉴", "메인"),
-        _plan_row(MONDAY - dt.timedelta(days=100), "오래된메뉴", "메인"),  # 평균 20일 주기
-    ]
-    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
-    data = _rotation(client, period_start=MONDAY.isoformat(), period_end=MONDAY.isoformat())
-    assert "오래된메뉴" not in {i["menu_name"] for i in data["items"]}
-    overdue = next(r for r in data["overdue_menus"] if r["menu_name"] == "오래된메뉴")
-    assert overdue["avg_interval_days"] == 20.0
-    assert overdue["days_since_last"] == 100
-    assert overdue["last_date"] == (MONDAY - dt.timedelta(days=100)).isoformat()
-
-
 # ---------------------------------------------------------------------------
 # 재적재 중복 사고 (2026-08 실사용 신고: "부찬이 두번씩 들어갔고")
 # ---------------------------------------------------------------------------

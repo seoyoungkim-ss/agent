@@ -441,22 +441,6 @@ export interface MenuRotationRow {
   recent_avg_headcount: number | null;
 }
 
-export interface ShortCycleMenuRow {
-  corner_name: string;
-  menu_name: string;
-  avg_interval_days: number;
-  occurrence_count: number;
-  last_date: string;
-}
-
-export interface OverdueMenuRow {
-  corner_name: string;
-  menu_name: string;
-  avg_interval_days: number;
-  last_date: string;
-  days_since_last: number;
-}
-
 export interface MenuRotationResponse {
   period_start: string;
   period_end: string;
@@ -465,10 +449,6 @@ export interface MenuRotationResponse {
   rotation_window_days: number;
   items: MenuRotationRow[];
   overused: { menu_name: string; menu_role: string; count: number; dates: string[] }[];
-  // §86: 편성 빈도 × 성과 화면 전용 — MAIN 메뉴만, 메뉴 단위 랭킹(위 items는
-  // 인스턴스/슬롯 단위).
-  shortest_cycle_menus: ShortCycleMenuRow[];
-  overdue_menus: OverdueMenuRow[];
 }
 
 // 자주 반복되는 부찬 랭킹 — 담당자가 고른 임의 기간 하나로 코너 안 고유 날짜

@@ -9083,3 +9083,89 @@ meal_type) -> dict[Weather, float]`를 신규 추가:
   라인 위에 굵은 숫자(예: "31")가 표기되는 것을 스크린샷으로 확인
   (콘솔 에러 0건).
 - 문서화(§113) 후 커밋·푸시.
+
+## §114 — 날씨 시뮬레이션 캡션 축소 + "편성 빈도 × 성과" 기능 삭제
+
+### Context
+
+담당자가 두 가지를 요청했다: "날씨 시뮬레이션에서 지저분한 주석 제거",
+"메뉴 편성운영에서 편성빈도성과 기능 제거".
+
+**날씨 시뮬레이션 캡션**: §112에서 담당자의 "날씨 배수 기준이 뭐냐"는
+질문에 답하려고 캡션에 실측 데이터 기반 계산 방식·표본 부족 폴백·맑음/
+흐림 미구분 사유까지 3문장을 통째로 얹었는데, 담당자 기준으로는 화면에
+쓰기엔 과한 구현 설명이었다. 캡션을 다시 한 문장으로 줄인다 — 배수가
+실측 데이터 기반이라는 사실만 남기고, 나머지 구현 디테일은 이번 라운드
+문서(§112)에 이미 기록돼 있으니 화면에서는 뺀다.
+
+**"편성 빈도 × 성과"**: §86에서 만들어진 기능(그 메뉴 자체의 평균 편성
+주기가 짧은 메뉴 Top10 / 평균 주기 대비 오래 안 나온 메뉴 목록)을
+메뉴 편성·운영 화면에서 완전히 제거한다. "재편성 점검"(RotationCheckPanel,
+재편성 Top5 + 편성 기준 초과 목록)과는 별개 기능이라 그쪽은 그대로 둔다.
+
+### 설계
+
+**캡션**: `frontend/src/pages/AnalysisPage.tsx`의
+`WeatherScenarioForecastSection` 캡션을 "날씨·끼니·날짜를 골라 예상
+식수를 시뮬레이션합니다(추정치). 배수는 올해 실측 데이터 기반입니다."
+두 문장으로 줄였다. 표본 부족 폴백, 맑음/흐림 미구분 사유 등 구현
+디테일은 화면에서 제거(문서 §112에는 그대로 남아있음).
+
+**"편성 빈도 × 성과" 삭제** — 프론트/백엔드/테스트 전부에서 이 기능
+전용 코드만 제거하고, "재편성 점검"과 공유하는 코드는 손대지 않았다:
+
+- `frontend/src/pages/AnalysisPage.tsx`: `MenuPlanPerformanceSection`
+  컴포넌트(§86 도입 컨텍스트 주석 포함)와 그 전용 헬퍼
+  `PLAN_PERIOD_OPTIONS`/`usePlanPeriod`/`OVERDUE_PREVIEW_COUNT`를 통째로
+  삭제. `MenuPlanningPage`에서 `<MenuPlanPerformanceSection />` 렌더
+  호출 제거.
+- `frontend/src/api/client.ts`: `ShortCycleMenuRow`/`OverdueMenuRow`
+  인터페이스와 `MenuRotationResponse`의 `shortest_cycle_menus`/
+  `overdue_menus` 필드 삭제. `items`/`overused` 필드와 `MenuRotationRow`
+  (재편성 Top5가 씀)는 그대로.
+- `backend/app/api/analysis.py`: `weekly_menu_rotation` 엔드포인트
+  자체는 재편성 점검이 계속 쓰므로 유지하되, MAIN 전용 재빌드 블록
+  (`main_planned`/`dates_by_corner_menu_main`/`shortest_cycle_menus`/
+  `overdue_menus`)과 응답의 `"shortest_cycle_menus"`/`"overdue_menus"`
+  키만 제거. `find_overdue_menus`/`rank_by_shortest_cycle` import 제거.
+- `backend/app/services/menu_rotation.py`: `ShortCycleMenu`/
+  `rank_by_shortest_cycle`/`OverdueMenu`/`find_overdue_menus`(§86 전용
+  섹션 전체, 파일 끝 262~351행)를 삭제. `average_interval_days`/
+  `LONG_ABSENT_RATIO`/`count_in_window`/`is_over_frequency` 등은 다른
+  함수(`classify_rotation`, `items` 계산)와 공유라 그대로 둠.
+- `backend/tests/test_menu_rotation.py`: §86 전용 테스트 블록(272~341행,
+  `rank_by_shortest_cycle`/`find_overdue_menus` import 포함) 삭제.
+- `backend/tests/test_api_ingest_and_analysis.py`:
+  `test_weekly_menu_rotation_reports_shortest_cycle_menus`/
+  `test_weekly_menu_rotation_reports_overdue_menus` 삭제.
+
+### 손대지 않는 것 (교차 확인)
+
+- `RotationCheckPanel`("재편성 점검" 탭, 재편성 Top5 + 편성 기준 초과
+  목록) — `weekly_menu_rotation`의 `items`/`overused` 필드와
+  `classify_rotation`을 그대로 씀, 무변경.
+- `menu_rotation.py`의 `average_interval_days`/`LONG_ABSENT_RATIO`/
+  `build_corner_menu_dates`/`count_in_window`/`is_over_frequency`/
+  `max_in_window_for_role`/`find_overused_menus`/`classify_rotation` —
+  전부 재편성 점검이 계속 쓰는 공유 로직, 무변경.
+- `WeeklyMenuReviewTab`/`MenuDuplicationCheckSection`/`MenuComboSection`
+  (메뉴 편성·운영 화면의 나머지 3개 섹션) — 무변경.
+- `WeatherCorrelationSection`(날씨유형·계절 랭킹, 시뮬레이션 탭의 다른
+  카드) — 캡션이 이미 짧아 손대지 않음.
+- §112가 추가한 `_data_driven_weather_multipliers` 계산 로직 자체 —
+  무변경, 화면 캡션 문구만 줄였다.
+
+### 테스트/검증
+
+- `pytest` 전체 569개 통과(578 − 9: `test_menu_rotation.py`에서 7개,
+  `test_api_ingest_and_analysis.py`에서 2개 삭제).
+- `npx tsc -b` + `npx vite build` 클린.
+- `grep`으로 `shortest_cycle`/`overdue_menu`/`rank_by_shortest_cycle`/
+  `find_overdue_menus`/`MenuPlanPerformanceSection`/`ShortCycleMenuRow`/
+  `OverdueMenuRow` 전체 검색 — 코드베이스에 잔존 참조 0건 확인.
+- **실제 개발 DB + Playwright**: 메뉴 편성·운영 화면에서 "편성 빈도"
+  텍스트가 화면에 전혀 없는 것을 확인(스크린샷 — "메뉴 중복 점검" 카드
+  바로 다음에 "부찬 조합별 만족도 비교" 카드가 이어짐, 그 사이 빈 공간
+  없음). 시뮬레이션 탭에서 캡션이 두 문장으로 줄어든 것을 확인. 콘솔
+  에러 0건.
+- 문서화(§114) 후 커밋·푸시.

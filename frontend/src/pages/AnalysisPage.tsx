@@ -2425,27 +2425,6 @@ const ROTATION_FLAG_TONE: Record<string, "critical" | "warning" | "accent" | "mu
   오랜만: "accent",
 };
 
-// 기간 선택 — 식단표 8개월치가 적재돼 PERIOD_START(180일 고정) 너머를 볼 수단이
-// 필요해졌다(2026-08). 기본 6개월인 이유: 적재 이전 구간은 편성 이력이 비어 있어
-// 편성 횟수가 실제보다 적게 나온다.
-const PLAN_PERIOD_OPTIONS = [
-  { label: "30일", value: "30" },
-  { label: "60일", value: "60" },
-  { label: "90일", value: "90" },
-  { label: "6개월", value: "180" },
-];
-
-// 기본 90일 — 담당자 편성 기준이 "3개월에 2회"라 그 창과 맞춘다(2026-08 요청).
-function usePlanPeriod(defaultDays = "90") {
-  const [days, setDays] = useState(defaultDays);
-  return {
-    days,
-    setDays,
-    periodStart: isoDaysAgo(Number(days)),
-    periodEnd: isoDaysAgo(0),
-  };
-}
-
 // §81: 메인메뉴만 다룬다(담당자 확인: "메인만" — 부찬·건강가든은 이번
 // 재설계 대상 밖).
 const ROTATION_MAIN_ROLE = "메인";
@@ -3124,106 +3103,6 @@ function MenuDuplicationCheckSection() {
   );
 }
 
-// §86: "편성 빈도 × 성과"가 만족도·VoE 탭의 "메뉴별 분석"(4분면, 취식 데이터
-// 기준 만족도×수요)과 겹쳐 보인다는 피드백 — 산점도/감편·증편 4분류는 완전히
-// 지우고, 편성 주기 자체에 집중한 두 리스트로 바꾼다: 그 메뉴의 평균 편성
-// 주기가 원래 짧은 메뉴, 그리고 평균 주기 대비 한참 안 나온(나올 때가 됐는데
-// 안 나온) 메뉴. 둘 다 weekly_menu_plan(편성 이력) 기준이라 "재편성 점검"
-// 탭(RotationCheckPanel)과 데이터 소스는 같지만, 그쪽은 "이번에 재편성된 게
-// 얼마나 일렀나"(인스턴스 단위)를 보고 이 화면은 "그 메뉴 자체의 평균 주기가
-// 짧은지" / "아예 재편성이 안 됐는지"(메뉴 단위)를 본다 — 서로 다른 질문이라
-// 중복이 아니다.
-const OVERDUE_PREVIEW_COUNT = 12;
-
-function MenuPlanPerformanceSection() {
-  const { days, setDays, periodStart, periodEnd } = usePlanPeriod();
-  const [showAllOverdue, setShowAllOverdue] = useState(false);
-  const query = useQuery({
-    queryKey: ["menu-plan-rotation-frequency", periodStart, periodEnd],
-    queryFn: () => api.weeklyMenuRotation({ period_start: periodStart, period_end: periodEnd }),
-  });
-
-  const shortestCycleMenus = query.data?.shortest_cycle_menus ?? [];
-  const overdueMenus = query.data?.overdue_menus ?? [];
-
-  return (
-    <Card title="편성 빈도 × 성과 — 편성 주기 점검">
-      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        메인메뉴 기준, 그 메뉴 자체의 평균 편성 주기로 봅니다.
-      </p>
-      <div className="mb-3 flex flex-wrap items-center gap-3">
-        <span className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-          조회 기간
-        </span>
-        <SegmentedControl value={days} options={PLAN_PERIOD_OPTIONS} onChange={setDays} />
-      </div>
-
-      {query.isLoading && <LoadingState />}
-      {query.isError && <ErrorState error={query.error} />}
-      {query.data && shortestCycleMenus.length === 0 && overdueMenus.length === 0 && (
-        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
-          이 기간에 판정할 만한 편성 이력이 없습니다.
-        </p>
-      )}
-
-      {query.data && shortestCycleMenus.length > 0 && (
-        <div className="mb-4">
-          <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-            편성 주기가 짧은 메뉴 (평균 주기 짧은 순)
-          </p>
-          <Table
-            columns={[
-              { key: "menu", label: "메뉴(코너)" },
-              { key: "interval", label: "평균 주기", align: "right" },
-              { key: "count", label: "편성 횟수", align: "right" },
-              { key: "last", label: "최근 편성일", align: "right" },
-            ]}
-            rows={shortestCycleMenus.map((r) => ({
-              menu: `${r.menu_name} (${r.corner_name})`,
-              interval: `${r.avg_interval_days}일`,
-              count: `${r.occurrence_count}회`,
-              last: r.last_date.slice(5),
-            }))}
-            rowKey={(r) => r.menu as string}
-          />
-        </div>
-      )}
-
-      {query.data && overdueMenus.length > 0 && (
-        <div>
-          <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-            나올 때가 됐는데 안 나온 메뉴 (평균 주기 대비 오래 안 나온 순)
-          </p>
-          <Table
-            columns={[
-              { key: "menu", label: "메뉴(코너)" },
-              { key: "interval", label: "평균 주기", align: "right" },
-              { key: "last", label: "마지막 편성일", align: "right" },
-              { key: "since", label: "경과일", align: "right" },
-            ]}
-            rows={(showAllOverdue ? overdueMenus : overdueMenus.slice(0, OVERDUE_PREVIEW_COUNT)).map((r) => ({
-              menu: `${r.menu_name} (${r.corner_name})`,
-              interval: `${r.avg_interval_days}일`,
-              last: r.last_date.slice(5),
-              since: `${r.days_since_last}일`,
-            }))}
-            rowKey={(r) => r.menu as string}
-          />
-          {overdueMenus.length > OVERDUE_PREVIEW_COUNT && (
-            <button
-              className="mt-2 text-xs underline"
-              style={{ color: "var(--accent)" }}
-              onClick={() => setShowAllOverdue((v) => !v)}
-            >
-              {showAllOverdue ? "접기" : `전체 ${overdueMenus.length}개 보기`}
-            </button>
-          )}
-        </div>
-      )}
-    </Card>
-  );
-}
-
 // §75: 랭킹 표를 기본 top5 상승/top5 하락만 보여주고 나머지는 펼치기로 미룬다
 // — 날씨유형·계절 랭킹 둘 다 같은 헬퍼로 일관되게 처리한다. 기존 |diff|
 // 내림차순 정렬(rows)은 그대로 두고, 접힌 상태에서 보여줄 부분집합만 뽑는다.
@@ -3319,10 +3198,8 @@ function WeatherScenarioForecastSection({ onWeatherChange }: { onWeatherChange?:
   return (
     <Card title="날씨 시나리오 예측">
       <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-        날씨·끼니·날짜를 골라 예상 식수를 시뮬레이션합니다(추정치). 비·눈·폭염·한파
-        배수는 올해 실측 날씨·식수 데이터를 대조해 계산하며, 표본이 부족한
-        유형(예: 아직 발생하지 않은 날씨)은 잠정 가정치로 대체됩니다. 맑음·흐림은
-        관측 데이터에 구름량이 없어 실측으로 구분할 수 없어 가정치를 유지합니다.
+        날씨·끼니·날짜를 골라 예상 식수를 시뮬레이션합니다(추정치). 배수는 올해
+        실측 데이터 기반입니다.
       </p>
       <div className="mb-4 flex flex-wrap items-end gap-4">
         <div className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
@@ -3731,7 +3608,6 @@ export function MenuPlanningPage() {
     <div className="space-y-6">
       <WeeklyMenuReviewTab />
       <MenuDuplicationCheckSection />
-      <MenuPlanPerformanceSection />
       <MenuComboSection />
     </div>
   );
