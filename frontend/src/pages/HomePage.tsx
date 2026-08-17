@@ -798,7 +798,7 @@ export function HomePage({
                     color: active ? "var(--ink)" : "var(--ink-secondary)",
                   }}
                 >
-                  <CornerLogo cornerName={c.corner_name} height={14} />
+                  <CornerLogo cornerName={c.corner_name} height={16} bare />
                 </button>
               );
             })}

@@ -1100,7 +1100,7 @@ function MenuComboSection() {
           options={[
             { label: "전체", value: "" },
             ...(cornersQuery.data ?? []).map((c) => ({
-              label: <CornerLogo cornerName={c.corner_name} height={14} />,
+              label: <CornerLogo cornerName={c.corner_name} height={16} bare />,
               value: String(c.corner_id),
             })),
           ]}
@@ -2804,7 +2804,7 @@ function RepeatedSideDishPanel() {
             options={[
               { label: "전체", value: "" },
               ...(repeatCorners.data ?? []).map((c) => ({
-                label: <CornerLogo cornerName={c.corner_name} height={14} />,
+                label: <CornerLogo cornerName={c.corner_name} height={16} bare />,
                 value: String(c.corner_id),
               })),
             ]}
