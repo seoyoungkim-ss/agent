@@ -9,7 +9,7 @@ import {
   type Division,
   type Granularity,
   type HeadcountGroupBy,
-  type ImprovementPoint,
+  type ImprovementPriorityResult,
   type MealType,
   type MenuTrendEntry,
 } from "../api/client";
@@ -51,13 +51,14 @@ const CLASSIFICATION_OPTIONS: { label: string; value: Classification | "전체" 
 
 const MEAL_TYPE_OPTIONS: MealType[] = ["조식", "중식", "석식"];
 
-// §102: "개선 필요 포인트" 카드를 피드 느낌의 세로 리스트로 다듬을 때
-// 항목마다 축(axis)을 한눈에 구분할 아이콘.
-const ICON_BY_AXIS: Record<ImprovementPoint["axis"], LucideIcon> = {
-  congestion: Users,
+// §109: "개선 필요 포인트" 카드가 4개 축을 우선순위대로 검토해 가장 급한
+// 이슈 하나만 보여주는 방식으로 바뀌면서, 이 아이콘은 그 하나의 축을
+// 표시하는 데만 쓴다.
+const ICON_BY_AXIS: Record<NonNullable<ImprovementPriorityResult["axis"]>, LucideIcon> = {
   satisfaction: Smile,
   voe: MessageSquare,
   planning: ClipboardList,
+  congestion: Users,
 };
 
 /**
@@ -417,6 +418,11 @@ export function HomePage({
     queryFn: () =>
       api.improvementPoints({ period_start: RECOMPUTE_PERIOD_START, period_end: RECOMPUTE_PERIOD_END }),
   });
+  // §109: 응답이 status="issue"일 때만 axis 등 나머지 필드가 채워진다 —
+  // JSX에서 매번 옵셔널 체이닝하지 않도록 여기서 한 번만 뽑아 둔다.
+  const priorityFinding =
+    improvementPoints.data?.status === "issue" ? improvementPoints.data : null;
+  const PriorityIcon = priorityFinding?.axis ? ICON_BY_AXIS[priorityFinding.axis] : null;
 
 
   // 금주 메뉴 과거 VOE — 이번 주 메인메뉴 중 과거 평가 이력(evaluation_count>0)이
@@ -653,54 +659,49 @@ export function HomePage({
         />
       </div>
 
-      <Card title="개선 필요 포인트 — 혼잡도 / 만족도 / VOE / 편성·운영">
-        {/* §107: "어떤 시기 기준인지 모르겠다" 신고 대응 — 이 카드는 두 가지
-            다른 시간 기준을 섞어 쓰는데(혼잡도·만족도·편성·운영은 최근 180일
-            누적, VOE만 이번 달 vs 지난달 비교) 그동안 화면 어디에도 이 기준이
-            적혀 있지 않았다. 데이터/로직은 그대로 두고 안내 문구만 추가한다. */}
+      <Card title="개선 필요 포인트">
+        {/* §109: 담당자 프롬프트로 전면 교체 — 4개 축을 리스트로 나열하던
+            방식에서, 우선순위(만족도→VOE→편성·운영→혼잡도)로 검토해 가장
+            급한 이슈 "하나만" 보여주는 방식으로 바뀌었다. */}
         <p className="mb-3 text-[12px]" style={{ color: "var(--ink-muted)" }}>
-          혼잡도·만족도·편성·운영: 최근 180일 누적 데이터 기준 · VOE: 이번 달 vs 지난달 비교
+          우선순위: 만족도 → VOE → 편성·운영 → 혼잡도 순으로 검토해 가장 급한 이슈 하나만 보여줍니다.
         </p>
         {improvementPoints.isLoading && <LoadingState />}
         {improvementPoints.isError && <ErrorState error={improvementPoints.error} />}
-        {improvementPoints.data && improvementPoints.data.length === 0 && (
+        {improvementPoints.data && improvementPoints.data.status === "no_issue" && (
           <p className="text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-            특별한 이상 없음
+            특이사항 없음
           </p>
         )}
-        {improvementPoints.data && improvementPoints.data.length > 0 && (
-          // §102: 세로 피드 느낌으로 — 항목마다 축(axis) 아이콘 배지 +
-          // 구분선(divide-y). 데이터/문구는 그대로, 스타일만 다듬는다.
-          <ul className="divide-y" style={{ borderColor: "var(--border)" }}>
-            {improvementPoints.data.map((p, i) => {
-              const Icon = ICON_BY_AXIS[p.axis];
-              const severityColor = p.severity === "critical" ? "var(--critical)" : "var(--warning)";
-              return (
-                <li key={i} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
-                  <span
-                    className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
-                    style={{ background: "var(--surface-2)" }}
-                  >
-                    <Icon size={14} style={{ color: severityColor }} />
-                  </span>
-                  <div>
-                    <div className="text-[13px] font-medium">{p.title}</div>
-                    <div className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                      {p.detail}
-                    </div>
-                    {p.voe_summary && (
-                      <div
-                        className="mt-1 rounded border-l-2 pl-2 text-xs italic"
-                        style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
-                      >
-                        "{p.voe_summary}"
-                      </div>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+        {priorityFinding && (
+          <div className="flex items-start gap-3">
+            <span
+              className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
+              style={{ background: "var(--surface-2)" }}
+            >
+              {PriorityIcon && <PriorityIcon size={14} style={{ color: "var(--warning)" }} />}
+            </span>
+            <div className="flex-1 space-y-1.5">
+              <div className="text-[11px] font-semibold tracking-wide" style={{ color: "var(--ink-muted)" }}>
+                개선 필요 영역: {priorityFinding.area}
+              </div>
+              <div className="text-[13px] font-medium">{priorityFinding.point}</div>
+              <div className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                근거: {priorityFinding.evidence}
+              </div>
+              <div className="text-xs" style={{ color: "var(--ink-secondary)" }}>
+                개선 방향: {priorityFinding.direction}
+              </div>
+              {priorityFinding.voe_summary && (
+                <div
+                  className="mt-1 rounded border-l-2 pl-2 text-xs italic"
+                  style={{ borderColor: "var(--border)", color: "var(--ink-secondary)" }}
+                >
+                  "{priorityFinding.voe_summary}"
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </Card>
 

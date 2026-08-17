@@ -647,7 +647,20 @@ def test_new_menu_status_unknown_menu_name_404s(client):
     assert resp.status_code == 404
 
 
-def test_improvement_points_surfaces_congestion_satisfaction_voe(client):
+def test_improvement_points_returns_no_issue_when_nothing_wrong(client):
+    # 취식 데이터가 아예 없으면 어느 축도 판단할 근거가 없다 — "특이사항 없음".
+    resp = client.get(
+        "/api/dashboard/improvement-points",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "no_issue"}
+
+
+def test_improvement_points_prioritizes_satisfaction_over_congestion_and_voe(client):
+    """만족도(1순위) 신호가 있으면 혼잡도(4순위)·VOE(2순위) 조건이 동시에
+    충족돼도 만족도 하나만 반환한다 — "가장 급한 이슈 하나만"이 핵심 요구사항."""
+
     def eat(employee_id, corner_name, minute, taste="맛남", menu_name=None, comment=None, eaten_date=MONDAY):
         client.post(
             "/api/ingest/meal-log",
@@ -667,9 +680,8 @@ def test_improvement_points_surfaces_congestion_satisfaction_voe(client):
             headers=AUTH_HEADERS,
         )
 
-    # 혼잡도: 한식은 식수는 많지만(20명) 피크타임(11:40~12:00) 안에는 2명만 —
-    # 나머지는 피크 밖(13시)이라 서브속도가 낮게 잡힌다. 일품은 식수는 적지만
-    # 전부 피크 안이라 서브속도가 높다.
+    # 혼잡도 조건도 동시에 충족: 한식은 식수는 많지만(20명) 피크타임(11:40~12:00)
+    # 안에는 2명만 — 나머지는 피크 밖(13시)이라 서브속도가 낮게 잡힌다.
     for i in range(2):
         eat(f"H{i}", "한식", 45, menu_name="비인기저조메뉴", taste="개선")
     for i in range(18):
@@ -704,7 +716,7 @@ def test_improvement_points_surfaces_congestion_satisfaction_voe(client):
     )
     assert resp.status_code == 200
 
-    # VOE: 이번 달엔 "위생" 코멘트가 늘고, 지난달엔 거의 없었음
+    # VOE 조건도 동시에 충족: 이번 달엔 "위생" 코멘트가 늘고, 지난달엔 거의 없었음
     prior_month_date = (MONDAY.replace(day=1) - dt.timedelta(days=1))
     eat("V0", "한식", 50, comment="위생 상태가 별로였어요", eaten_date=prior_month_date)
     for i in range(4):
@@ -715,22 +727,83 @@ def test_improvement_points_surfaces_congestion_satisfaction_voe(client):
         params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
     )
     assert resp.status_code == 200
-    points = resp.json()
-    axes = {p["axis"] for p in points}
-    assert "congestion" in axes
-    assert "satisfaction" in axes
-    assert "voe" in axes
+    body = resp.json()
+    assert body["status"] == "issue"
+    assert body["axis"] == "satisfaction"
+    assert body["area"] == "만족도"
+    assert "비인기저조메뉴" in body["point"]
+    assert body["evidence"]
+    assert body["direction"]
+    # 만족도가 우선순위를 가져가면 혼잡도/VOE는 판단조차 되지 않는다.
+    assert "voe_summary" not in body
 
-    congestion = next(p for p in points if p["axis"] == "congestion")
-    assert "한식" in congestion["title"]
-    satisfaction = next(p for p in points if p["axis"] == "satisfaction")
-    assert "비인기저조메뉴" in satisfaction["title"]
-    voe = next(p for p in points if p["axis"] == "voe")
-    assert "위생" in voe["title"]
-    # 테스트 환경엔 사내 LLM이 설정돼 있지 않으므로 폴백 요약(원문 예시)이 붙는다 —
-    # 건수만이 아니라 실제 코멘트 내용도 함께 보여줘야 한다는 요청(2026-07)에 대응.
-    assert "voe_summary" in voe
-    assert "위생" in voe["voe_summary"]
+
+def test_improvement_points_falls_back_to_congestion_when_nothing_higher_priority(client):
+    """만족도/VOE/편성 신호가 전혀 없을 때만 4순위 혼잡도까지 내려간다."""
+
+    def eat(employee_id, corner_name, minute, taste="맛남", menu_name=None, eaten_date=MONDAY):
+        client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(eaten_date, dt.time(11, minute)).isoformat(),
+                        "employee_id": employee_id,
+                        "meal_type": "중식",
+                        "corner_name": corner_name,
+                        "menu_name": menu_name,
+                        "taste_score": taste,
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    # 한식: 식수 많지만(20명) 대부분 피크 밖이라 서브속도가 낮다 — 단, 평가는
+    # 전부 "맛남"이라 만족도 축은 트리거되지 않는다.
+    for i in range(2):
+        eat(f"H{i}", "한식", 45, menu_name="인기메뉴한식", taste="맛남")
+    for i in range(18):
+        client.post(
+            "/api/ingest/meal-log",
+            json={
+                "rows": [
+                    {
+                        "eaten_at": dt.datetime.combine(MONDAY, dt.time(13, i % 60)).isoformat(),
+                        "employee_id": f"H{i + 2}",
+                        "meal_type": "중식",
+                        "corner_name": "한식",
+                        "menu_name": "인기메뉴한식",
+                        "taste_score": "맛남",
+                    }
+                ]
+            },
+            headers=AUTH_HEADERS,
+        )
+    for i in range(5):
+        eat(f"I{i}", "일품", 46, menu_name="인기메뉴일품", taste="맛남")
+
+    resp = client.post(
+        "/api/analysis/daily-stats/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    resp = client.post(
+        "/api/analysis/menu-performance/recompute",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    resp = client.get(
+        "/api/dashboard/improvement-points",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "issue"
+    assert body["axis"] == "congestion"
+    assert body["area"] == "혼잡도"
+    assert "한식" in body["point"] or "한식" in body["evidence"]
 
 
 def test_list_weekly_menu_groups_main_and_sides_with_deadline(client):

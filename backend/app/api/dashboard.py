@@ -18,16 +18,13 @@ from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
 from app.models.stats import DailyDivisionStats, MenuPerformanceStats, MonthlyVoeCluster
 from app.services.holidays import DayClassification, HolidayService
 from app.services.improvement_points import (
-    build_planning_point,
     collect_planning_issues,
-    select_congestion_points,
-    select_satisfaction_points,
-    select_voe_points,
+    select_priority_finding,
+    summarize_priority_finding,
     summarize_voe_comments,
 )
 from app.services.llm_analysis import (
     KIND_MENU_TREND,
-    KIND_PLANNING_NOTICE,
     KIND_VOE_BRIEFING,
     _collect_voe_briefing_facts,
     get_cached,
@@ -664,21 +661,23 @@ def menu_highlights(db: Session = Depends(get_db)):
 
 @router.get("/improvement-points")
 async def improvement_points(period_start: dt.date, period_end: dt.date, db: Session = Depends(get_db)):
-    """홈 현황 "개선 포인트" — 혼잡도/만족도/VOE/편성·운영 네 축에서 지금 손볼 만한 지점.
+    """홈 현황 "개선 필요 포인트" (2026-08 담당자 프롬프트로 전면 교체).
 
-    편성 축(2026-08)은 앞의 셋과 성격이 다르다. 앞의 셋은 "이미 벌어진 결과"이고
-    편성 축은 "다음 주 식단을 짜기 전에 고칠 것"이다 — 과다 편성, 편성만 되고
-    취식이 0인 메뉴, 한 끼 구성 중복. 사실 수집은 순수 함수
-    (`improvement_points.collect_planning_issues`)가 하고, LLM은 새벽 배치가 만들어
-    둔 캐시에서 문장만 가져온다(§53). 캐시가 비어도 사실 나열로 폴백한다.
+    예전엔 혼잡도/만족도/VOE/편성·운영 네 축에서 각각 최대 몇 건씩 뽑아
+    리스트로 보여줬다. 이제는 담당자가 지정한 우선순위(만족도 → VOE →
+    편성·운영 → 혼잡도)로 검토해 **가장 급한 이슈 하나만** 보여준다 — 어느
+    축에서도 유의미한 이슈가 없으면 "특이사항 없음"(status: "no_issue").
+    우선순위 판정은 `improvement_points.select_priority_finding`(순수 함수),
+    문구 다듬기는 `summarize_priority_finding`(LLM + 폴백)이 담당한다.
 
     전부 이미 계산된 값을 재사용한다: 코너 통계(`analysis.py::corner_analysis`),
     메뉴 4분면(`analysis.py::menu_performance` — 사전에 recompute가 돼 있어야
-    함), 이번 달/지난 달 VOE 카테고리 집계(`_compute_voe_by_category`).
+    함), 이번 달/지난 달 VOE 카테고리 집계(`_compute_voe_by_category`), 편성
+    사실(`_collect_planning_facts`).
 
-    VOE 포인트에는 해당 카테고리의 원문 코멘트 일부를 사내 LLM에 보내 만든
-    1~2문장 요약(voe_summary)을 덧붙인다 — 건수만으로는 "무슨 내용인지"를
-    알 수 없다는 피드백(2026-07)에 따른 것.
+    선정된 이슈가 VOE 축이면, 해당 카테고리의 원문 코멘트 일부를 사내 LLM에
+    보내 만든 1~2문장 요약(voe_summary)을 덧붙인다 — 건수만으로는 "무슨
+    내용인지"를 알 수 없다는 피드백(2026-07)에 따른 것.
     """
     corners = corner_analysis(period_start=period_start, period_end=period_end, db=db)
     menu_rows = menu_performance(period_start=period_start, period_end=period_end, db=db)
@@ -689,39 +688,35 @@ async def improvement_points(period_start: dt.date, period_end: dt.date, db: Ses
     current_voe = _compute_voe_by_category(db, current_month)
     prior_voe = _compute_voe_by_category(db, prior_month) if prior_month != current_month else None
 
-    points = [
-        *select_congestion_points(corners),
-        *select_satisfaction_points(menu_rows),
-        *select_voe_points(current_voe, prior_voe),
-    ]
-
-    # 편성·운영 축(2026-08 요청) — 이미 만들어 둔 순수 함수들의 결과를 재해석만
-    # 한다(§36.1 관례). LLM 요약은 새벽 배치가 캐시에 넣어 두고 여기선 읽기만
-    # 하므로, 이 축이 추가돼도 화면 로드가 느려지지 않는다.
     planning_issues: list[str] = []
     try:
         planning_issues = _collect_planning_facts(db, period_start, period_end)
     except Exception:
-        # 편성 축 하나가 실패해도 혼잡도/만족도/VOE는 살아 있어야 한다(§44 결론).
-        logger.exception("편성 축 사실 수집 실패 — 이 축만 건너뛴다")
-    if planning_issues:
-        cached = get_cached(db, KIND_PLANNING_NOTICE, "weekly")
-        planning_point = build_planning_point(planning_issues, cached.summary if cached else None)
-        if planning_point is not None:
-            points.append(planning_point)
+        # 편성 축 사실 수집이 실패해도 나머지 축은 판단할 수 있어야 한다(§44 결론).
+        logger.exception("편성 축 사실 수집 실패 — 편성 축 없이 판단한다")
 
-    comments_by_category = {
-        c["category"]: [entry["comment"] for entry in c["comments"]] for c in current_voe.get("categories", [])
-    }
+    finding = select_priority_finding(
+        corners=corners,
+        menu_rows=menu_rows,
+        current_voe=current_voe,
+        prior_voe=prior_voe,
+        planning_issues=planning_issues,
+    )
+    if finding is None:
+        return {"status": "no_issue"}
+
     settings = get_settings()
     llm_client = InternalLLMClient(settings)
+    result = await summarize_priority_finding(llm_client, finding)
+    response = {"status": "issue", "axis": finding.axis, **result}
 
-    results = []
-    for p in points:
-        entry = {"axis": p.axis, "title": p.title, "detail": p.detail, "severity": p.severity}
-        if p.axis == "voe" and p.voe_category:
-            entry["voe_summary"] = await summarize_voe_comments(
-                llm_client, p.voe_category, comments_by_category.get(p.voe_category, [])
-            )
-        results.append(entry)
-    return results
+    if finding.axis == "voe" and finding.voe_category:
+        comments_by_category = {
+            c["category"]: [entry["comment"] for entry in c["comments"]] for c in current_voe.get("categories", [])
+        }
+        voe_summary = await summarize_voe_comments(
+            llm_client, finding.voe_category, comments_by_category.get(finding.voe_category, [])
+        )
+        if voe_summary:
+            response["voe_summary"] = voe_summary
+    return response

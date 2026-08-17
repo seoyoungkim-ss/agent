@@ -8698,3 +8698,165 @@ if cached is None or "특정하기 어렵" in cached.summary:
   5. 사이드바 "다크 모드" 토글이 정상 동작하고 차트 색이 다크 토큰으로
      갱신됨을 확인.
 - 문서화(§109) 후 커밋·푸시.
+
+---
+
+# §110. "개선 필요 포인트" 우선순위 프롬프트로 전면 교체 (2026-08)
+
+## Context
+
+담당자가 "개선 필요 포인트 분석 프롬프트"라는 제목으로, 4개 축(만족도→
+VOE→편성·운영→혼잡도)을 우선순위대로 검토해 **가장 급한 이슈 하나만**
+"개선 필요 영역/핵심 개선 포인트/근거/개선 방향" 4단 형식으로 보여주는
+완전한 스펙을 전달했다. 지금까지의 "개선 필요 포인트" 카드(혼잡도·만족도·
+VOE·편성·운영 4개 축에서 각각 최대 몇 건씩, 최대 6건까지 리스트로 나열)와는
+선정 방식·출력 형식이 근본적으로 다르다.
+
+AskUserQuestion으로 범위를 확정했다 — 기존 리스트 카드를 이 방식으로
+**완전히 교체**한다(별도 카드 추가가 아님). 담당자가 준 텍스트가 카드
+이름과 정확히 일치하고, "메인 화면 출력 형식을 반드시 따른다"고 명시돼
+있어 자기완결적인 재설계 스펙임이 분명했다.
+
+이 레포의 기존 컨벤션(`llm_analysis.py` 상단 docstring, §44/§77 결론) —
+"사실 수집은 순수 함수로, LLM은 그 사실을 문장으로 다듬는 데만 쓴다" —
+을 그대로 따랐다. 우선순위 판정("1순위에 유의미한 이슈가 있으면 그것만")
+자체는 규칙 기반 순수 함수로 결정론적으로 구현하고(테스트로 정확히
+검증 가능해야 하므로), LLM은 그렇게 선택된 사실 하나를 담당자가 지정한
+4단 형식으로 다듬는 데만 쓴다 — LLM 미설정·실패 시에도 같은 형식의
+폴백 문구를 쓴다(이 앱의 다른 summarize_* 함수들과 동일 패턴).
+
+## 설계
+
+### 1. 우선순위 판정 — `backend/app/services/improvement_points.py` 전면 재작성
+
+기존 `ImprovementPoint`(다건 리스트용)를 `PriorityFinding`(단건) 데이터
+클래스로 교체하고, `select_congestion_points`/`select_satisfaction_points`/
+`select_voe_points`/`build_planning_point`를 `_find_*_finding` 4개로 다시
+짰다. `select_priority_finding()`이 `or` 체인으로 1순위부터 순서대로 평가해
+**가장 먼저 나온 것 하나만** 반환한다(`or`는 왼쪽이 falsy일 때만 오른쪽을
+평가하므로, 만족도에 이슈가 있으면 VOE/편성/혼잡도 함수 자체가 호출되지
+않는다 — "가장 급한 이슈 하나만"이 코드 구조로 강제된다):
+```python
+def select_priority_finding(*, corners, menu_rows, current_voe, prior_voe, planning_issues):
+    return (
+        _find_satisfaction_finding(corners, menu_rows)
+        or _find_voe_finding(current_voe, prior_voe)
+        or _find_planning_finding(planning_issues)
+        or _find_congestion_finding(corners)
+    )
+```
+
+각 축의 판정 기준(전부 담당자 프롬프트를 그대로 구현):
+- **만족도(1순위)**: 메뉴 4분면의 "개선시급"(수요 높고 만족도 낮음) 중
+  `adjusted_score`(표본 보정 완료, §86/§87)가 가장 낮은 메뉴를 우선.
+  "개선시급" 메뉴가 없으면 코너 단위로 내려가 전체 코너 평균보다 **0.3점
+  이상**(5점 만점 기준) 낮으면서 식수가 median 이상(표본 신뢰도 게이트)인
+  코너를 본다 — "단순히 낮은 것뿐 아니라 표본·전체 평균 대비 차이도
+  고려하라"는 지시를 코드로 반영. LOW_SAMPLE 메뉴는 애초에 4분면 분류에서
+  빠지므로(`classify_menu_quadrant`) 추가 필터링이 필요 없다.
+- **VOE(2순위)**: 카테고리(=유사 의견을 묶은 주제, `classify_voe_categories`
+  기존 로직 재사용)별 건수를 보되, **2건 미만인 카테고리는 후보에서
+  제외**한다 — "특정 의견 1건만으로 우선순위를 높이지 않는다"는 지시를
+  `_VOE_MIN_REPEAT_COUNT = 2`로 코드화. 지난달 대비 증가폭이 가장 큰
+  카테고리를 우선, 없으면 이번 달 최다 카테고리.
+- **편성·운영(3순위)**: 기존 `collect_planning_issues`(과다 반복 편성/
+  미취식 메뉴/슬롯 중복 — 전부 "사전에 정의된 편성 규칙" 위반) 결과가
+  있으면 그대로 이슈 하나로.
+- **혼잡도(4순위)**: 기존 로직 그대로 — 식수가 median 이상인 코너 중
+  피크타임 분당 서브(처리량)가 median보다 낮은 코너.
+
+### 2. 문구 다듬기 — 담당자 지정 4단 형식
+
+`_build_priority_prompt(finding)`이 선택된 이슈의 사실(영역/대상/근거/
+개선방향 힌트)을 LLM에 넘기며 정확히 "핵심 개선 포인트: .../근거: .../
+개선 방향: ..." 형식으로 답하도록 지시한다(사실에 없는 내용 금지, 과장·
+단정 표현 금지 — 프롬프트 원문 그대로). `_parse_priority_response`가
+그 3줄을 파싱해 `{area, point, evidence, direction}` dict로 만든다.
+LLM 미설정·호출 실패 시 `_fallback_priority_result`가 같은 4개 필드를
+결정론적으로 채운다(`point`는 "{대상} 개선이 필요합니다.", `evidence`/
+`direction`은 판정 단계에서 이미 만들어 둔 문장 그대로) — §44 결론대로
+LLM 실패가 카드를 죽이지 않는다.
+
+`select_priority_finding()`이 `None`(4개 축 전부 유의미한 이슈 없음)을
+반환하면 "데이터만으로 명확히 판단하기 어려우면 억지로 문제를 만들지
+말고 '특이사항 없음'"이라는 지시를 그대로 따라 `{"status": "no_issue"}`를
+반환한다.
+
+### 3. 엔드포인트 — `backend/app/api/dashboard.py::improvement_points`
+
+기존엔 최대 6개 포인트를 배열로 반환했지만, 이제 단일 객체를 반환한다:
+```json
+{"status": "no_issue"}
+```
+또는
+```json
+{"status": "issue", "axis": "satisfaction", "area": "만족도",
+ "point": "그린미트 코너 개선이 필요합니다.",
+ "evidence": "평균 만족도 3.16점 — 전체 코너 평균(4.00점)보다 낮습니다(누적 식수 125명).",
+ "direction": "이 코너의 메뉴 구성이나 조리 품질을 점검해보세요."}
+```
+축이 VOE면 기존처럼 `voe_summary`(해당 카테고리 원문 코멘트 요약)를
+덧붙인다 — 이 부분은 무변경.
+
+**오케스트레이션 정리**: 예전엔 편성·운영 축의 문구를 새벽 배치
+(`refresh_llm_analyses`)가 미리 계산해 `KIND_PLANNING_NOTICE` 캐시에
+넣어 두고 화면이 읽기만 했다. 이제는 우선순위 판정 직후 그 결과를 바로
+`summarize_priority_finding`으로 다듬으므로(요청당 LLM 호출 1회, 기존
+VOE 코멘트 요약과 같은 비용), 이 캐시를 읽는 곳이 없어졌다 — 배치
+단계·프롬프트 함수·폴백 함수·`KIND_PLANNING_NOTICE` 상수를 전부
+`llm_analysis.py`에서 삭제했다(죽은 코드 방치 금지, §85/§227 관례).
+
+### 4. 프론트 — `frontend/src/api/client.ts` + `HomePage.tsx`
+
+`ImprovementPoint[]` 타입을 `ImprovementPriorityResult`(단일 객체,
+`status`/`axis`/`area`/`point`/`evidence`/`direction`/`voe_summary`)로
+교체. "개선 필요 포인트" 카드는 리스트(`<ul>` + `divide-y`)를 걷어내고
+단일 항목 레이아웃(축 아이콘 배지 + "개선 필요 영역: .../핵심 포인트/
+근거/개선 방향" 4줄)으로 재작성. §107이 추가했던 "시간 기준" 안내
+문구는 이제 의미가 달라져(리스트가 아니라 우선순위 캐스케이드) "우선순위:
+만족도 → VOE → 편성·운영 → 혼잡도 순으로 검토해 가장 급한 이슈 하나만
+보여줍니다"로 교체했다. `status === "no_issue"`일 때는 기존과 같은
+자리에 "특이사항 없음" 한 줄만(문구는 프롬프트 원문 그대로).
+
+## 손대지 않는 것 (교차 확인)
+
+- `corner_analysis`/`menu_performance`/`_compute_voe_by_category`/
+  `_collect_planning_facts` — 전부 기존 계산 로직 그대로 재사용, 이번
+  라운드는 그 결과를 어떻게 "고르고 보여줄지"만 바꿨다.
+- `summarize_voe_comments`(VOE 카테고리 원문 코멘트 1~2문장 요약) —
+  무변경, VOE 축이 선택됐을 때 그대로 재사용.
+- `summarize_menu_trend`/`summarize_voe_briefing`(메뉴 하이라이트 원인,
+  VOE AI 브리핑) — 이번 라운드와 무관, 무변경.
+- `menu_highlights` 엔드포인트와 그 "원인" 캐시(`KIND_MENU_TREND`,
+  §109에서 다룬 "특정하기 어렵다" 숨김 처리) — 무변경.
+- `MenuPerformanceStats`/`DailyCornerStats` 등 하부 계산 테이블·배치
+  스케줄 — 무변경, `refresh_llm_analyses`에서 편성 notice 단계만 삭제.
+
+## 테스트/검증
+
+- `backend/tests/test_improvement_points.py` 전면 재작성 — 4개
+  `_find_*_finding` 각각의 선정/제외 조건(표본 게이트, 1건 무시, 근소한
+  차이 무시 등)과 `select_priority_finding`의 캐스케이드 순서(1순위가
+  있으면 나머지는 검토되지 않음, 전부 없으면 None)를 직접 검증. 최초
+  구현에서 코너 단위 만족도 폴백이 근소한 차이(0.1점)에도 반응해 테스트가
+  실패했다 — 5점 만점 기준 0.3점 미만 차이는 "억지로 문제를 만들지 말라"
+  원칙에 따라 무시하도록 `_CORNER_SATISFACTION_GAP_THRESHOLD` 게이트를
+  추가해 수정.
+- `backend/tests/test_llm_analysis.py` — 삭제된 편성 notice 관련 테스트
+  제거, `collect_planning_issues` 테스트는 test_improvement_points.py로
+  이동(중복 제거).
+- `backend/tests/test_api_ingest_and_analysis.py` — 기존 "3개 축이 배열에
+  동시에 들어있다" 테스트를 "만족도가 우선순위를 가져가 혼잡도·VOE 조건이
+  동시에 충족돼도 만족도 하나만 반환됨"과 "만족도 신호가 없을 때만 4순위
+  혼잡도까지 내려감" 두 개로 교체 + "아무 이슈 없으면 no_issue" 신규 추가.
+- `pytest` 전체 574개 통과(로컬 Postgres 기동 상태 유지, venv 재사용).
+- `npx tsc -b` + `npx vite build` 클린.
+- **로컬 uvicorn + vite dev 서버 + 실제 개발 DB로 Playwright 라이브
+  검증**: `curl`로 실제 API 응답이 스펙 형식과 정확히 일치함을 먼저
+  확인(만족도 축 — 그린미트 코너, 근거에 실제 수치 포함), 그다음 홈
+  화면에서 새 카드가 "개선 필요 영역: 만족도" + 굵은 핵심 포인트 + 근거
+  + 개선 방향 4줄로 렌더링됨을 라이트/다크 모드 둘 다 스크린샷으로
+  확인(콘솔 에러 0건). `no_issue` 상태는 이 개발 DB의 실제 데이터로는
+  재현이 안 돼(항상 어떤 축이든 이슈가 있음) 코드 리뷰 + 백엔드
+  유닛테스트로 확인.
+- 문서화(§110) 후 커밋·푸시.

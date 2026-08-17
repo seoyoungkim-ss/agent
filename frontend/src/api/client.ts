@@ -146,11 +146,16 @@ export interface MenuHighlightsResponse {
   new_menus: NewMenuEntry[];
 }
 
-export interface ImprovementPoint {
-  axis: "congestion" | "satisfaction" | "voe" | "planning";
-  title: string;
-  detail: string;
-  severity: "warning" | "critical";
+// §109: 담당자 프롬프트로 전면 교체 — 4개 축을 우선순위(만족도→VOE→편성·
+// 운영→혼잡도)로 검토해 가장 급한 이슈 "하나만" 돌려준다(리스트가 아니다).
+// status가 "no_issue"면 axis/area/point/evidence/direction이 전부 없다.
+export interface ImprovementPriorityResult {
+  status: "issue" | "no_issue";
+  axis?: "satisfaction" | "voe" | "planning" | "congestion";
+  area?: string;
+  point?: string;
+  evidence?: string;
+  direction?: string;
   voe_summary?: string | null;
 }
 
@@ -739,7 +744,7 @@ export const api = {
   menuHighlights: () => request<MenuHighlightsResponse>("/dashboard/menu-highlights"),
 
   improvementPoints: (params: { period_start: string; period_end: string }) =>
-    request<ImprovementPoint[]>(`/dashboard/improvement-points${qs(params)}`),
+    request<ImprovementPriorityResult>(`/dashboard/improvement-points${qs(params)}`),
 
   cornerAnalysis: (params: {
     period_start: string;

@@ -4,7 +4,12 @@
 
 1. **메뉴 만족도 변화 원인** — "동태찌개가 4.03 → 4.27이 됐는데 왜?"
    (부찬 조합이 바뀌었나 / 계절이 달라졌나 / 다른 코너에 밀렸나)
-2. **편성·운영 문제 notice** — 개선 필요 포인트에 편성 축을 추가
+2. **VOE AI 브리핑** — 이번 달 주관식 의견을 주제별로 묶어 요약(§80)
+
+편성·운영 문제 notice(과거 2번)는 §109에서 삭제됐다 — "개선 필요 포인트"가
+우선순위 판정 즉시 그 결과를 LLM으로 다듬는 구조로 바뀌면서
+(`improvement_points.py::summarize_priority_finding`) 이 배치 캐시를 읽는
+곳이 없어졌다.
 
 **왜 배치인가**: 화면 로드마다 LLM을 부르면 지금도 느린 화면이 더 느려진다
 (§25의 판단과 같고, §50에서 "로딩되다 결과가 안 나온다"는 신고까지 겪은 뒤라
@@ -32,7 +37,6 @@ from app.services.llm_client import InternalLLMClient
 logger = logging.getLogger(__name__)
 
 KIND_MENU_TREND = "menu_trend"
-KIND_PLANNING_NOTICE = "planning_notice"
 KIND_VOE_BRIEFING = "voe_briefing"
 
 
@@ -230,47 +234,7 @@ async def summarize_menu_trend(llm_client: InternalLLMClient, facts: dict) -> tu
 
 
 # ---------------------------------------------------------------------------
-# 2. 편성·운영 문제 notice
-# ---------------------------------------------------------------------------
-
-
-def _build_planning_notice_prompt(facts: dict) -> str:
-    lines = ["구내식당 식단 편성에서 아래 문제가 관찰됐습니다."]
-    for item in facts["issues"]:
-        lines.append(f"- {item}")
-    lines.append("")
-    lines.append(
-        "담당자가 이번 주에 할 일이 드러나도록 한국어 한 문장으로 요약하세요. "
-        "위 사실에 없는 내용은 지어내지 마세요."
-    )
-    return "\n".join(lines)
-
-
-def _fallback_planning_notice(facts: dict) -> str:
-    issues = facts["issues"]
-    head = issues[0] if issues else "편성 관련 특이사항"
-    if len(issues) > 1:
-        return f"{head} 외 {len(issues) - 1}건 (자동 요약 미설정)"
-    return f"{head} (자동 요약 미설정)"
-
-
-async def summarize_planning_notice(llm_client: InternalLLMClient, facts: dict) -> str:
-    if not facts.get("issues"):
-        return ""
-    if not llm_client.is_configured:
-        return _fallback_planning_notice(facts)
-    try:
-        summary = await llm_client.chat_complete(
-            [{"role": "user", "content": _build_planning_notice_prompt(facts)}]
-        )
-        return summary.strip() or _fallback_planning_notice(facts)
-    except Exception:
-        logger.exception("편성 문제 notice 요약 실패 — 폴백 문구로 대체")
-        return _fallback_planning_notice(facts)
-
-
-# ---------------------------------------------------------------------------
-# 3. VOE AI 브리핑 (§80)
+# 2. VOE AI 브리핑 (§80)
 # ---------------------------------------------------------------------------
 # 담당자: "네이버 리뷰 AI 브리핑처럼 주관식 VoE 요약" — 기존 `summarize_voe_comments`
 # (improvement_points.py)는 카테고리 1개(가장 변화 큰 항목)의 코멘트 10개만
@@ -348,18 +312,23 @@ async def summarize_voe_briefing(llm_client: InternalLLMClient, facts: dict) -> 
 async def refresh_llm_analyses(
     db: Session, *, period_start: dt.date, period_end: dt.date
 ) -> dict[str, int]:
-    """새벽 배치에서 호출 — 메뉴 만족도 변화 원인 + 편성 notice를 미리 계산한다.
+    """새벽 배치에서 호출 — 메뉴 만족도 변화 원인을 미리 계산한다.
+
+    §109 이전엔 편성·운영 notice도 여기서 미리 계산해 캐시에 넣어 뒀지만,
+    "개선 필요 포인트"가 우선순위 판정 직후 그 결과를 바로 LLM으로 다듬는
+    구조로 바뀌면서(`improvement_points.py::summarize_priority_finding`) 그
+    캐시를 읽는 곳이 없어져 이 배치 단계 자체를 삭제했다.
 
     지연 임포트: dashboard/analysis가 이 모듈을 임포트하므로 모듈 최상단에서
     되가져오면 순환이 된다(레포에 이미 있는 패턴 — weekly_menu_prediction 참고).
     """
-    from app.api.dashboard import _collect_planning_facts, menu_highlights
+    from app.api.dashboard import menu_highlights
     from app.config import get_settings
 
     llm_client = InternalLLMClient(get_settings())
-    counts = {"menu_trend": 0, "planning_notice": 0}
+    counts = {"menu_trend": 0}
 
-    # 1) 만족도가 눈에 띄게 변한 메뉴들
+    # 만족도가 눈에 띄게 변한 메뉴들
     try:
         # menu_highlights는 기간 인자를 안 받는다 — 자체 180일 창을 쓴다(§28).
         # 배치의 period_*는 "이 분석이 언제 기준인지" 기록용으로만 넘긴다.
@@ -398,24 +367,5 @@ async def refresh_llm_analyses(
             counts["menu_trend"] += 1
     except Exception:
         logger.exception("메뉴 만족도 변화 원인 배치 실패")
-
-    # 2) 편성·운영 notice
-    try:
-        issues = _collect_planning_facts(db, period_start, period_end)
-        if issues:
-            facts = {"issues": issues}
-            summary = await summarize_planning_notice(llm_client, facts)
-            save_analysis(
-                db,
-                kind=KIND_PLANNING_NOTICE,
-                subject_key="weekly",
-                period_start=period_start,
-                period_end=period_end,
-                summary=summary,
-                facts=facts,
-            )
-            counts["planning_notice"] += 1
-    except Exception:
-        logger.exception("편성 notice 배치 실패")
 
     return counts

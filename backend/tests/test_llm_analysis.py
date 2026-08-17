@@ -10,7 +10,6 @@ import datetime as dt
 import pytest
 
 from app.config import Settings, get_settings
-from app.services.improvement_points import build_planning_point, collect_planning_issues
 from app.services.llm_analysis import (
     KIND_MENU_TREND,
     KIND_VOE_BRIEFING,
@@ -18,14 +17,12 @@ from app.services.llm_analysis import (
     _build_voe_briefing_prompt,
     _collect_voe_briefing_facts,
     _fallback_menu_trend_summary,
-    _fallback_planning_notice,
     _fallback_voe_briefing,
     _recent_comments_for_menu,
     _side_dishes_for_menu_week,
     get_cached,
     save_analysis,
     summarize_menu_trend,
-    summarize_planning_notice,
     summarize_voe_briefing,
 )
 from app.services.llm_client import InternalLLMClient
@@ -156,61 +153,15 @@ async def test_menu_trend_keywords_empty_when_response_has_no_keyword_line(monke
     assert keywords == []
 
 
-@pytest.mark.asyncio
-async def test_planning_notice_returns_empty_when_no_issues():
-    client = InternalLLMClient(Settings(internal_llm_base_url=""))
-    assert await summarize_planning_notice(client, {"issues": []}) == ""
-
-
 def test_fallback_menu_trend_mentions_direction():
     assert "하락" in _fallback_menu_trend_summary(_facts(delta=-0.5))
     assert "상승" in _fallback_menu_trend_summary(_facts(delta=0.5))
 
 
-def test_fallback_planning_notice_counts_extra_issues():
-    text = _fallback_planning_notice({"issues": ["A", "B", "C"]})
-    assert "A" in text and "2건" in text
-
-
 # ---------------------------------------------------------------------------
-# 편성 축 사실 수집 (순수 함수)
-# ---------------------------------------------------------------------------
-
-
-def test_collect_planning_issues_is_empty_when_nothing_wrong():
-    assert collect_planning_issues(overused=[], no_intake_menus=[], clash_slot_count=0) == []
-
-
-def test_collect_planning_issues_mentions_each_signal():
-    issues = collect_planning_issues(
-        overused=[{"menu_name": "김치", "count": 4}],
-        no_intake_menus=[{"menu_name": "아무도안먹은메뉴"}],
-        clash_slot_count=2,
-    )
-    assert len(issues) == 3
-    assert any("김치" in i for i in issues)
-    assert any("표기 불일치" in i for i in issues)
-    assert any("2건" in i for i in issues)
-
-
-def test_build_planning_point_is_none_without_issues():
-    assert build_planning_point([], None) is None
-
-
-def test_build_planning_point_uses_llm_summary_when_available():
-    point = build_planning_point(["A", "B"], "LLM이 다듬은 한 문장")
-    assert point is not None
-    assert point.axis == "planning"
-    assert point.detail == "LLM이 다듬은 한 문장"
-
-
-def test_build_planning_point_falls_back_to_raw_facts():
-    """LLM 요약이 없으면 사실을 그대로 보여준다 — 빈 카드보다 낫다."""
-    point = build_planning_point(["A", "B"], None)
-    assert point is not None
-    assert "A" in point.detail and "B" in point.detail
-
-
+# 편성 축 사실 수집(`collect_planning_issues`)과 편성 이슈 판정/문구 다듬기는
+# §109부터 improvement_points.py로 통합돼 test_improvement_points.py에서
+# 검증한다 — 여기서는 메뉴 만족도 원인/VOE 브리핑만 다룬다.
 # ---------------------------------------------------------------------------
 # §77: 하이라이트 프롬프트 — 실제 코멘트 + 부찬 조합 배선
 #
