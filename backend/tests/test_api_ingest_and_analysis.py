@@ -2119,6 +2119,68 @@ def test_menu_comments_unknown_menu_returns_404(client):
     assert resp.status_code == 404
 
 
+def test_menu_appearance_history_returns_dates_with_running_average(client):
+    """§104: menu_history()의 기간 스냅샷 대신 실제 등장일별 평균 + 누적
+    (러닝) 평균을 반환한다 — "금주 메뉴 VOE 상세" 아코디언용."""
+    day2 = MONDAY + dt.timedelta(days=1)
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY, menu_name="제육볶음")
+    _ingest_meal_log(client, "E2", "맛남", eaten_date=MONDAY, menu_name="제육볶음")
+    _ingest_meal_log(client, "E3", "개선", eaten_date=day2, menu_name="제육볶음")
+
+    resp = client.get("/api/dashboard/menu-appearance-history/제육볶음")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [row["date"] for row in body] == [day2.isoformat(), MONDAY.isoformat()]  # 최신순
+
+    monday_row = next(r for r in body if r["date"] == MONDAY.isoformat())
+    assert monday_row["avg_score"] == pytest.approx(5.0)
+    assert monday_row["cumulative_avg_score"] == pytest.approx(5.0)
+
+    day2_row = next(r for r in body if r["date"] == day2.isoformat())
+    assert day2_row["avg_score"] == pytest.approx(1.0)
+    assert day2_row["cumulative_avg_score"] == pytest.approx((5 + 5 + 1) / 3, abs=1e-2)
+
+
+def test_menu_appearance_history_unknown_menu_returns_404(client):
+    resp = client.get("/api/dashboard/menu-appearance-history/없는메뉴")
+    assert resp.status_code == 404
+
+
+def test_aggregate_menu_performance_upserts_single_row_per_menu(client, db_session):
+    """§104: 나이트 배치는 매일 롤링 윈도우를 1일씩 밀며 재계산하는데, 예전엔
+    (period_start, period_end, menu_id)가 정확히 일치해야만 "기존 행"으로
+    갱신해서 매번 새 행이 쌓였다(2026-08 "VoE 상세 기간이 이상하게 나옴"
+    신고의 근본 원인). 이제는 menu_id만으로 최근 행을 찾아 갱신해 메뉴당
+    항상 1행만 남아야 한다."""
+    from app.models.master import MenuMaster
+    from app.models.stats import MenuPerformanceStats
+
+    _ingest_meal_log(client, "E1", "맛남", eaten_date=MONDAY, menu_name="제육볶음")
+    _ingest_meal_log(client, "E2", "개선", eaten_date=MONDAY, menu_name="제육볶음")
+
+    first_end = MONDAY
+    resp = client.post(
+        "/api/analysis/menu-performance/recompute",
+        params={"period_start": (first_end - dt.timedelta(days=180)).isoformat(), "period_end": first_end.isoformat()},
+    )
+    assert resp.status_code == 200
+
+    second_end = MONDAY + dt.timedelta(days=1)  # 나이트 배치가 다음날 1일 밀어 재계산하는 것과 동일
+    resp = client.post(
+        "/api/analysis/menu-performance/recompute",
+        params={
+            "period_start": (second_end - dt.timedelta(days=180)).isoformat(),
+            "period_end": second_end.isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+
+    menu_id = db_session.query(MenuMaster.menu_id).filter_by(menu_name="제육볶음").scalar()
+    rows = db_session.query(MenuPerformanceStats).filter_by(menu_id=menu_id).all()
+    assert len(rows) == 1
+    assert rows[0].period_end == second_end
+
+
 def test_corner_meal_type_headcount_matches_report_layout(client):
     """§91: 코너별 조식/중식/석식 식수 현황 — 담당자가 준 리포트 양식.
 

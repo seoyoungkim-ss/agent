@@ -47,3 +47,10 @@ export function isoDaysAgo(days: number): string {
 export function currentMonday(): string {
   return mondayOf(new Date());
 }
+
+/** 두 "YYYY-MM-DD" 사이의 일수(양끝 포함). */
+export function daysBetweenInclusive(startIso: string, endIso: string): number {
+  const start = new Date(`${startIso}T00:00:00`).getTime();
+  const end = new Date(`${endIso}T00:00:00`).getTime();
+  return Math.round((end - start) / 86_400_000) + 1;
+}

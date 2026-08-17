@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { LucideIcon } from "lucide-react";
-import { Bot, CloudSun, LayoutDashboard, MessageSquareHeart, Settings, UtensilsCrossed } from "lucide-react";
+import { Bot, CloudSun, LayoutDashboard, MessageSquareHeart, Moon, Settings, Sun, UtensilsCrossed } from "lucide-react";
 import { HomePage } from "./pages/HomePage";
 import { AdminPage, MenuPlanningPage, SatisfactionVoePage, SimulationPage } from "./pages/AnalysisPage";
 import { ChatPage } from "./pages/ChatPage";
 import { WeeklyMenuVoeDetailPage } from "./pages/WeeklyMenuVoeDetailPage";
+import { WeeklyRuleCheckDetailPage } from "./pages/WeeklyRuleCheckDetailPage";
+import { applyTheme, getInitialTheme, type Theme } from "./lib/theme";
 
 // 담당자 협의에서 정한 5개 축으로 재편(2026-08). 기존 "분석" 탭(서브탭 5개)과
 // "시뮬레이션" 탭은 없어졌다 — 시뮬레이션의 실질 입력이던 "사내 행사" 토글은
@@ -12,9 +14,18 @@ import { WeeklyMenuVoeDetailPage } from "./pages/WeeklyMenuVoeDetailPage";
 // §81: 날씨 관련 화면은 "시뮬레이션" 탭으로 다시 분리했다 — 위 흡수 결정은
 // 그대로 두고(사내 행사 토글은 복원하지 않음), 날씨 콘텐츠만 별도 탭으로
 // 옮겨달라는 명시적 요청이라 이 부분만 되돌린다.
-// "weekly-voe"는 사이드바 내비게이션엔 안 보이는 화면 — 홈의 "금주 메뉴 과거
-// VOE" 카드를 클릭했을 때만 진입한다(뒤로가기 버튼으로 홈에 복귀).
-type Tab = "home" | "menu-planning" | "simulation" | "satisfaction" | "chat" | "admin" | "weekly-voe";
+// "weekly-voe"/"weekly-rule-check"는 사이드바 내비게이션엔 안 보이는 화면 —
+// 홈의 "금주 메뉴 과거 VOE"/"금주 메뉴 편성 규칙 이상 여부" 카드를 클릭했을
+// 때만 진입한다(뒤로가기 버튼으로 홈에 복귀).
+type Tab =
+  | "home"
+  | "menu-planning"
+  | "simulation"
+  | "satisfaction"
+  | "chat"
+  | "admin"
+  | "weekly-voe"
+  | "weekly-rule-check";
 
 const TABS: { value: Tab; label: string; icon: LucideIcon }[] = [
   { value: "home", label: "현황", icon: LayoutDashboard },
@@ -27,9 +38,14 @@ const TABS: { value: Tab; label: string; icon: LucideIcon }[] = [
 
 function App() {
   const [tab, setTab] = useState<Tab>("home");
-  // 홈에서 "금주 메뉴 과거 VOE"를 누른 시점의 주. 탭 전환은 상태 하나로만
-  // 이뤄지고 라우터/URL이 없어서, 주차가 흐를 통로를 여기 둔다.
+  // 홈에서 "금주 메뉴 과거 VOE"/"금주 메뉴 편성 규칙 이상 여부"를 누른 시점의
+  // 주. 탭 전환은 상태 하나로만 이뤄지고 라우터/URL이 없어서, 주차가 흐를
+  // 통로를 여기 둔다.
   const [weeklyVoeMonday, setWeeklyVoeMonday] = useState<string | undefined>(undefined);
+  const [weeklyRuleCheckMonday, setWeeklyRuleCheckMonday] = useState<string | undefined>(undefined);
+  // §104: 수동 다크모드 토글 — 저장된 선택 없으면 시스템 설정을 따른다.
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+  useEffect(() => applyTheme(theme), [theme]);
 
   return (
     <div className="flex min-h-screen" style={{ background: "var(--page)", color: "var(--ink)" }}>
@@ -59,6 +75,16 @@ function App() {
             );
           })}
         </nav>
+        <div className="mt-auto pt-4">
+          <button
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-[13px] font-medium transition-colors"
+            style={{ color: "var(--ink-secondary)" }}
+          >
+            {theme === "dark" ? <Sun size={17} strokeWidth={2} /> : <Moon size={17} strokeWidth={2} />}
+            {theme === "dark" ? "라이트 모드" : "다크 모드"}
+          </button>
+        </div>
       </aside>
       <main className="flex-1 px-8 py-8">
         <div className="max-w-6xl">
@@ -70,6 +96,10 @@ function App() {
                 setWeeklyVoeMonday(monday);
                 setTab("weekly-voe");
               }}
+              onOpenWeeklyRuleCheck={(monday) => {
+                setWeeklyRuleCheckMonday(monday);
+                setTab("weekly-rule-check");
+              }}
             />
           )}
           {tab === "menu-planning" && <MenuPlanningPage />}
@@ -79,6 +109,9 @@ function App() {
           {tab === "admin" && <AdminPage />}
           {tab === "weekly-voe" && (
             <WeeklyMenuVoeDetailPage monday={weeklyVoeMonday} onBack={() => setTab("home")} />
+          )}
+          {tab === "weekly-rule-check" && (
+            <WeeklyRuleCheckDetailPage monday={weeklyRuleCheckMonday} onBack={() => setTab("home")} />
           )}
         </div>
       </main>

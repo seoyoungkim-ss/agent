@@ -26,7 +26,7 @@ import {
   useChartTheme,
 } from "../components/ui";
 import { CornerMetricComparisonSection } from "./AnalysisPage";
-import { addDays, isoDaysAgo, mondayOf } from "../lib/week";
+import { addDays, daysBetweenInclusive, isoDaysAgo, mondayOf, toIsoDate } from "../lib/week";
 import { CornerLogo } from "../components/CornerLogo";
 
 // 니치 코너(Take Out/미캠회관/그린미트)를 범례에서 기본 숨기던 규칙은 제거됐다
@@ -146,7 +146,13 @@ function MenuTrendList({ rows, tone }: { rows: MenuTrendEntry[]; tone: "good" | 
   );
 }
 
-export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: string) => void }) {
+export function HomePage({
+  onOpenWeeklyVoe,
+  onOpenWeeklyRuleCheck,
+}: {
+  onOpenWeeklyVoe?: (monday: string) => void;
+  onOpenWeeklyRuleCheck?: (monday: string) => void;
+}) {
   const [classification, setClassification] = useState<Classification | "전체">("전체");
   // 조식만 체크하면 조식 기준, 조식+중식 체크하면 둘을 합친 식수 — 최소 1개는
   // 항상 체크돼 있어야 한다(다 끄면 "전체 합산"과 구분이 안 돼 혼동됨, 2026-07).
@@ -334,12 +340,25 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
     if (ids.length > 0) setTrendCornerIds(ids);
   }, [cornerListQuery.data]);
 
+  // §104: 선택한 기간이 기간 단위 하나(주 7일/월 28일)보다 짧으면 여러 날이
+  // 같은 버킷(같은 ISO 주 월요일 또는 같은 "YYYY-MM")으로 접혀 x축이
+  // 하나로 뭉쳐 보인다("5일 골라도 하루치만 나옴" 신고) — 이럴 땐 실제
+  // 조회에만 일 단위로 자동 전환한다(SegmentedControl에 보이는 선택 자체는
+  // 안 바뀜). 백엔드 headcount_trend/_period_bucket은 무변경 — "daily"는
+  // 이미 지원되는 값이다.
+  const trendRangeDays = daysBetweenInclusive(trendPeriodStart, trendPeriodEnd);
+  const effectiveTrendGranularity: Granularity =
+    (trendGranularity === "weekly" && trendRangeDays < 7) ||
+    (trendGranularity === "monthly" && trendRangeDays < 28)
+      ? "daily"
+      : trendGranularity;
+
   const headcountTrend = useQuery({
     queryKey: [
       "headcount-trend",
       trendPeriodStart,
       trendPeriodEnd,
-      trendGranularity,
+      effectiveTrendGranularity,
       trendGroupBy,
       mealTypeFilter.join("|"),
       trendCornerIds.join("|"),
@@ -350,7 +369,7 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
       api.headcountTrend({
         period_start: trendPeriodStart,
         period_end: trendPeriodEnd,
-        granularity: trendGranularity,
+        granularity: effectiveTrendGranularity,
         group_by: trendGroupBy,
         meal_types: mealTypeFilter,
         corner_ids: trendCornerIds.length > 0 ? trendCornerIds : undefined,
@@ -363,12 +382,12 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
   // 전체 식수를 보여달라는 요청(2026-08)이라, 위 headcountTrend와 별개로
   // 아무 필터도 안 걸고 group_by="total"만 써서 부른다.
   const totalHeadcountTrend = useQuery({
-    queryKey: ["headcount-trend-total", trendPeriodStart, trendPeriodEnd, trendGranularity],
+    queryKey: ["headcount-trend-total", trendPeriodStart, trendPeriodEnd, effectiveTrendGranularity],
     queryFn: () =>
       api.headcountTrend({
         period_start: trendPeriodStart,
         period_end: trendPeriodEnd,
-        granularity: trendGranularity,
+        granularity: effectiveTrendGranularity,
         group_by: "total",
       }),
   });
@@ -615,9 +634,10 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
           value={
             weeklyRuleCheckQuery.isLoading ? "…" : ruleViolationCount > 0 ? `이상 ${ruleViolationCount}건` : "이상 없음"
           }
-          sub="해장·면류·매운맛 편성 기준 + 저조 식수 재편성"
+          sub="해장·면류·매운맛 편성 기준 + 저조 식수 재편성 · 클릭하면 상세를 볼 수 있어요"
           tone={weeklyRuleCheckQuery.isLoading ? undefined : ruleViolationCount > 0 ? "critical" : "good"}
           trend={weeklyRuleCheckQuery.isLoading ? undefined : ruleViolationTrend}
+          onClick={onOpenWeeklyRuleCheck ? () => onOpenWeeklyRuleCheck(selectedMonday) : undefined}
         />
       </div>
 
@@ -707,6 +727,22 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
                 {preset.label}
               </button>
             ))}
+            {trendGranularity === "monthly" && (
+              <input
+                type="month"
+                value={trendPeriodStart.slice(0, 7)}
+                max={isoDaysAgo(0).slice(0, 7)}
+                onChange={(e) => {
+                  if (!e.target.value) return;
+                  const [y, m] = e.target.value.split("-").map(Number);
+                  const lastDay = toIsoDate(new Date(y, m, 0)); // 다음달 0일 = 이번달 마지막날
+                  setTrendPeriodStart(`${e.target.value}-01`);
+                  setTrendPeriodEnd(lastDay > isoDaysAgo(0) ? isoDaysAgo(0) : lastDay);
+                }}
+                className="rounded-md border px-2 py-1.5 text-[13px]"
+                style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+              />
+            )}
           </div>
         </div>
         <div className="mb-3 flex flex-wrap items-center gap-4">
@@ -720,6 +756,11 @@ export function HomePage({ onOpenWeeklyVoe }: { onOpenWeeklyVoe?: (monday: strin
               ]}
               onChange={setTrendGranularity}
             />
+            {trendGranularity !== effectiveTrendGranularity && (
+              <span className="text-xs" style={{ color: "var(--ink-muted)" }}>
+                선택 기간이 짧아 일 단위로 표시 중
+              </span>
+            )}
           </label>
           <label className="flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
             나누기

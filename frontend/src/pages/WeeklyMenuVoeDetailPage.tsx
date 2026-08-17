@@ -39,8 +39,8 @@ export function WeeklyMenuVoeDetailPage({
   ];
 
   const historyQuery = useQuery({
-    queryKey: ["weekly-voe-detail-history", expandedMenu],
-    queryFn: () => api.menuHistory(expandedMenu as string),
+    queryKey: ["weekly-voe-detail-appearance-history", expandedMenu],
+    queryFn: () => api.menuAppearanceHistory(expandedMenu as string),
     enabled: !!expandedMenu,
   });
   const commentsQuery = useQuery({
@@ -102,19 +102,17 @@ export function WeeklyMenuVoeDetailPage({
                         <table className="w-full text-[13px]">
                           <thead>
                             <tr style={{ color: "var(--ink-muted)" }}>
-                              <th className="py-1 text-left font-medium">기간</th>
-                              <th className="py-1 text-right font-medium">만족도</th>
-                              <th className="py-1 text-right font-medium">평가건수</th>
+                              <th className="py-1 text-left font-medium">날짜</th>
+                              <th className="py-1 text-right font-medium">그날 만족도</th>
+                              <th className="py-1 text-right font-medium">누적 평균 만족도</th>
                             </tr>
                           </thead>
                           <tbody>
                             {historyQuery.data.map((h, i) => (
                               <tr key={i} className="border-t" style={{ borderColor: "var(--border)" }}>
-                                <td className="py-1">
-                                  {h.period_start} ~ {h.period_end}
-                                </td>
-                                <td className="py-1 text-right">{h.adjusted_score?.toFixed(2) ?? "-"}</td>
-                                <td className="py-1 text-right">{h.evaluation_count}</td>
+                                <td className="py-1">{h.date}</td>
+                                <td className="py-1 text-right">{h.avg_score?.toFixed(2) ?? "-"}</td>
+                                <td className="py-1 text-right">{h.cumulative_avg_score?.toFixed(2) ?? "-"}</td>
                               </tr>
                             ))}
                           </tbody>

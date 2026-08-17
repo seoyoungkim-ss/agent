@@ -2,13 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import clsx from "clsx";
-import { AlertTriangle, CheckCircle2, X } from "lucide-react";
 import {
   api,
   type Classification,
   type CornerAnalysisRow,
-  type DailyMenuPlanRuleResult,
-  type LowHeadcountViolation,
   type MealType,
   type MenuFoodVectorRow,
   type MenuPerformanceRow,
@@ -23,6 +20,7 @@ import {
   type WeeklyMenuPlanItem,
   type WeeklyMenuSlot,
 } from "../api/client";
+import { buildDailyRuleCard, buildLowHeadcountRuleCard, RuleCard, type RuleCardConfig } from "../components/RuleCard";
 import {
   Badge,
   Button,
@@ -1350,10 +1348,6 @@ function PredictedImpactPanel({ planId }: { planId: number }) {
   );
 }
 
-// §78: 규칙검증 패널이 월~금만 보여줄 때 쓰는 라벨 — weekdayDates는 월~토
-// 6일이라 앞 5개만 슬라이스해서 짝을 맞춘다.
-const WEEKDAY_LABELS_MON_FRI = ["월", "화", "수", "목", "금"];
-
 function WeeklyMenuReviewTab() {
   const chartTheme = useChartTheme();
   const [selectedMonday, setSelectedMonday] = useState(weeklyMondayOf(new Date()));
@@ -1576,192 +1570,35 @@ function WeeklyMenuReviewTab() {
     );
   }
 
-  type RuleDayStatus = { ok: boolean; count?: number; limit?: number | null };
-
-  // §103: 규칙 검증 패널을 카드 4개로 통일해 그리기 위한 공통 설정.
-  // isCountType(면류/매운맛처럼 "하루 최대 N개")만 격자 요일 헤더에
-  // "N/M개 초과" 배지를 얹는다 — 부재형 규칙(해장 최소 1개)이나 개별
-  // 매치 기반 규칙(저조 식수 재사용)은 특정 초과분을 셀 수 없어 배지가
-  // 의미가 없다.
-  type RuleCardConfig = {
-    key: string;
-    label: string;
-    ok: boolean;
-    isCountType: boolean;
-    dayResults: Map<string, RuleDayStatus>;
-    highlightMatches: { plan_date: string; corner_id: number }[];
-    chips: { match: { plan_date: string; corner_id: number }; label: string; renderKey: string | number }[];
-    unclickableNotes?: { key: string | number; label: string }[];
-  };
-
-  function buildDailyRuleCard(
-    key: string,
-    label: string,
-    results: DailyMenuPlanRuleResult[],
-    opts: { isCountType: boolean; highlightFullDayOnViolation?: boolean }
-  ): RuleCardConfig {
-    const dayResults = new Map<string, RuleDayStatus>(
-      results.map((r) => [r.plan_date, { ok: r.ok, count: r.count, limit: r.limit }])
-    );
-    const violatingDays = results.filter((r) => !r.ok);
-    const realMatches = violatingDays.flatMap((r) => r.matches);
-    // "해장 최소 1개"처럼 위반이 특정 메뉴의 존재가 아니라 부재라서 matches가
-    // 항상 비어있는 규칙은(그날 해장 메뉴가 0개라 predicate에 걸리는 슬롯
-    // 자체가 없음), 실제 matches 대신 그날 전체 슬롯을 격자 하이라이트
-    // 대상으로 써야 클릭했을 때 뭔가 강조된다. 다만 이 경우 카드를 펼쳐도
-    // "이 메뉴가 위반"이라고 짚을 수 있는 게 없어 칩 목록(chips)은 비워둔다.
-    const highlightMatches = opts.highlightFullDayOnViolation
-      ? violatingDays.flatMap((r) =>
-          slots
-            .filter((s) => s.plan_date === r.plan_date)
-            .map((s) => ({ plan_date: s.plan_date, corner_id: s.corner_id }))
-        )
-      : realMatches;
-    return {
-      key,
-      label,
-      ok: violatingDays.length === 0,
-      isCountType: opts.isCountType,
-      dayResults,
-      highlightMatches,
-      chips: realMatches.map((m, i) => ({
-        match: m,
-        label: `${m.menu_name}(${m.corner_name}, ${m.plan_date.slice(5)})`,
-        renderKey: i,
-      })),
-    };
-  }
-
-  function buildLowHeadcountRuleCard(data: {
-    ok: boolean;
-    violations: LowHeadcountViolation[];
-  }): RuleCardConfig {
-    const violationDates = new Set<string>();
-    const highlightMatches: { plan_date: string; corner_id: number }[] = [];
-    const chips: RuleCardConfig["chips"] = [];
-    const unclickableNotes: { key: string | number; label: string }[] = [];
-    data.violations.forEach((v, vi) => {
-      if (v.matches.length === 0) {
-        unclickableNotes.push({
-          key: vi,
-          label: `${v.menu_name}(${v.corner_name}, 최근 평균 ${v.recent_avg_headcount}식)`,
-        });
-        return;
-      }
-      v.matches.forEach((m, mi) => {
-        violationDates.add(m.plan_date);
-        highlightMatches.push({ plan_date: m.plan_date, corner_id: m.corner_id });
-        chips.push({
-          match: m,
-          label: `${v.menu_name}(${v.corner_name}, 최근 평균 ${v.recent_avg_headcount}식, ${m.plan_date.slice(5)})`,
-          renderKey: `${vi}_${mi}`,
-        });
-      });
-    });
-    const dayResults = new Map<string, RuleDayStatus>(
-      weekdayDates.slice(0, 5).map((d) => [d, { ok: !violationDates.has(d) }])
-    );
-    return {
-      key: "low_headcount",
-      label: "최근 저조 식수(200식 이하) 재편성",
-      ok: data.ok,
-      isCountType: false,
-      dayResults,
-      highlightMatches,
-      chips,
-      unclickableNotes,
-    };
-  }
-
-  // §103: PASS/FAIL 아이콘 + 요일 5개 dot + (펼쳤을 때만) 위반 칩을 보여주는
-  // 카드. 카드 클릭 = selectRule 호출 → 격자 하이라이트+스크롤+카드 펼침이
-  // 전부 activeRuleKey 하나로 동기화된다.
-  function renderRuleCard(cfg: RuleCardConfig) {
-    const isActive = activeRuleKey === cfg.key;
-    const hasViolations = !cfg.ok;
-    const hasExpandedContent = cfg.chips.length > 0 || (cfg.unclickableNotes?.length ?? 0) > 0;
-    return (
-      <div
-        key={cfg.key}
-        className="mb-2 rounded-xl border p-3 transition-colors"
-        style={{
-          borderColor: "var(--border)",
-          borderLeftColor: isActive ? "var(--rule-primary)" : "var(--border)",
-          borderLeftWidth: isActive ? 3 : 1,
-          background: "var(--surface)",
-        }}
-      >
-        <div className="flex items-center justify-between gap-3">
-          <button
-            className="flex flex-1 flex-wrap items-center gap-3 text-left disabled:cursor-default"
-            onClick={() => hasViolations && selectRule(cfg.key, cfg.highlightMatches)}
-            disabled={!hasViolations}
-            title={hasViolations ? "클릭하면 이번 주 위반을 격자에서 하이라이트합니다" : "이번 주 위반 없음"}
-          >
-            <span className="text-[13px] font-medium">{cfg.label}</span>
-            <span className="flex items-center gap-1">
-              {weekdayDates.slice(0, 5).map((d, i) => {
-                const day = cfg.dayResults.get(d);
-                const violated = day ? !day.ok : false;
-                return (
-                  <span
-                    key={d}
-                    title={`${WEEKDAY_LABELS_MON_FRI[i]}요일 ${violated ? "위반" : "통과"}`}
-                    className="h-2.5 w-2.5 shrink-0 rounded-full"
-                    style={{
-                      background: violated ? "var(--rule-decrease)" : "transparent",
-                      border: violated ? "none" : "1.5px solid var(--border-strong)",
-                    }}
-                  />
-                );
-              })}
-            </span>
-          </button>
-          <span className="flex shrink-0 items-center gap-2">
-            {cfg.ok ? (
-              <CheckCircle2 size={20} style={{ color: "var(--good)" }} />
-            ) : (
-              <AlertTriangle size={20} style={{ color: "var(--rule-decrease)" }} />
-            )}
-            {isActive && (
-              <button
-                onClick={() => selectRule(cfg.key, cfg.highlightMatches)}
-                style={{ color: "var(--ink-muted)" }}
-                title="선택 해제"
-              >
-                <X size={16} />
-              </button>
-            )}
-          </span>
-        </div>
-        {isActive && hasExpandedContent && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {cfg.chips.map((c) => renderMatchChip(c.match, c.label, c.renderKey))}
-            {cfg.unclickableNotes?.map((n) => (
-              <span key={n.key} className="text-xs" style={{ color: "var(--ink-muted)" }}>
-                {n.label}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
+  // §103/§104: RuleCardConfig 타입 + buildDailyRuleCard/buildLowHeadcountRuleCard
+  // 빌더 + RuleCard 렌더러는 frontend/src/components/RuleCard.tsx로 옮겨졌다 —
+  // 홈의 "금주 메뉴 편성 규칙 이상 여부" 타일에서 진입하는 새 단독 상세 화면
+  // (WeeklyRuleCheckDetailPage)도 같은 카드를 그려야 해서 공용 모듈로 뺐다.
 
   const ruleCards: RuleCardConfig[] = ruleCheckQuery.data
     ? [
-        buildDailyRuleCard("hangover", "해장 메뉴 (하루 최소 1개)", ruleCheckQuery.data.hangover, {
-          isCountType: false,
-          highlightFullDayOnViolation: true,
-        }),
-        buildDailyRuleCard("noodle", "면류 (하루 최대 4개)", ruleCheckQuery.data.noodle, { isCountType: true }),
+        buildDailyRuleCard(
+          "hangover",
+          "해장 메뉴 (하루 최소 1개)",
+          ruleCheckQuery.data.hangover,
+          { isCountType: false, highlightFullDayOnViolation: true },
+          slots
+        ),
+        buildDailyRuleCard(
+          "noodle",
+          "면류 (하루 최대 4개)",
+          ruleCheckQuery.data.noodle,
+          { isCountType: true },
+          slots
+        ),
         buildDailyRuleCard(
           "spicy_red_broth",
           "매운(빨간국물) (하루 최대 4개)",
           ruleCheckQuery.data.spicy_red_broth,
-          { isCountType: true }
+          { isCountType: true },
+          slots
         ),
-        buildLowHeadcountRuleCard(ruleCheckQuery.data.low_headcount_reuse),
+        buildLowHeadcountRuleCard(ruleCheckQuery.data.low_headcount_reuse, weekdayDates),
       ]
     : [];
 
@@ -1806,7 +1643,16 @@ function WeeklyMenuReviewTab() {
         {ruleCheckQuery.data && (
           <div className="mb-4 rounded-md border p-3" style={{ borderColor: "var(--border)" }}>
             <h3 className="mb-2 text-[13px] font-semibold">주간 편성 규칙 검증 (주중, 요일별)</h3>
-            {ruleCards.map(renderRuleCard)}
+            {ruleCards.map((cfg) => (
+              <RuleCard
+                key={cfg.key}
+                cfg={cfg}
+                isActive={activeRuleKey === cfg.key}
+                onToggle={() => selectRule(cfg.key, cfg.highlightMatches)}
+                renderMatchChip={renderMatchChip}
+                weekdayDates={weekdayDates}
+              />
+            ))}
           </div>
         )}
 

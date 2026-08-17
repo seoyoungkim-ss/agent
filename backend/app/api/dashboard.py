@@ -233,6 +233,45 @@ def menu_history(menu_name: str, db: Session = Depends(get_db)):
     ]
 
 
+@router.get("/menu-appearance-history/{menu_name}")
+def menu_appearance_history(menu_name: str, db: Session = Depends(get_db)):
+    """§104: 실제 등장일별 만족도 + 누적 평균 — "금주 메뉴 VOE 상세" 아코디언용.
+
+    menu_history()가 쓰는 MenuPerformanceStats는 나이트 배치가 만든 기간
+    스냅샷이라 "이 메뉴가 실제로 나온 날짜"를 보여주지 못한다(§104 배치 중복
+    버그) — meal_log를 date(eaten_at) 단위로 직접 묶어 등장일을 만든다.
+    """
+    menu = find_menu_by_name(db, menu_name)
+    if menu is None:
+        raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다")
+
+    rows = (
+        db.query(MealLog)
+        .filter(MealLog.menu_id == menu.menu_id)
+        .order_by(MealLog.eaten_at.asc())
+        .all()
+    )
+    by_date: dict[dt.date, list[MealLog]] = {}
+    for r in rows:
+        by_date.setdefault(r.eaten_at.date(), []).append(r)
+
+    cumulative_scores: list[float] = []
+    result = []
+    for date in sorted(by_date):
+        day_scores = [TASTE_SCORE_POINTS[r.taste_score] for r in by_date[date] if r.taste_score is not None]
+        day_avg = statistics.fmean(day_scores) if day_scores else None
+        cumulative_scores.extend(day_scores)
+        cumulative_avg = statistics.fmean(cumulative_scores) if cumulative_scores else None
+        result.append(
+            {
+                "date": date.isoformat(),
+                "avg_score": round(day_avg, 2) if day_avg is not None else None,
+                "cumulative_avg_score": round(cumulative_avg, 2) if cumulative_avg is not None else None,
+            }
+        )
+    return list(reversed(result))  # 최신 등장일이 위로
+
+
 @router.get("/menu-comments/{menu_name}")
 def menu_comments(menu_name: str, limit: int = 20, db: Session = Depends(get_db)):
     """PRD 5.2: 이번주 메뉴의 과거 VOE 원문 코멘트 — "금주 메뉴 VOE 상세" 화면용.

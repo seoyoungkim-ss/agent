@@ -259,16 +259,27 @@ def aggregate_menu_performance(
             has_loyal_following=has_loyal_following,
         )
 
+        # §104: 예전엔 (period_start, period_end, menu_id) 정확히 일치해야
+        # "기존 행"으로 봤는데, 나이트 배치의 180일 롤링 윈도우는 매일 1일씩
+        # 밀려 이 조합이 절대 다시 일치하지 않는다 — 매일 밤 메뉴당 새 행이
+        # 쌓여 menu_history()가 "기간이 이상하게 나옴" 버그로 이어졌다
+        # (2026-08). menu_id만으로 최근 행을 찾아 갱신한다 — 이 함수의 유일한
+        # 활성 writer인 나이트 배치가 메뉴당 최신 스냅샷 하나만 필요로 해서
+        # 안전하다(다른 기간의 스냅샷을 별도 보관해야 하는 호출자 없음).
         existing = (
             db.query(MenuPerformanceStats)
-            .filter_by(period_start=period_start, period_end=period_end, menu_id=menu_id)
-            .one_or_none()
+            .filter_by(menu_id=menu_id)
+            .order_by(MenuPerformanceStats.period_end.desc())
+            .first()
         )
         if existing is None:
             existing = MenuPerformanceStats(
                 period_start=period_start, period_end=period_end, menu_id=menu_id
             )
             db.add(existing)
+        else:
+            existing.period_start = period_start
+            existing.period_end = period_end
         existing.appearance_count = freq.appearance_count
         existing.total_headcount = freq.total_headcount
         existing.evaluation_count = freq.evaluation_count

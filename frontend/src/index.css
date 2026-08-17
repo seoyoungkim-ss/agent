@@ -78,8 +78,12 @@
   --rule-pulse-ring: rgba(225, 29, 72, 0.35);
 }
 
+/* §104: 다크 토큰은 두 조건 중 하나로 켜진다 — OS가 다크(and no explicit
+   light override)이거나, 아래 [data-theme="dark"]로 수동 선택했을 때.
+   :not([data-theme="light"])가 없으면 "OS는 다크인데 사용자가 라이트를
+   명시 선택"한 경우에도 이 블록이 계속 이겨 토글이 안 먹는다. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
 
     --page: #0f1216;
@@ -120,6 +124,51 @@
     --rule-highlight-bg: #3f2e12;
     --rule-pulse-ring: rgba(251, 113, 133, 0.35);
   }
+}
+
+/* §104: 사이드바 토글로 다크를 명시 선택했을 때 — OS 설정과 무관하게 항상
+   켜진다. 라이트를 명시 선택했을 때는 이 블록이 안 켜져 맨 위 :root(라이트
+   기본값)가 그대로 유지된다(별도 [data-theme="light"] 블록 불필요). */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --page: #0f1216;
+  --surface: #1b1f24;
+  --surface-2: #23282e;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: #2e343b;
+
+  --ink: #f5f6f8;
+  --ink-secondary: #b0b8c1;
+  --ink-muted: #7c8591;
+
+  --accent: #4993fa;
+  --accent-ink: #ffffff;
+
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #e66767;
+
+  --series-1: #4993fa;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+
+  --success-text: #0ca30c;
+
+  --chart-gridline: #2c2c2a;
+  --chart-axis: #383835;
+
+  --rule-primary: #818cf8;
+  --rule-decrease: #fb7185;
+  --rule-neutral: #94a3b8;
+  --rule-highlight-bg: #3f2e12;
+  --rule-pulse-ring: rgba(251, 113, 133, 0.35);
 }
 
 /* §103: 규칙 위반으로 새로 강조된 격자 셀에 짧게 시선을 유도하는 펄스 —

@@ -60,6 +60,14 @@ export interface MenuHistoryEntry {
   quadrant: Quadrant | null;
 }
 
+// §104: menu_history()의 MenuPerformanceStats 기반 기간 스냅샷 대신, 실제
+// meal_log 등장일 단위로 만족도를 보여준다 — "금주 메뉴 VOE 상세"용.
+export interface MenuAppearanceHistoryEntry {
+  date: string;
+  avg_score: number | null;
+  cumulative_avg_score: number | null;
+}
+
 export interface VoeCluster {
   cluster_label: string;
   representative_comment: string | null;
@@ -699,6 +707,9 @@ export const api = {
 
   menuHistory: (menuName: string) =>
     request<MenuHistoryEntry[]>(`/dashboard/menu-history/${encodeURIComponent(menuName)}`),
+
+  menuAppearanceHistory: (menuName: string) =>
+    request<MenuAppearanceHistoryEntry[]>(`/dashboard/menu-appearance-history/${encodeURIComponent(menuName)}`),
 
   voeClusters: (period: string) => request<VoeCluster[]>(`/dashboard/voe-clusters${qs({ period })}`),
 

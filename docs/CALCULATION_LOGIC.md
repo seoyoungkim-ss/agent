@@ -8060,3 +8060,173 @@ null`을 새로 판별 — 참이면 노란 배경(`--rule-highlight-bg`) + 좌�
   확인. 다크모드에서도 amber 배경(짙은 갈색 톤)·빨간 바·카드 아이콘
   전부 대비 유지됨을 확인.
 - 문서화(§103) 후 커밋·푸시.
+
+# §104. 다크모드 수동 토글 + 규칙 검증 상세화면 + VoE 상세 실데이터 + 식수 추이 단기구간 버킷 수정 (2026-08)
+
+## Context
+
+담당자가 한 메시지로 4가지를 신고했다: (1) 다크모드 전환이 안 됨, (2)
+"금주 메뉴 편성 규칙 이상 여부" 클릭해도 상세가 안 뜸, (3) "금주 메뉴
+VoE 상세" 클릭하면 기간이 이상하게 나옴(나온 날짜·그 때 만족도·누적
+평균 만족도·과거 VoE 코멘트가 나와야 함), (4) 식수 추이에서 5일 정도
+기간을 골라도 하루치만 나오고, 월간을 택하면 월 선택 UI가 있어야 함.
+
+Explore 조사 결과 4개 항목의 원인이 전부 달랐다:
+- **(1) 다크모드**: `index.css`가 `prefers-color-scheme`만 따르는
+  구조라 수동 토글 UI 자체가 앱에 없었다(버그가 아니라 미구현 기능).
+- **(2) 규칙 이상 여부**: 홈의 해당 `StatTile`에 애초에 `onClick`이
+  없었다(옆 "VOE 상세" 타일만 연결돼 있었음).
+- **(3) VoE 상세 기간 버그**: 진짜 버그였다. `WeeklyMenuVoeDetailPage`
+  의 아코디언이 읽던 `menu_history()`→`MenuPerformanceStats`는 나이트
+  배치(`aggregate_menu_performance` via `scheduler.py::run_daily_batch`,
+  매일 새벽 2시 "어제 기준 최근 180일" 롤링 윈도우)가 채우는데, 예전엔
+  `(period_start, period_end, menu_id)`가 **정확히 일치**해야 "기존
+  행"으로 갱신했다. 이 윈도우는 매일 1일씩 밀리므로 그 조합이 다시는
+  일치하지 않아 **메뉴당 새 행이 매일 밤 쌓였다** — 그 결과가 "기간이
+  이상하게 나옴"으로 보인 것. `MenuPerformanceStats`의 모든
+  읽기/쓰기 지점을 추적해 나이트 배치가 유일한 활성 writer임을 확인한
+  뒤 화면(진짜 등장일 기반 재작성)과 배치(업서트 키 수정) 둘 다
+  고쳤다.
+- **(4) 식수 추이 단기 구간**: 데이터 자체는 정확히 합산됐지만,
+  `_period_bucket()`(`analysis.py`)이 `weekly`일 땐 ISO 캘린더 주
+  월요일로, `monthly`일 땐 `%Y-%m`으로 접어서, 선택한 5일이 같은 ISO
+  주 안에 들면 x축이 하나로 뭉쳐 "하루치만 나온 것"처럼 보였다.
+
+AskUserQuestion으로 4개 항목 전부 추천안을 확정: (1) 앱 내 수동 토글
+버튼 신규 추가, (2) 홈의 "VOE 상세"와 같은 패턴의 새 단독 화면, (3)
+화면+배치 버그 같이 수정, (4) 선택 구간이 짧으면 자동으로 일 단위
+표시(백엔드는 무변경, 프론트가 보내는 `granularity`만 상황에 따라
+`"daily"`로 전환). "월간 택하면 월 선택 가능하게"는 별도 협의 없이
+진행.
+
+## 설계
+
+### 1. 다크모드 수동 토글
+
+`frontend/src/index.css`의 다크 토큰 블록을 감싸는 선택자를
+`@media (prefers-color-scheme: dark) { :root:not([data-theme="light"])
+{...} }`로 바꾸고, 그 아래 `:root[data-theme="dark"] {...}` 오버라이드
+블록(같은 다크 토큰 반복 — §101에서도 감내한 트레이드오프)을 추가했다.
+`:not([data-theme="light"])`가 없으면 "OS는 다크인데 사용자가 라이트를
+명시 선택"한 경우에도 미디어쿼리가 계속 이겨 토글이 안 먹는다.
+
+신규 `frontend/src/lib/theme.ts`(`getInitialTheme`/`applyTheme`,
+`localStorage` 키 `cafeteria-theme` — 저장된 선택 없으면 시스템 설정
+따름) + `App.tsx`에 `theme` state와 사이드바 하단 토글 버튼(`Sun`/`Moon`
+아이콘, `lucide-react`)을 추가했다. `frontend/src`를 전수 그렙해
+`React.memo` 사용례가 0건임을 확인 — `theme` state가 바뀌면 현재
+마운트된 페이지 전체가 별도 배선 없이 리렌더링되고, `resolveColor()`
+(`ui.tsx`, 매 렌더 `getComputedStyle`로 새로 읽는 순수 함수)가 새 다크
+토큰 값을 자동으로 읽어 ECharts 색상도 같이 갱신된다.
+
+### 2. "금주 메뉴 편성 규칙 이상 여부" 클릭 → 상세 화면
+
+§103에서 `WeeklyMenuReviewTab`(`AnalysisPage.tsx`) 로컬 클로저였던
+`RuleCardConfig` 타입, `WEEKDAY_LABELS_MON_FRI` 상수,
+`buildDailyRuleCard`/`buildLowHeadcountRuleCard` 빌더, 렌더러를 새 파일
+`frontend/src/components/RuleCard.tsx`로 추출했다. 클로저 캡처였던
+`slots`/`weekdayDates`를 명시적 파라미터로 바꿔 순수 함수화하고,
+렌더러는 `isActive`/`onToggle`/`renderMatchChip`을 프롭으로 받는 `
+<RuleCard>` 컴포넌트로 바꿔 그리드가 있는 화면(그리드 하이라이트+스크롤
+연동)과 없는 화면(단순 펼침/접힘) 양쪽에서 재사용 가능하게 했다.
+`WeeklyMenuReviewTab`은 이 모듈을 import해 쓰도록 갱신 — 격자
+스크롤·하이라이트·펄스 로직 자체는 그대로.
+
+신규 `frontend/src/pages/WeeklyRuleCheckDetailPage.tsx`
+(`WeeklyMenuVoeDetailPage.tsx`와 같은 자기완결형 패턴 — 자체
+`ruleCheckQuery`/`slotsQuery`, `monday?`/`onBack` props, 로컬
+`activeKey` state로 그리드 없이 카드만 펼침/접힘). `App.tsx`에
+`"weekly-rule-check"` 숨은 `Tab` 값 + `weeklyRuleCheckMonday` state를
+`weekly-voe`와 완전히 같은 패턴으로 추가했다. `HomePage.tsx`의 해당
+`StatTile`에 `onOpenWeeklyRuleCheck` 콜백을 연결했다.
+
+### 3. VoE 상세 실데이터 + 나이트 배치 중복행 버그 수정
+
+신규 백엔드 엔드포인트 `GET /dashboard/menu-appearance-history/
+{menu_name}`(`dashboard.py`, 기존 `menu_history`/`menu_comments` 옆) —
+`MealLog`를 실제 등장 날짜(`date(eaten_at)`) 단위로 묶어, 그 날의 평균
+만족도(`avg_score`)와 등장 순서대로 누적(러닝) 평균(`cumulative_avg_
+score`)을 계산해 최신순으로 반환한다. `WeeklyMenuVoeDetailPage.tsx`의
+아코디언 표를 `menu_history`(기간/만족도/평가건수) 대신 이 신규
+엔드포인트(날짜/그날 만족도/누적 평균 만족도)로 재작성했다. 코멘트
+목록(`menu_comments` 기반)은 이미 정확한 소스라 무변경.
+
+`aggregation.py::aggregate_menu_performance`의 업서트 키를 `(period_
+start, period_end, menu_id)` → `menu_id`만으로 바꿨다(기존 행이 있으면
+`period_start`/`period_end`도 최신 값으로 같이 갱신). 나이트 배치가
+유일한 활성 writer임을 확인했으므로 스키마 마이그레이션 없이 안전하게
+"메뉴당 최신 스냅샷 1행"만 유지된다. 이미 쌓인 개발 DB의 중복 행을
+치우는 정리 스크립트 `backend/app/maintenance/dedupe_menu_performance_
+stats.py`(dry-run 기본 + `--apply`, `dedupe_weekly_menu_plan.py`와 같은
+패턴)도 추가했다.
+
+### 4. 식수 추이 단기 구간 자동 일단위 + 월 피커
+
+`frontend/src/lib/week.ts`에 `daysBetweenInclusive(startIso, endIso)`
+헬퍼를 추가하고, `HomePage.tsx`에 `effectiveTrendGranularity`(선택
+`trendGranularity`가 `weekly`인데 구간이 7일 미만이거나 `monthly`인데
+28일 미만이면 `"daily"`로 자동 전환, 아니면 그대로)를 계산해
+`headcountTrend`/`totalHeadcountTrend` 두 쿼리 모두 이 값으로
+조회하도록 바꿨다. 백엔드 `headcount_trend`/`_period_bucket`은
+무변경(`"daily"`는 이미 지원되는 값). SegmentedControl에 보이는
+사용자의 "주간/월간" 선택 자체는 안 바뀌고, 실제 조회에만 자동 보정이
+적용되며, `trendGranularity !== effectiveTrendGranularity`일 때 옆에
+"선택 기간이 짧아 일 단위로 표시 중" 안내 문구를 띄운다.
+`trendGranularity === "monthly"`일 때만 보이는 `<input type="month">`
+를 "조회 기간" 블록에 추가 — 선택한 달의 1일~말일(또는 오늘까지)로
+`trendPeriodStart`/`trendPeriodEnd`를 설정한다.
+
+## 손대지 않는 것 (교차 확인)
+
+- 백엔드 `headcount_trend`/`_period_bucket`/`division_analysis` —
+  무변경, 프론트가 보내는 `granularity` 값만 상황에 따라 바뀐다.
+- `menu_comments()` — 무변경, 이미 정확한 소스였다.
+- `menu_history()`/`GET /dashboard/menu-history/{name}` 자체 — 삭제
+  안 함, 홈의 "이번 주 메뉴 이력 검색" 카드가 계속 쓴다(배치 버그가
+  고쳐지면 메뉴당 1행만 남아 이 카드도 자동 정상화).
+- "금주 메뉴 과거 VOE" 타일의 `weeklyVoeHistory`(N+1 `menuHistory`
+  호출, `length > 0` 체크만 함) — 메뉴당 행이 몇 개든 결과가 안
+  바뀌므로 무변경.
+- `POST /analysis/menu-performance/recompute`, `GET /analysis/menu-
+  performance`(정확 기간 일치 캐시 조회) — 이미 프론트 미사용
+  상태였고 이번 변경과 무관, 무변경.
+- `MenuPerformanceStats`의 `UniqueConstraint` — 스키마 변경 없음.
+- §103의 격자 스크롤·펄스·하이라이트 로직(`selectRule`, `useEffect`
+  스크롤, `.rule-cell-pulse`) — `RuleCard.tsx`로 추출된 건
+  렌더링/빌더뿐, 이 로직 자체는 그대로.
+- §101의 `--hero-*` 고정 다크 토큰, §98 사이드바 nav 구조 — 다크모드
+  토글 추가와 무관, 무변경.
+- 식수 추이의 코너/회사구분/끼니 필터, `group_by` 옵션, 프리셋 버튼 —
+  무변경.
+
+## 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에 3개 테스트 추가:
+  `menu_appearance_history`가 날짜별 평균/누적평균을 정확히 계산하고
+  최신순으로 반환하는지, 없는 메뉴는 404인지, `aggregate_menu_
+  performance`를 기간을 하루씩 밀려가며 두 번 호출했을 때
+  `MenuPerformanceStats`에 메뉴당 행이 2개가 아니라 1개만 남고
+  `period_end`가 최신 값으로 갱신되는지. `pytest` 전체 565개 통과.
+- `npx tsc -b` + `npx vite build` 클린.
+- `uvicorn`+`vite` 개발 서버 + 실제 개발 DB로 Playwright 확인(콘솔
+  에러 0건, 라이트/다크 두 프리퍼런스 + 수동 토글 양방향 실측):
+  1. 사이드바 하단 토글 클릭 시 OS 설정과 무관하게 즉시 라이트⇄다크
+     전환되고(`data-theme` 속성 + `localStorage` 확인), 새로고침해도
+     선택이 유지되며, 차트를 포함한 전체 색상이 같이 바뀜을 확인.
+  2. 홈의 "금주 메뉴 편성 규칙 이상 여부" 타일 클릭 → 새
+     `WeeklyRuleCheckDetailPage`로 이동해 §103과 동일한 규칙 카드 4개가
+     보이고 "← 홈으로"로 복귀됨을 확인. 메뉴 편성·운영 탭의 §103 카드도
+     그리드 하이라이트·스크롤과 여전히 정상 연동됨을 확인(추출 리팩터
+     회귀 없음).
+  3. 개발 DB에서 실제 등장 이력이 있는 메뉴(제육볶음, 2026-06-29 주)로
+     "금주 메뉴 VOE 상세"를 열어 아코디언을 펼치니 날짜(2026-08-01,
+     07-31, 07-30...)·그날 만족도(3.80/3.22/2.60...)·누적 평균 만족도
+     (3.10/3.07/3.06...)·과거 VOE 코멘트 8건이 표에 정확히 표시됨을
+     실측 확인 — 담당자가 요구한 "나온 날짜/그 때 만족도/누적 평균
+     만족도/과거 코멘트" 4가지 전부 충족.
+  4. 식수 추이에서 조회 구간이 짧을 때(1일 범위로 실측, 로직상 7일
+     미만이면 전부 동일하게 적용) "주간" 선택 상태에서도 실제 일
+     단위로 자동 조회되고 "선택 기간이 짧아 일 단위로 표시 중" 안내
+     문구가 뜸을 확인. "월간" 선택 시 월 피커(`<input type="month">`)
+     가 나타남을 확인.
+- 문서화(§104) 후 커밋·푸시.
