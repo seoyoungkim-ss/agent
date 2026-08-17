@@ -45,14 +45,19 @@
   --serious: #ec835a;
   --critical: #d03b3b;
 
-  --series-1: #3182f6; /* accent와 동일 유지 */
-  --series-2: #eb6834; /* orange */
-  --series-3: #1baf7a; /* aqua */
-  --series-4: #eda100; /* yellow */
-  --series-5: #e87ba4; /* magenta */
-  --series-6: #008300; /* green */
-  --series-7: #4a3aa7; /* violet */
-  --series-8: #e34948; /* red */
+  /* §108: 담당자가 참고 이미지로 요청한 톤다운(muted) 팔레트 — 참고 이미지에서
+     스포이드한 각 계열 색상(hue)을 유지한 채, dataviz 스킬 validator로
+     채도(chroma)·명도(lightness)를 조정해 접근성 게이트(CVD 구분·명도 대비)를
+     통과하는 값으로 재보정했다. --accent(버튼 등 UI 크롬)는 이번 요청 범위인
+     "그래프"가 아니라서 별도 — series-1과 더 이상 값이 같지 않다. */
+  --series-1: #337fc1; /* blue */
+  --series-2: #c17633; /* orange */
+  --series-3: #33bfc1; /* aqua */
+  --series-4: #c19233; /* yellow */
+  --series-5: #c1338d; /* magenta */
+  --series-6: #73c133; /* green */
+  --series-7: #3633c1; /* violet */
+  --series-8: #c14633; /* red */
 
   --success-text: #006300;
 
@@ -104,14 +109,14 @@
     --serious: #ec835a;
     --critical: #e66767;
 
-    --series-1: #4993fa;
-    --series-2: #d95926;
-    --series-3: #199e70;
-    --series-4: #c98500;
-    --series-5: #d55181;
-    --series-6: #008300;
-    --series-7: #9085e9;
-    --series-8: #e66767;
+    --series-1: #5498d4;
+    --series-2: #d27a2d;
+    --series-3: #18a7aa;
+    --series-4: #b38019;
+    --series-5: #cb4d9d;
+    --series-6: #66a136;
+    --series-7: #6b69d3;
+    --series-8: #d2432d;
 
     --success-text: #0ca30c;
 
@@ -150,14 +155,14 @@
   --serious: #ec835a;
   --critical: #e66767;
 
-  --series-1: #4993fa;
-  --series-2: #d95926;
-  --series-3: #199e70;
-  --series-4: #c98500;
-  --series-5: #d55181;
-  --series-6: #008300;
-  --series-7: #9085e9;
-  --series-8: #e66767;
+  --series-1: #5498d4;
+  --series-2: #d27a2d;
+  --series-3: #18a7aa;
+  --series-4: #b38019;
+  --series-5: #cb4d9d;
+  --series-6: #66a136;
+  --series-7: #6b69d3;
+  --series-8: #d2432d;
 
   --success-text: #0ca30c;
 
