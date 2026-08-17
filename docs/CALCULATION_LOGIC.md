@@ -9169,3 +9169,58 @@ meal_type) -> dict[Weather, float]`를 신규 추가:
   없음). 시뮬레이션 탭에서 캡션이 두 문장으로 줄어든 것을 확인. 콘솔
   에러 0건.
 - 문서화(§114) 후 커밋·푸시.
+
+## §115 — 메뉴별 분석에서 미캠회관(전골) 제외
+
+### Context
+
+담당자 요청: "메뉴별 분석에서 전골(미캠회관(전골)) 메뉴는 제외해줘".
+§76에서 날씨유형/계절 랭킹에 이미 적용한 것과 같은 코너(`미캠회관(전골)`,
+`corner_aliases.py`의 `MICAM_HALL_CORNER_NAME`)를 이번엔 "메뉴별 분석"
+(만족도×수요 4분면, `MenuQuadrantTab` → `GET /analysis/menu-performance/
+by-meal-type`)에서도 제외해달라는 요청이다. 이 엔드포인트는 §76 당시엔
+대상이 아니었고(그때 손댄 건 `_headcount_by_date_by_menu_bulk` 하나뿐,
+날씨/계절 랭킹 전용), 이번에 새로 확인해보니 실제로 이 코너의 메뉴가
+전혀 걸러지지 않고 있었다.
+
+### 설계
+
+`backend/app/api/analysis.py`의 `menu_performance_by_meal_type`
+(`GET /menu-performance/by-meal-type`)에, 기존 `excluded_menu_ids`
+(플레이스홀더 메뉴 제외) 바로 옆에 `excluded_corner_ids`를 추가했다 —
+§76의 `_headcount_by_date_by_menu_bulk`가 쓰던 것과 정확히 같은 패턴
+(`CornerMaster.corner_name == MICAM_HALL_CORNER_NAME`으로 corner_id를
+찾아 `MealLog.corner_id.notin_(...)`로 걸러냄). `MICAM_HALL_CORNER_NAME`/
+`CornerMaster`는 이미 이 파일에 import돼 있어 추가 import 불필요.
+
+이 엔드포인트는 메인 집계 쿼리에서 `MealLog`를 직접 훑고(다른 헬퍼를
+경유하지 않음), `_corner_id_by_menu_from_meal_log`는 결과 표시용
+`corner_name` 라벨을 붙이는 데만 쓰인다 — 즉 이 endpoint 하나만 고치면
+되고, 날씨/계절 랭킹·상관관계 랭킹(이미 §76에서 제외됨)·메뉴 하이라이트·
+VOE·신메뉴 반응 등 다른 메뉴 관련 기능에는 영향이 없다.
+
+### 손대지 않는 것 (교차 확인)
+
+- `_headcount_by_date_by_menu_bulk`(§76에서 이미 제외 처리됨, 날씨/계절
+  랭킹이 씀) — 무변경.
+- `corner_core_layer_summary`(코너 코어층) — 미캠회관을 의도적으로
+  제외하지 않는 곳이라는 기존 주석 그대로, 무변경.
+- `/menu-performance`(사전 recompute 캐시, `MenuPerformanceStats` 기반) —
+  이번 요청은 끼니별 4분면(`by-meal-type`) 한정이라 이 엔드포인트는
+  손대지 않음.
+- 메뉴 하이라이트, VOE, 신메뉴 반응 등 다른 `MealLog` 기반 기능 — 전부
+  무변경, 이 endpoint와 쿼리를 공유하지 않음.
+
+### 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에
+  `test_menu_performance_by_meal_type_excludes_micam_hall_corner` 추가 —
+  미캠회관(전골)에서 나간 "전골" 메뉴는 응답에서 빠지고, 같은 기간 다른
+  코너("한식")의 "김치찌개"는 그대로 남는지 확인. 통과.
+- `pytest` 전체 570개 통과.
+- **실제 개발 DB로 직접 확인**: `GET /menu-performance/by-meal-type`을
+  넓은 기간(7/1~8/17, 중식)으로 호출해 응답에 미캠회관(전골) 코너나
+  "전골" 메뉴가 전혀 없음을 확인(개발 DB엔 애초에 이 코너의 최근 데이터가
+  적어 눈에 띄는 변화는 아니었지만, 쿼리 자체가 정상 동작함을 확인).
+  순수 백엔드 필터 변경이라 프론트/tsc/build 재검증 불필요.
+- 문서화(§115) 후 커밋·푸시.

@@ -1160,6 +1160,15 @@ def menu_performance_by_meal_type(
         menu_id
         for (menu_id,) in db.query(MenuMaster.menu_id).filter(MenuMaster.menu_name.in_(PLACEHOLDER_MENU_NAMES))
     }
+    # §115: 미캠회관(전골)은 이 4분면 분석에서 제외 — §76에서 날씨유형/계절
+    # 랭킹에 적용한 것과 같은 이유(담당자 확인: 이 코너는 이 화면의 분석
+    # 대상이 아님).
+    excluded_corner_ids = {
+        corner_id
+        for (corner_id,) in db.query(CornerMaster.corner_id).filter(
+            CornerMaster.corner_name == MICAM_HALL_CORNER_NAME
+        )
+    }
     query = db.query(MealLog).filter(
         MealLog.eaten_at >= period_start_dt,
         MealLog.eaten_at < period_end_exclusive,
@@ -1168,6 +1177,8 @@ def menu_performance_by_meal_type(
     )
     if excluded_menu_ids:
         query = query.filter(MealLog.menu_id.notin_(excluded_menu_ids))
+    if excluded_corner_ids:
+        query = query.filter(MealLog.corner_id.notin_(excluded_corner_ids))
     logs = query.all()
     if not logs:
         return []

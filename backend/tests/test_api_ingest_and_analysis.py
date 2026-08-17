@@ -2569,6 +2569,25 @@ def test_menu_performance_by_meal_type_computes_quadrant_within_meal_type(client
     assert row_b["quadrant"] is not None
 
 
+def test_menu_performance_by_meal_type_excludes_micam_hall_corner(client):
+    """§115: 담당자 요청("메뉴별 분석에서 전골(미캠회관(전골)) 메뉴는
+    제외해줘") — 미캠회관(전골) 코너에서 나간 메뉴는 4분면 분석에서 빠지고,
+    다른 코너 메뉴는 그대로 남아야 한다."""
+    for i in range(4):
+        _ingest_meal_log(client, f"H{i}", "맛남", menu_name="전골", corner_name="미캠회관(전골)")
+    for i in range(4):
+        _ingest_meal_log(client, f"K{i}", "맛남", menu_name="김치찌개", corner_name="한식")
+
+    resp = client.get(
+        "/api/analysis/menu-performance/by-meal-type",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat(), "meal_type": "중식"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert all(r["menu_name"] != "전골" for r in body)
+    assert any(r["menu_name"] == "김치찌개" for r in body)
+
+
 # ---------------------------------------------------------------------------
 # 2순위: 메뉴 회전 이력 + 건강가든 텍스트 입력 (2026-08)
 # ---------------------------------------------------------------------------
