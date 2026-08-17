@@ -467,18 +467,17 @@ export function HomePage({
   for (const r of totalHeadcountTrend.data ?? []) totalHeadcountByPeriod.set(r.period, r.headcount);
   const headcountTrendOption = {
     textStyle: { fontFamily: "inherit", color: chartTheme.text },
-    // §106: "최고 N명" 핀 라벨이 캔버스 맨 위에서 잘려 보인다는 신고 — 범례(top:0,
-    // ~20px)와 핀(symbolSize 36) + 그 위 라벨(distance 8 + 글자 높이)이 겹쳐서
-    // 32px로는 둘 다 담을 공간이 없었다. top을 넉넉히 늘려 범례·핀·라벨이 전부
-    // grid 위쪽 여백 안에 들어가게 한다.
-    grid: { left: 48, right: 16, top: 88, bottom: 28 },
+    // §113: 총식수 라인이 매 지점마다 라벨을 달게 되면서(§100의 "최고 N명"
+    // 핀은 제거) 범례(top:0)와 그 아래 첫 라인 라벨이 겹치지 않도록 여유를
+    // 남긴다.
+    grid: { left: 48, right: 16, top: 64, bottom: 28 },
     tooltip: {
       trigger: "axis",
       formatter: (params: { axisValue?: string; marker: string; seriesName: string; value: unknown }[]) => {
         const header = params[0]?.axisValue ?? "";
         const lines = params.map((p) => {
           const v = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
-          return `${p.marker}${p.seriesName}: ${typeof v === "number" ? Math.round(v) : v}명`;
+          return `${p.marker}${p.seriesName}: ${typeof v === "number" ? Math.round(v).toLocaleString() : v}명`;
         });
         return [header, ...lines].join("<br/>");
       },
@@ -498,7 +497,7 @@ export function HomePage({
     yAxis: {
       type: "value",
       name: "식수",
-      axisLabel: { color: chartTheme.text },
+      axisLabel: { color: chartTheme.text, formatter: (v: number) => v.toLocaleString() },
       splitLine: { lineStyle: { color: chartTheme.grid } },
     },
     series: [
@@ -512,6 +511,16 @@ export function HomePage({
           type: "bar" as const,
           stack: "total",
           itemStyle: { color },
+          // §113: 담당자가 참고 이미지로 준 형태(막대 구간마다 값을 숫자로
+          // 표기, 천 단위 콤마)를 따른다 — 0인 구간은 라벨을 비워 숫자가
+          // 겹쳐 보이지 않게 한다.
+          label: {
+            show: true,
+            position: "inside" as const,
+            color: "#fff",
+            fontSize: 10,
+            formatter: (p: { value: number }) => (p.value > 0 ? Math.round(p.value).toLocaleString() : ""),
+          },
           data: trendPeriods.map((p) => trendValueBySeries.get(key)?.get(p) ?? 0),
         };
       }),
@@ -525,23 +534,16 @@ export function HomePage({
         itemStyle: { color: resolveColor("var(--ink)") },
         z: 10,
         data: trendPeriods.map((p) => totalHeadcountByPeriod.get(p) ?? 0),
-        // §100: 이 기간 중 총식수가 가장 높았던 지점을 핀 콜아웃으로 자동
-        // 표시. type:"max"는 데이터가 바뀔 때마다(필터·기간 변경) 자동
-        // 재계산되어 별도 상태 관리가 필요 없다.
-        markPoint: {
-          symbol: "pin",
-          symbolSize: 36,
-          itemStyle: { color: resolveColor("var(--accent)") },
-          // 핀 안쪽(기본 label.position)은 텍스트가 잘려 보여 핀 위쪽으로 뺀다.
-          label: {
-            position: "top" as const,
-            distance: 8,
-            color: resolveColor("var(--ink)"),
-            fontSize: 11,
-            fontWeight: "bold" as const,
-            formatter: (p: { value: number }) => `최고 ${Math.round(p.value).toLocaleString()}명`,
-          },
-          data: [{ type: "max" as const, name: "최고" }],
+        // §113: 참고 이미지처럼 최고점만이 아니라 매 지점에 총식수를
+        // 표기한다 — §100의 "최고 N명" 핀 콜아웃은 모든 점에 라벨이
+        // 붙으면 중복이라 제거했다.
+        label: {
+          show: true,
+          position: "top" as const,
+          color: resolveColor("var(--ink)"),
+          fontSize: 11,
+          fontWeight: "bold" as const,
+          formatter: (p: { value: number }) => Math.round(p.value).toLocaleString(),
         },
       },
     ],
@@ -856,7 +858,7 @@ export function HomePage({
             이 조건에 해당하는 취식 데이터가 없습니다.
           </p>
         )}
-        {trendPeriods.length > 0 && <ReactECharts option={headcountTrendOption} style={{ height: 320 }} />}
+        {trendPeriods.length > 0 && <ReactECharts option={headcountTrendOption} style={{ height: 380 }} />}
       </Card>
 
       <Card title="코너별 조식/중식/석식 식수 현황">
