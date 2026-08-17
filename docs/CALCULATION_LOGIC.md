@@ -8588,3 +8588,113 @@ lines" 기준과 동일)로 라이트(surface `#ffffff`)·다크(surface `#1b1f2
   가능한 채도, 라이트/다크 배경 각각에서 또렷하게 보임).
 - `pytest` 대상 백엔드 변경 없음 — 재실행 불필요.
 - 문서화(§108) 후 커밋·푸시.
+
+---
+
+# §109. 그래프 팔레트 갈색 계열 혼동 수정 + 메뉴 하이라이트 "원인 특정 어려움" 문구 숨김 (2026-08)
+
+## Context
+
+담당자가 §108 직후 두 가지를 더 신고했다: (1) "갈색계열이 두개라
+헷갈림 하나는 다른색으로 바꿔줘" — §108에서 새로 만든 8색 중 orange
+(hue 28°)와 red(당시 hue 8°) 슬롯이 채도·명도까지 비슷해 둘 다
+갈색/테라코타에 가깝게 보였다. (2) "메뉴 하이라이트에서 '뚜렷한 원인을
+특정하기 어렵다'라는 문구가 나오는데 이런 말은 안 하게 해줘 모르면
+표기를 안 하는 걸로" — 메뉴 만족도 변화 원인(`llm_analysis.py`)은 LLM
+프롬프트가 "근거가 부족하면 '뚜렷한 원인을 특정하기 어렵다'고 쓰세요"
+라고 명시적으로 지시해 두고 있어(§77), 실제 그 문구 그대로 캐시에
+저장되는 경우가 있었다 — 코드상 "캐시가 없으면 원인 줄 자체를 안
+그린다"는 이미 되어 있었지만(`_trend_cause`), 캐시가 **있는데 내용이
+"모르겠다"인 경우**는 그대로 노출되고 있었다.
+
+이번 라운드부터 로컬 Postgres(16)를 기동해 실제 개발 DB
+(`cafeteria`, 602건 실데이터)로 백엔드 uvicorn + 프론트 vite dev
+서버를 직접 띄워 Playwright로 라이브 검증했다 — §104~§108에서
+"컨테이너 재시작 후 DB 미기동"으로 실측을 건너뛰었던 것과 달리, 이번엔
+`service postgresql start`로 기존 데이터가 남아있는 로컬 인스턴스를
+살릴 수 있음을 확인했다(향후 라운드도 이 방법을 우선 시도할 것).
+
+## 설계
+
+### 1. red 슬롯 재조정 (`frontend/src/index.css`)
+
+`--series-8`(red)의 hue를 orange(28°)에서 충분히 먼 진짜 빨강/크림슨
+계열(hue 352°)로 옮기고 채도를 올렸다 — orange와의 각도 차이가
+기존 20°(8°→28°)에서 36°(352°→28°, wrap-around)로 벌어진다. 나머지
+7개 슬롯은 무변경.
+
+| | Light (기존→신규) | Dark (기존→신규) |
+|---|---|---|
+| series-8 (red) | `#c14633` → `#cf3046` | `#d2432d` → `#da4e61` |
+
+`dataviz/scripts/validate_palette.py --pairs adjacent`로 라이트
+(surface `#ffffff`)·다크(surface `#1b1f24`) 재검증 — 전 항목 PASS(라이트
+3개 슬롯 contrast WARN은 §108과 동일 수준으로 유지, red는 WARN 목록에도
+없음).
+
+### 2. "원인 특정 어려움" 문구 숨김 (`backend/app/api/dashboard.py`)
+
+`_trend_cause(db, menu_id)`에 한 줄 조건을 추가했다 — 캐시된
+`summary`에 `"특정하기 어렵"`이 포함되면 캐시가 아예 없을 때와 동일하게
+빈 dict를 반환한다:
+```python
+if cached is None or "특정하기 어렵" in cached.summary:
+    return {}
+```
+프론트(`HomePage.tsx`)는 이미 `r.cause ? (...) : null` 패턴으로
+`cause` 키가 없으면 원인 줄 자체를 그리지 않으므로(§77부터 있던 동작),
+프론트 변경은 필요 없다. LLM 프롬프트(`_build_menu_trend_prompt`)나
+캐시 저장 로직(`save_analysis`)은 그대로 — "모르면 저장은 하되 화면에만
+안 보여준다"는 읽기 시점 필터링이라, 캐시에 그 문구가 남아 있어도
+다음에 다른 원인이 밝혀지면(배치가 다시 돌면) 자연스럽게 최신 캐시로
+대체된다.
+
+## 손대지 않는 것 (교차 확인)
+
+- `--series-1~7`(blue/orange/aqua/yellow/magenta/green/violet) — §108
+  값 그대로, red 슬롯 하나만 재조정.
+- `_build_menu_trend_prompt`의 "근거 부족 시 이 문구를 쓰라"는 지시,
+  `_fallback_menu_trend_summary`(LLM 미설정 시 폴백, 이 문구를 만들지
+  않음) — 무변경. 문구 자체를 못 쓰게 막지 않고, 화면 노출만 막는다.
+  LLM이 이 문구를 쓰는 것 자체는 "모르면 지어내지 마라"는 프롬프트
+  원칙에 부합하는 정직한 답변이라 프롬프트를 바꿀 이유가 없다.
+- `save_analysis`/`get_cached`(캐시 읽기/쓰기 자체) — 무변경, 이 문구가
+  담긴 캐시 행도 그대로 저장·조회된다. 화면 표시 시점에만 걸러낸다.
+- `cause_keywords` 필드 — LLM이 "원인을 특정하기 어려우면 키워드 생략"
+  하도록 이미 프롬프트에 지시돼 있어(§86) 대부분 비어 있고, `_trend_cause`
+  가 빈 dict를 반환하면 `cause_keywords`도 자연히 함께 사라진다.
+
+## 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에
+  `test_menu_highlights_hides_cause_when_llm_could_not_determine_it`
+  추가 — `save_analysis`로 "뚜렷한 원인을 특정하기 어렵습니다." 캐시를
+  직접 심어두고 `/api/dashboard/menu-highlights` 응답에 `cause`/
+  `cause_keywords` 키가 없는지 확인. `pytest` 전체 566개 통과(로컬
+  Postgres 기동 후 `venv` 새로 구성해 실행 — 이 환경엔 fastapi 등
+  런타임 의존성이 설치돼 있지 않아 `requirements.txt`+
+  `requirements-dev.txt`로 새로 설치).
+- `python3 dataviz/scripts/validate_palette.py`로 신규 8색(red만 교체)
+  라이트·다크 재검증 — 전 항목 PASS.
+- `npx tsc -b` + `npx vite build` 클린.
+- **로컬 Postgres를 직접 기동**(`service postgresql start`, 기존
+  `cafeteria`/`cafeteria_test` DB가 남아 있었음 확인)해 `uvicorn`+
+  `vite` dev 서버를 띄우고 실제 개발 DB(라이브 데이터 602건)로
+  Playwright 실측:
+  1. 홈 화면 콘솔 에러 0건.
+  2. "개선 필요 포인트" 카드에 §107 안내 문구("혼잡도·만족도·편성·
+     운영: 최근 180일 누적 데이터 기준 · VOE: 이번 달 vs 지난달 비교")
+     가 실제로 렌더링됨을 확인.
+  3. 페이지 전체 텍스트에서 "특정하기 어렵" 문자열이 0건임을
+     `page.inner_text(body)` 검색으로 확인(이 개발 DB의 메뉴 하이라이트
+     항목들은 LLM 미설정이라 `_fallback_menu_trend_summary` 문구를
+     쓰고 있어 애초에 이 문구가 없었지만, 실제 앱 응답 경로로도
+     재확인).
+  4. "식수 추이" 차트를 "최근 3개월"로 조회해 코너별 누적 막대가
+     실제 데이터로 렌더링되고, 라이트·다크 두 모드 모두 6개 코너 색이
+     서로 뚜렷이 구분됨을 스크린샷으로 확인(이 개발 DB엔 코너가
+     6~7개뿐이라 red 슬롯까지는 실제로 안 쓰였지만, validator 재검증
+     결과와 §108 스와치 이미지로 red/orange 구분을 별도 확인).
+  5. 사이드바 "다크 모드" 토글이 정상 동작하고 차트 색이 다크 토큰으로
+     갱신됨을 확인.
+- 문서화(§109) 후 커밋·푸시.

@@ -351,6 +351,39 @@ def test_menu_highlights_detects_rising_menu_and_new_menu_reaction(client):
     assert new_menu_entry["needs_attention"] is False  # 이미 평가가 있음
 
 
+def test_menu_highlights_hides_cause_when_llm_could_not_determine_it(client, db_session):
+    # §109: LLM이 근거 부족으로 "뚜렷한 원인을 특정하기 어렵다"고만 답한
+    # 경우도 캐시엔 그 문장이 그대로 들어있다 — 화면에 그 문구를 그대로
+    # 보여주지 말고, 원인을 모르는 취급(모르면 표기를 안 하는 걸로)해야 한다.
+    from app.services.llm_analysis import KIND_MENU_TREND, save_analysis
+
+    _ingest_weekly_menu(client)  # 제육볶음/계란후라이, 한식, MONDAY
+
+    prior_week = MONDAY - dt.timedelta(days=14)
+    for i in range(3):
+        _ingest_meal_log(client, f"P{i}", "개선", eaten_date=prior_week, menu_name="제육볶음", corner_name="한식")
+    for i in range(3):
+        _ingest_meal_log(client, f"R{i}", "맛남", eaten_date=MONDAY, menu_name="제육볶음", corner_name="한식")
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    menu_id = next(r for r in resp.json()["rising"] if r["menu_name"] == "제육볶음")["menu_id"]
+
+    save_analysis(
+        db_session,
+        kind=KIND_MENU_TREND,
+        subject_key=str(menu_id),
+        period_start=MONDAY,
+        period_end=MONDAY,
+        summary="뚜렷한 원인을 특정하기 어렵습니다.",
+        facts={},
+    )
+
+    resp = client.get("/api/dashboard/menu-highlights")
+    entry = next(r for r in resp.json()["rising"] if r["menu_name"] == "제육볶음")
+    assert "cause" not in entry
+    assert "cause_keywords" not in entry
+
+
 def test_menu_highlights_flags_new_menu_needing_attention_when_unevaluated(client):
     # 도입 후 오래됐는데(NEW_MENU_WINDOW_DAYS=30 이내지만 7일은 넘김) 평가가
     # 하나도 없으면 관심 유도가 필요하다는 신호(needs_attention)를 켠다.

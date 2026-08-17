@@ -49,9 +49,14 @@ logger = logging.getLogger(__name__)
 
 
 def _trend_cause(db: Session, menu_id: int) -> dict:
-    """캐시된 만족도 변화 원인. 없으면 빈 dict — 화면은 그냥 원인 줄을 안 그린다."""
+    """캐시된 만족도 변화 원인. 없으면 빈 dict — 화면은 그냥 원인 줄을 안 그린다.
+
+    §109: LLM이 "뚜렷한 원인을 특정하기 어렵다"고만 답한 경우도 근거가
+    없다는 뜻은 마찬가지라 — 담당자 신고("이런 말은 안 하게, 모르면
+    표기를 안 하는 걸로")에 따라 캐시가 있어도 빈 dict로 취급한다.
+    """
     cached = get_cached(db, KIND_MENU_TREND, str(menu_id))
-    if cached is None:
+    if cached is None or "특정하기 어렵" in cached.summary:
         return {}
     return {
         "cause": cached.summary,
