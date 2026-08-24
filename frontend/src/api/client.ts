@@ -276,6 +276,24 @@ export interface MenuWeatherEventRankingResponse {
   actual_metric_label: string | null;
 }
 
+// §117: 강수량 많은 날(threshold_mm 이상) 코너별 혼잡도 랭킹.
+export interface CornerHeavyRainRankingRow {
+  corner_id: number;
+  corner_name: string | null;
+  avg_headcount: number;
+  total_headcount: number;
+  day_count: number;
+}
+
+export interface CornerHeavyRainRankingResponse {
+  period_start: string;
+  period_end: string;
+  threshold_mm: number;
+  heavy_rain_day_count: number;
+  low_sample: boolean;
+  rows: CornerHeavyRainRankingRow[];
+}
+
 // §81: 메뉴별 일별 식수 × 기온/강수량 상관관계 랭킹. weather-event-ranking과
 // 달리 임계값 범주가 아니라 연속값 상관계수(-1~1)를 낸다.
 export type WeatherCorrelationMetric = "max_temp_c" | "precip_mm";
@@ -743,6 +761,11 @@ export const api = {
   cornerMealTypeHeadcount: (params: { target_date: string }) =>
     request<CornerMealTypeHeadcountResponse>(`/analysis/corners/meal-type-headcount${qs(params)}`),
 
+  // §117: 강수량 많은 날(threshold_mm 이상)만 골라 코너별 평균 식수를 랭킹한다
+  // — "강수량 많은 날 코너 중 가장 몰린 데" 요청 대응.
+  cornerHeavyRainRanking: (params: { period_start: string; period_end: string; meal_type?: MealType }) =>
+    request<CornerHeavyRainRankingResponse>(`/analysis/corners/heavy-rain-ranking${qs(params)}`),
+
   divisionAnalysis: (params: {
     period_start: string;
     period_end: string;
@@ -767,11 +790,14 @@ export const api = {
   // §71: 메인메뉴가 지정한 날씨유형(비/폭설/폭염/한파)의 날 평상시 대비 식수가
   // 얼마나 달랐는지 랭킹. 부찬은 대상이 아니다 — 이 결과가 시뮬레이션 배수나
   // 주간 식단표 예측치를 자동으로 바꾸지 않는다.
+  // §117: min_sample_days로 표본 기준(기본 5)을 낮춰볼 수 있다 — "동일 메뉴가
+  // 비오는 날 2회 이상 나왔을 때 식수 변화" 요청 대응.
   menuWeatherEventRanking: (params: {
     period_start: string;
     period_end: string;
     event: WeatherEvent;
     meal_type?: MealType;
+    min_sample_days?: number;
   }) => request<MenuWeatherEventRankingResponse>(`/analysis/menu-performance/weather-event-ranking${qs(params)}`),
 
   // §81: "기온/강수량이 오를수록 식수가 느는(또는 주는) 메뉴" — 연속값

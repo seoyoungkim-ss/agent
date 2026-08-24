@@ -460,6 +460,33 @@ def _headcount_by_date_by_menu_bulk(
     return result
 
 
+def _headcount_by_date_by_corner_bulk(
+    db: Session, period_start: dt.date, period_end: dt.date, meal_type: MealType | None = None
+) -> dict[int, dict[dt.date, int]]:
+    """코너별 일자별 식수 — _headcount_by_date_by_menu_bulk와 같은 스타일이지만
+    menu_id 대신 corner_id로 묶는다(§117 강수량 많은 날 코너 혼잡도용). meal_log
+    기반이라(daily_corner_stats 배치 집계에 안 걸림) 배치가 안 돈 상태에서도
+    항상 최신값을 보여준다 — 다른 날씨 랭킹들과 같은 데이터 소스 원칙.
+    """
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    date_col = func.date(MealLog.eaten_at).label("stat_date")
+    query = db.query(MealLog.corner_id, date_col, func.count().label("cnt")).filter(
+        MealLog.corner_id.isnot(None),
+        MealLog.eaten_at >= period_start_dt,
+        MealLog.eaten_at < period_end_exclusive,
+    )
+    if meal_type is not None:
+        query = query.filter(MealLog.meal_type == meal_type)
+
+    result: dict[int, dict[dt.date, int]] = {}
+    for corner_id, stat_date, cnt in query.group_by(MealLog.corner_id, date_col).all():
+        if isinstance(stat_date, str):
+            stat_date = dt.date.fromisoformat(stat_date)
+        result.setdefault(corner_id, {})[stat_date] = cnt
+    return result
+
+
 def _headcount_by_date_for_menu(
     db: Session, menu_id: int, period_start: dt.date, period_end: dt.date
 ) -> dict[dt.date, int]:
@@ -587,6 +614,14 @@ def menu_weather_event_ranking(
     period_end: dt.date,
     event: str = Query(..., description="비 | 폭설 | 폭염 | 한파"),
     meal_type: MealType | None = None,
+    min_sample_days: int | None = Query(
+        default=None,
+        description=(
+            "표본 일수 하한 재정의 — 기본은 weather_correlation_low_sample_days(5). "
+            "§117: 담당자가 '동일 메뉴가 비오는 날 2회 이상 나왔을 때 식수 변화'를 보고 싶어 해,"
+            " 낮게(예: 2) 주면 적은 표본으로도 diff_vs_normal을 계산해 반복 효과 확인에 쓸 수 있다."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     """PRD 7.1 확장(2026-08, §71): 메인메뉴가 지정한 날씨유형(비/폭설/폭염/한파)의
@@ -606,6 +641,9 @@ def menu_weather_event_ranking(
         raise HTTPException(status_code=400, detail="event는 비/폭설/폭염/한파 중 하나여야 합니다")
 
     settings = get_settings()
+    effective_low_sample_days = (
+        min_sample_days if min_sample_days is not None else settings.weather_correlation_low_sample_days
+    )
     event_by_date, weather_by_date, extended_fields_missing = _weather_event_by_date(
         db, period_start, period_end
     )
@@ -615,7 +653,7 @@ def menu_weather_event_ranking(
     rows = []
     for menu_id, headcount_by_date in headcount_by_menu.items():
         summaries = _menu_weather_event_summary(
-            headcount_by_date, event_by_date, weather_by_date, settings.weather_correlation_low_sample_days
+            headcount_by_date, event_by_date, weather_by_date, effective_low_sample_days
         )
         match = next((s for s in summaries if s["event"] == target_event.value), None)
         if match is None:
@@ -887,6 +925,64 @@ def corner_analysis(
         )
     )
     return result
+
+
+@router.get("/corners/heavy-rain-ranking")
+def corner_heavy_rain_ranking(
+    period_start: dt.date,
+    period_end: dt.date,
+    meal_type: MealType | None = None,
+    db: Session = Depends(get_db),
+):
+    """§117: 담당자 요청("강수량 많은 날 코너 중 가장 몰린 데가 어딘지") —
+    classify_weather_event의 RAIN은 precip_mm>0이면 전부 묶이는 이진 분류라
+    강수량 세기 구간이 없다. 여기선 별도로 precip_mm이
+    heavy_rain_threshold_mm(기본 20mm, 담당자 확정) 이상인 날만 직접 걸러
+    코너별 평균 식수를 랭킹한다 — 그 이진 RAIN 분류를 세분화하는 게 아니라
+    이 화면 전용의 별도 임계값 비교다.
+
+    corner_analysis(`/corners`, 요일/휴일 분류 기준)와 데이터 소스가
+    다르다 — 그쪽은 daily_corner_stats(배치 집계)를, 여기는 다른 날씨
+    랭킹들과 같은 원칙으로 meal_log를 직접 훑어 배치 미실행 상태에서도
+    최신값을 보여준다. 미캠회관(전골) 제외·Take Out 제외도 적용하지
+    않는다 — "코너 중 어디가 몰렸는지" 코너 단위 질문이라 corner_analysis의
+    기본값(둘 다 포함)을 따른다.
+    """
+    settings = get_settings()
+    weather_rows = db.query(DailyWeather).filter(DailyWeather.stat_date.between(period_start, period_end)).all()
+    heavy_rain_dates = {
+        w.stat_date
+        for w in weather_rows
+        if w.precip_mm is not None and w.precip_mm >= settings.heavy_rain_threshold_mm
+    }
+
+    headcount_by_corner = _headcount_by_date_by_corner_bulk(db, period_start, period_end, meal_type)
+    corners = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+
+    rows = []
+    for corner_id, headcount_by_date in headcount_by_corner.items():
+        counts = [cnt for d, cnt in headcount_by_date.items() if d in heavy_rain_dates]
+        if not counts:
+            continue
+        rows.append(
+            {
+                "corner_id": corner_id,
+                "corner_name": corners.get(corner_id),
+                "avg_headcount": round(statistics.fmean(counts), 1),
+                "total_headcount": sum(counts),
+                "day_count": len(counts),
+            }
+        )
+    rows.sort(key=lambda r: (-r["avg_headcount"], corner_display_sort_key(r["corner_id"], r["corner_name"] or "")))
+
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "threshold_mm": settings.heavy_rain_threshold_mm,
+        "heavy_rain_day_count": len(heavy_rain_dates),
+        "low_sample": len(heavy_rain_dates) < settings.weather_correlation_low_sample_days,
+        "rows": rows,
+    }
 
 
 @router.get("/corners/list")

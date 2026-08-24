@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     heavy_snow_threshold_cm: float = 5.0
     heatwave_temp_c: float = 33.0
     coldwave_temp_c: float = -12.0
+    # §117(2026-08): "강수량 많은 날 코너 중 가장 몰린 데" 요청 — classify_weather_event의
+    # RAIN 판정은 precip_mm>0이면 무조건 묶이는 이진 분류라 세기 구간이 없다. 이 값은
+    # 그 이진 분류와 별개로, 코너 혼잡도 랭킹에서만 쓰는 "많은 비" 기준이다(담당자 확인·확정).
+    heavy_rain_threshold_mm: float = 20.0
 
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 

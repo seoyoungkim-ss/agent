@@ -3768,6 +3768,157 @@ def test_menu_weather_event_ranking_excludes_micam_hall_corner(client, db_sessio
     assert any(r["menu_name"] == "김치찌개" for r in rows)
 
 
+def test_menu_weather_event_ranking_min_sample_days_lowers_threshold(client, db_session):
+    """§117: 담당자 요청("동일 메뉴가 비오는날 2회이상 나왔을 때... 식수 변화가
+    있는지") — 비 오는 날 2일만 등장한 메뉴는 기본 표본 기준(5일) 미달로
+    diff_vs_normal이 항상 null이었다. min_sample_days=2로 낮추면 그 표본으로도
+    변화율을 계산해서 보여준다."""
+    from app.models.stats import DailyWeather
+
+    rain_days = [MONDAY + dt.timedelta(days=i) for i in range(2)]
+    normal_days = [MONDAY + dt.timedelta(days=i) for i in range(2, 4)]
+    emp_n = 0
+    for d in rain_days:
+        db_session.add(
+            DailyWeather(
+                stat_date=d, had_rain=True, precip_mm=8.0, snow_cm=0.0, max_temp_c=24.0, min_temp_c=18.0
+            )
+        )
+        for _ in range(6):
+            _ingest_meal_log(client, f"R{emp_n}", "맛남", eaten_date=d, menu_name="냉면")
+            emp_n += 1
+    for d in normal_days:
+        db_session.add(
+            DailyWeather(
+                stat_date=d, had_rain=False, precip_mm=0.0, snow_cm=0.0, max_temp_c=24.0, min_temp_c=18.0
+            )
+        )
+        for _ in range(2):
+            _ingest_meal_log(client, f"R{emp_n}", "맛남", eaten_date=d, menu_name="냉면")
+            emp_n += 1
+    db_session.commit()
+
+    base_params = {
+        "period_start": MONDAY.isoformat(),
+        "period_end": (MONDAY + dt.timedelta(days=3)).isoformat(),
+        "event": "비",
+    }
+    resp = client.get("/api/analysis/menu-performance/weather-event-ranking", params=base_params)
+    assert resp.status_code == 200, resp.text
+    row = next(r for r in resp.json()["rows"] if r["menu_name"] == "냉면")
+    assert row["event_days"] == 2
+    assert row["low_sample"] is True
+    assert row["diff_vs_normal"] is None  # 기본 표본 기준(5일) 미달이라 계산 안 함
+
+    resp = client.get(
+        "/api/analysis/menu-performance/weather-event-ranking",
+        params={**base_params, "min_sample_days": 2},
+    )
+    assert resp.status_code == 200, resp.text
+    row = next(r for r in resp.json()["rows"] if r["menu_name"] == "냉면")
+    assert row["low_sample"] is False
+    assert row["diff_vs_normal"] == 4.0  # 비 오는 날 6명 - 평상시 2명
+
+
+def _seed_daily_weather(db_session, stat_date: dt.date, precip_mm: float) -> None:
+    from app.models.stats import DailyWeather
+
+    db_session.add(
+        DailyWeather(
+            stat_date=stat_date,
+            had_rain=precip_mm > 0,
+            precip_mm=precip_mm,
+            snow_cm=0.0,
+            max_temp_c=24.0,
+            min_temp_c=18.0,
+        )
+    )
+
+
+def test_corner_heavy_rain_ranking_only_counts_heavy_rain_days(client, db_session):
+    """§117: 담당자 요청("강수량 많은 날 코너중 가장 몰린데가 어딘지") — 강수량
+    20mm 이상인 날의 식수만 반영해 코너를 랭킹하고, 20mm 미만인 날의 식수는
+    (같은 코너라도) 무시해야 한다."""
+    heavy_days = [MONDAY + dt.timedelta(days=i) for i in range(2)]
+    normal_days = [MONDAY + dt.timedelta(days=i) for i in range(2, 4)]
+    for d in heavy_days:
+        _seed_daily_weather(db_session, d, 25.0)
+    for d in normal_days:
+        _seed_daily_weather(db_session, d, 5.0)
+    db_session.commit()
+
+    emp_n = 0
+    for d in heavy_days:
+        for _ in range(6):
+            _ingest_meal_log(client, f"HR{emp_n}", "맛남", eaten_date=d, corner_name="한식")
+            emp_n += 1
+        for _ in range(2):
+            _ingest_meal_log(client, f"HR{emp_n}", "맛남", eaten_date=d, corner_name="분식")
+            emp_n += 1
+    for d in normal_days:
+        # 20mm 미만인 날 — 한식 코너에 훨씬 많은 인원을 넣어도 랭킹에 반영되면 안 된다.
+        for _ in range(20):
+            _ingest_meal_log(client, f"HR{emp_n}", "맛남", eaten_date=d, corner_name="한식")
+            emp_n += 1
+
+    resp = client.get(
+        "/api/analysis/corners/heavy-rain-ranking",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=3)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["threshold_mm"] == 20.0
+    assert body["heavy_rain_day_count"] == 2
+    rows = body["rows"]
+    assert rows[0]["corner_name"] == "한식"
+    assert rows[0]["avg_headcount"] == 6.0
+    assert rows[0]["day_count"] == 2
+    row_bunsik = next(r for r in rows if r["corner_name"] == "분식")
+    assert row_bunsik["avg_headcount"] == 2.0
+
+
+def test_corner_heavy_rain_ranking_empty_when_no_heavy_rain_days(client, db_session):
+    _seed_daily_weather(db_session, MONDAY, 5.0)
+    db_session.commit()
+    _ingest_meal_log(client, "N1", "맛남", eaten_date=MONDAY, corner_name="한식")
+
+    resp = client.get(
+        "/api/analysis/corners/heavy-rain-ranking",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rows"] == []
+    assert body["heavy_rain_day_count"] == 0
+
+
+def test_corner_heavy_rain_ranking_flags_low_sample(client, db_session):
+    """강수량 20mm 이상인 날이 표본 기준(5일) 미만이면 low_sample=True로
+    표시하되, 행 자체는 숨기지 않는다(하우스 컨벤션)."""
+    heavy_days = [MONDAY + dt.timedelta(days=i) for i in range(2)]
+    for d in heavy_days:
+        _seed_daily_weather(db_session, d, 30.0)
+    db_session.commit()
+    for i, d in enumerate(heavy_days):
+        _ingest_meal_log(client, f"LS{i}", "맛남", eaten_date=d, corner_name="한식")
+
+    resp = client.get(
+        "/api/analysis/corners/heavy-rain-ranking",
+        params={
+            "period_start": MONDAY.isoformat(),
+            "period_end": (MONDAY + dt.timedelta(days=1)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["low_sample"] is True
+    assert len(body["rows"]) == 1
+    assert body["rows"][0]["corner_name"] == "한식"
+
+
 def test_menu_weather_correlation_ranking_surfaces_positive_correlation(client, db_session):
     """§81: 기온이 오를수록 식수가 느는 메뉴를 시딩하면 양의 상관계수로 뜨는지
     확인 — weather-event-ranking과 달리 연속값이라 6일 모두 다른 기온/식수를 준다."""

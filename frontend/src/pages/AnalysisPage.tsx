@@ -3266,6 +3266,9 @@ export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: Weath
   const [selectedEvent, setSelectedEvent] = useState<WeatherEvent>("비");
   const [selectedSeason, setSelectedSeason] = useState<Season>("여름");
   const [showAllWeatherRanking, setShowAllWeatherRanking] = useState(false);
+  // §117: 담당자 요청("동일 메뉴가 비오는 날 2회 이상 나왔을 때 식수 변화") —
+  // 기본 표본 기준(5일)을 낮춰(2일) 적은 표본으로도 diff_vs_normal을 보고 싶을 때.
+  const [relaxedSample, setRelaxedSample] = useState(false);
   const [showAllSeasonRanking, setShowAllSeasonRanking] = useState(false);
   const [correlationMetric, setCorrelationMetric] = useState<WeatherCorrelationMetric>("max_temp_c");
   const [showAllCorrelationRanking, setShowAllCorrelationRanking] = useState(false);
@@ -3282,7 +3285,7 @@ export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: Weath
   }, [syncedEvent]);
 
   const menuRankingQuery = useQuery({
-    queryKey: ["menu-weather-event-ranking", periodStart, periodEnd, selectedEvent],
+    queryKey: ["menu-weather-event-ranking", periodStart, periodEnd, selectedEvent, relaxedSample],
     // §76: 담당자 요청으로 중식 고정 — 조/중/석식을 합쳐 보면 기저 식수 규모가
     // 달라 날씨유형 간 비교가 흐려진다는 문제의식(§75 timeline과 동일)과 같은
     // 맥락. 계절 랭킹(menuSeasonQuery)은 이번 요청 대상이 아니라 그대로 둔다.
@@ -3292,6 +3295,7 @@ export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: Weath
         period_end: periodEnd,
         event: selectedEvent,
         meal_type: "중식",
+        min_sample_days: relaxedSample ? 2 : undefined,
       }),
   });
   const menuRankingRows = menuRankingQuery.data?.rows ?? [];
@@ -3380,6 +3384,14 @@ export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: Weath
             </button>
           ))}
         </div>
+        <label className="mb-3 flex items-center gap-1.5 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          <input
+            type="checkbox"
+            checked={relaxedSample}
+            onChange={(e) => setRelaxedSample(e.target.checked)}
+          />
+          같은 메뉴가 2회 이상만 나왔어도 변화 보기(표본 기준 완화)
+        </label>
 
         {menuRankingQuery.isLoading && <LoadingState />}
         {menuRankingQuery.isError && <ErrorState error={menuRankingQuery.error} />}
@@ -3598,6 +3610,89 @@ export function WeatherCorrelationSection({ syncedEvent }: { syncedEvent?: Weath
   );
 }
 
+// §117: 담당자 요청("강수량 많은 날 코너 중 가장 몰린 데가 어딘지") — 이진
+// RAIN 분류(precip_mm>0)와 별개로, 강수량이 특히 많았던 날(threshold_mm 이상)
+// 만 골라 코너별 평균 식수를 랭킹한다. WeatherCorrelationSection과 같은
+// 패턴(자체 기간 상태, 중식 고정)이지만 메뉴가 아니라 코너 단위라 별도
+// 컴포넌트로 둔다.
+export function HeavyRainCornerRankingSection() {
+  const [periodStart, setPeriodStart] = useState(PERIOD_START);
+  const [periodEnd, setPeriodEnd] = useState(PERIOD_END);
+
+  const rankingQuery = useQuery({
+    queryKey: ["corner-heavy-rain-ranking", periodStart, periodEnd],
+    queryFn: () =>
+      api.cornerHeavyRainRanking({ period_start: periodStart, period_end: periodEnd, meal_type: "중식" }),
+  });
+  const data = rankingQuery.data;
+  const thresholdMm = data?.threshold_mm;
+
+  return (
+    <Card title="강수량 많은 날 코너별 혼잡도">
+      <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
+        일 강수량이 {thresholdMm ?? 20}mm 이상인 날, 코너별 평균 식수를 비교합니다(중식 기준, 참고용).
+      </p>
+      <div className="mb-3 flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          시작일
+          <input
+            type="date"
+            className="rounded-md border px-3 py-2 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={periodStart}
+            max={periodEnd}
+            onChange={(e) => setPeriodStart(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+          종료일
+          <input
+            type="date"
+            className="rounded-md border px-3 py-2 text-[13px]"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            value={periodEnd}
+            min={periodStart}
+            onChange={(e) => setPeriodEnd(e.target.value)}
+          />
+        </label>
+      </div>
+
+      {rankingQuery.isLoading && <LoadingState />}
+      {rankingQuery.isError && <ErrorState error={rankingQuery.error} />}
+
+      {data && data.heavy_rain_day_count === 0 && (
+        <p className="text-[13px]" style={{ color: "var(--ink-muted)" }}>
+          이 기간에 강수량 {data.threshold_mm}mm 이상인 날이 없습니다.
+        </p>
+      )}
+
+      {data && data.rows.length > 0 && (
+        <>
+          {data.low_sample && (
+            <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+              표본이 적어 참고용입니다(강수량 {data.threshold_mm}mm 이상인 날 {data.heavy_rain_day_count}일).
+            </p>
+          )}
+          <Table
+            columns={[
+              { key: "corner_name", label: "코너" },
+              { key: "avg_headcount", label: "평균 식수", align: "right" },
+              { key: "day_count", label: "표본(일)", align: "right" },
+            ]}
+            rows={data.rows.map((r) => ({
+              key: String(r.corner_id),
+              corner_name: r.corner_name ?? "이름 없음",
+              avg_headcount: `${r.avg_headcount}명`,
+              day_count: `${r.day_count}일`,
+            }))}
+            rowKey={(r) => r.key as string}
+          />
+        </>
+      )}
+    </Card>
+  );
+}
+
 // ---- 2026-08 화면 재편으로 생긴 최상위 화면 3개 ----
 // 기존 "분석" 탭(서브탭 5개)을 해체하고, 담당자 협의에서 정한 5개 축
 // (현황 / 메뉴 편성·운영 / 만족도·VoE / Agent 채팅 / 관리)에 맞춰 재배치했다.
@@ -3625,6 +3720,7 @@ export function SimulationPage() {
     <div className="space-y-6">
       <WeatherScenarioForecastSection onWeatherChange={setSelectedWeather} />
       <WeatherCorrelationSection syncedEvent={WEATHER_TO_EVENT[selectedWeather]} />
+      <HeavyRainCornerRankingSection />
     </div>
   );
 }

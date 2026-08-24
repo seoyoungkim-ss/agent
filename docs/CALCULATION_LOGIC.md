@@ -9278,3 +9278,131 @@ VOE·신메뉴 반응 등 다른 메뉴 관련 기능에는 영향이 없다.
   넓은 기간(6/1~8/17)으로 호출해 응답 57건 중 4개 제외 메뉴가 전혀 없음을
   확인. 순수 백엔드 필터 변경이라 프론트/tsc/build 재검증 불필요.
 - 문서화(§116) 후 커밋·푸시.
+
+## §117 — 날씨 시뮬레이션: 동일 메뉴 비오는날 반복 효과 표본 기준 완화 + 강수량 많은 날 코너 혼잡도
+
+### Context
+
+담당자 요청(시뮬레이션 탭): "날씨 시뮬레이션에서 동일 메뉴가 비오는날
+2회이상 나왔을 때나 평소보다 비올 때 식수 변화가 있는지, 강수량 많은 날
+코너중 가장 몰린데가 어딘지 보고싶어". AskUserQuestion으로 세부 사항을
+확정했다: (1) "동일 메뉴 2회 이상 반복 효과"는 평소 대비 변화율
+랭킹(표본 2회 이상만)으로, (2) "평소보다 비올 때 식수 변화"는 메뉴별
+기준(이미 있음)으로, (3) "강수량 많은 날"의 기준은 일 강수량 20mm 이상.
+
+조사해보니 항목 1·2는 §71에서 만든 `GET
+/menu-performance/weather-event-ranking`("메인메뉴 × 날씨유형 인기
+랭킹")로 사실상 이미 답할 수 있는데, 이 표의 표본 기준
+(`weather_correlation_low_sample_days`, 기본 5일)이 고정돼 있어 2~4회만
+등장한 메뉴는 항상 "표본 부족"으로 뭉개져 `diff_vs_normal`이 계산조차
+안 됐다(`null`). → 새 화면 없이 이 표본 기준을 낮춰볼 수 있는 토글
+하나만 추가했다. 항목 3(강수량 많은 날 코너 혼잡도)은 완전히 새
+기능이다 — `classify_weather_event`의 RAIN 판정은 `precip_mm > 0`이면
+무조건 묶이는 이진 분류라 강수량 세기 구간이 없고, 코너 단위로 날씨와
+묶어 집계하는 기능도 지금까지 없었다(`corner_analysis`는 요일/휴일
+분류로만 나뉘고 날씨와 무관).
+
+### 설계
+
+**1. 기존 날씨유형 랭킹에 표본 기준 재정의 파라미터 추가.**
+`backend/app/api/analysis.py`의 `menu_weather_event_ranking`에 옵셔널
+쿼리 파라미터 `min_sample_days: int | None = Query(default=None, ...)`를
+추가했다. `effective_low_sample_days = min_sample_days if min_sample_days
+is not None else settings.weather_correlation_low_sample_days`로 계산해
+`_menu_weather_event_summary`에 넘긴다 — 파라미터를 안 주면(기존 프론트
+호출 전부) 동작이 완전히 그대로다(하위 호환). `_menu_weather_event_summary`
+자체는 이미 `low_sample_days`를 인자로 받는 순수 함수라 변경 불필요.
+`_menu_weather_reference`(주간 식단표 슬롯 "예측 보기" 패널이 쓰는 별도
+호출부)는 그대로 `settings.weather_correlation_low_sample_days` 고정
+유지 — 이번 요청과 무관.
+
+프론트(`frontend/src/api/client.ts`의 `menuWeatherEventRanking`)에
+`min_sample_days?: number` 파라미터 타입을 추가하고,
+`frontend/src/pages/AnalysisPage.tsx`의 `WeatherCorrelationSection`에
+상태 `relaxedSample`을 추가해 체크박스를 켜면
+`min_sample_days: 2`로 재호출한다. "메인메뉴 × 날씨유형 인기 랭킹" 표
+위에 "같은 메뉴가 2회 이상만 나왔어도 변화 보기(표본 기준 완화)"
+체크박스를 배치했다 — 날씨유형 탭이 이미 비/폭설/폭염/한파를 전부
+지원하므로 비 탭을 고른 상태에서 토글만 켜면 담당자가 원한 질문 둘 다
+해결된다.
+
+**2. 강수량 많은 날 코너 혼잡도 신규 엔드포인트.**
+`backend/app/config.py`에 `heavy_rain_threshold_mm: float = 20.0` 추가
+(담당자 확정값, `classify_weather_event`의 이진 RAIN 판정과는 별개로
+코너 혼잡도 랭킹에서만 쓰는 임계값이라고 주석에 명시).
+
+`backend/app/api/analysis.py`에 새 헬퍼
+`_headcount_by_date_by_corner_bulk(db, period_start, period_end,
+meal_type=None) -> dict[corner_id, dict[date, count]]`를 추가했다 —
+기존 `_headcount_by_date_by_menu_bulk`와 같은 스타일이지만 `menu_id`
+대신 `corner_id`로 묶는다. `meal_log` 기반이라(배치 집계
+`daily_corner_stats`에 안 걸림) 다른 날씨 랭킹들과 같은 데이터 소스
+원칙을 따른다 — 배치가 안 돈 상태에서도 항상 최신값을 보여준다.
+
+새 엔드포인트 `GET /analysis/corners/heavy-rain-ranking`
+(`period_start`, `period_end`, 옵션 `meal_type`)을 추가했다: `DailyWeather`
+에서 `precip_mm >= heavy_rain_threshold_mm`인 날짜만 걸러(`heavy_rain_dates`),
+`_headcount_by_date_by_corner_bulk`로 코너별 일자별 식수를 구한 뒤 그
+날짜 집합에 속하는 값만 평균 내 `avg_headcount` 내림차순으로 랭킹한다.
+응답: `period_start`/`period_end`/`threshold_mm`/`heavy_rain_day_count`
+(기간 내 강수량 20mm 이상인 날 수)/`low_sample`(그 날 수가
+`weather_correlation_low_sample_days` 미만이면 True — 숨기지 않고
+플래그만)/`rows`(코너별 `avg_headcount`/`total_headcount`/`day_count`).
+미캠회관(전골) 제외는 적용하지 않는다 — "코너 중 어디가 몰렸는지"를
+묻는 코너 단위 질문이라, 가장 가까운 기존 코너 랭킹(`corner_analysis`)
+도 미캠회관을 제외하지 않는 관례를 따른다.
+
+`frontend/src/api/client.ts`에 `CornerHeavyRainRankingRow`/
+`CornerHeavyRainRankingResponse` 타입과 `cornerHeavyRainRanking` 함수를
+추가했다. `frontend/src/pages/AnalysisPage.tsx`에 새 컴포넌트
+`HeavyRainCornerRankingSection`을 `WeatherCorrelationSection` 바로
+아래(독립 `<Card>`)에 추가하고 `SimulationPage`에 배선했다 —
+`meal_type: "중식"` 고정(§76 관례 동일, 조/중/석식을 섞으면 코너 간
+비교가 흐려짐), `heavy_rain_day_count === 0`이면 "이 기간에 강수량
+{threshold_mm}mm 이상인 날이 없습니다" 안내, `low_sample`이면 표 위에
+참고용 캡션을 붙인다.
+
+### 손대지 않는 것 (교차 확인)
+
+- `_menu_weather_reference`(슬롯 "예측 보기" 패널) — 그대로
+  `settings.weather_correlation_low_sample_days` 고정, 이번 토글과 무관.
+- `menu_weather_correlation_ranking`(§81, 연속값 상관계수 랭킹),
+  `menu_season_ranking`(§72, 계절 랭킹) — 무변경.
+- `classify_weather_event`/`WeatherEvent`(비/폭설/폭염/한파 이진 분류) —
+  무변경. "강수량 많은 날"은 그 분류 체계 밖에서 별도로 `precip_mm`
+  임계값을 직접 비교하는 새 로직이다.
+- `corner_analysis`(`/analysis/corners`, 요일/휴일 분류 기준 코너
+  비교) — 무변경, 데이터 소스(`DailyCornerStats` vs `MealLog`)·집계
+  기준(요일 분류 vs 날씨)이 다른 별개 기능.
+- `WeatherScenarioForecastSection`(what-if 시뮬레이션, §112 실측 데이터
+  기반 배수) — 무변경.
+- `MenuWeatherEventRankingResponse`/`MenuWeatherEventRow`의 필드
+  스키마 — 추가/변경 없음, 서버가 넘겨주는 값의 표본 기준만 파라미터로
+  재정의 가능해질 뿐.
+
+### 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에 4개 추가:
+  `test_menu_weather_event_ranking_min_sample_days_lowers_threshold`
+  (비 오는 날 2일만 등장한 메뉴 — 기본 호출은 `diff_vs_normal is
+  None`/`low_sample True`, `min_sample_days=2`로는 실제 값 계산 확인),
+  `test_corner_heavy_rain_ranking_only_counts_heavy_rain_days`(20mm
+  이상/미만 날을 섞어 시딩, 미만인 날의 대량 식수가 랭킹에 반영 안 됨을
+  확인), `test_corner_heavy_rain_ranking_empty_when_no_heavy_rain_days`
+  (`rows == []`, `heavy_rain_day_count == 0`),
+  `test_corner_heavy_rain_ranking_flags_low_sample`(강수량 20mm 이상인
+  날이 5일 미만이면 `low_sample True`이되 행은 그대로 보임). 4개 모두
+  통과, `pytest` 전체 573개 통과(기존에 무관하게 실패 중이던 2개
+  — `test_menu_highlights_...`/`test_new_menu_status_manual_remove_...`
+  — 는 이번 변경 이전에도 실패하던 날짜 기준 픽스처 문제로, §117과 무관).
+- `npx tsc -b` + `npx vite build` 클린.
+- **실제 개발 DB + Playwright**: 시뮬레이션 탭에서 "메인메뉴 ×
+  날씨유형 인기 랭킹"의 새 체크박스를 켜면 표본 2일짜리 메뉴들
+  (제육볶음/돈까스/샐러드)이 "표본 부족" 배지 없이 실제 변화율(예:
+  제육볶음 +30.2명)로 표시됨을 확인. 새 "강수량 많은 날 코너별
+  혼잡도" 카드도 정상 렌더링 — 개발 DB에 20mm 이상 강수량 데이터가
+  없어 "이 기간에 강수량 20mm 이상인 날이 없습니다" 안내 문구가 노출됨을
+  확인(백엔드 로직 자체는 실데이터로 별도 curl 검증 — 기간을 넓혀 확인한
+  결과 여러 low-sample 메뉴에서 `min_sample_days=2` 적용 시 null이던
+  `diff_vs_normal`이 실제 값으로 바뀜을 확인). 콘솔 에러 0건.
+- 문서화(§117) 후 커밋·푸시.
