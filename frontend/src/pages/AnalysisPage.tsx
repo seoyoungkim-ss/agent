@@ -1638,6 +1638,12 @@ function WeeklyMenuReviewTab() {
           <Button variant="secondary" onClick={() => compareAll.mutate()} disabled={compareAll.isPending}>
             {compareAll.isPending ? "예측 계산 중..." : "전체 예측 비교"}
           </Button>
+          <a
+            href={`/api/dashboard/weekly-menu/negotiation-export?period_start=${selectedMonday}&period_end=${sunday}`}
+            download
+          >
+            <Button variant="secondary">엑셀 다운로드 (식당 협의용)</Button>
+          </a>
         </div>
 
         {ruleCheckQuery.data && (

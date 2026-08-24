@@ -1189,6 +1189,104 @@ def test_meal_log_export_returns_xlsx_for_selected_period(client, db_session):
     assert employee_ids == {"E11111", "E22222"}
 
 
+def _seed_voe_comment(db_session, employee_id: str, corner_name: str, comment: str, eaten_date: dt.date) -> None:
+    from app.models.enums import Division, MealType
+    from app.models.logs import MealLog
+    from app.models.master import CornerMaster, EmployeeMaster
+
+    corner = CornerMaster(corner_name=corner_name)
+    employee = EmployeeMaster(employee_id=employee_id, division=Division.OTHER)
+    db_session.add_all([corner, employee])
+    db_session.flush()
+    db_session.add(
+        MealLog(
+            eaten_at=dt.datetime.combine(eaten_date, dt.time(12, 0, 0)),
+            employee_id=employee_id,
+            meal_type=MealType.LUNCH,
+            corner_id=corner.corner_id,
+            comment=comment,
+        )
+    )
+    db_session.commit()
+
+
+def test_weekly_menu_negotiation_export_returns_xlsx_with_violations_and_voe(client, db_session):
+    """§118: 식당협의용 엑셀 — 규칙 위반이 있는 주 + 최근 2주 VOE 코멘트를
+    시딩해 두 시트가 모두 채워지는지 확인. VOE는 LLM 미설정 시 사내 LLM
+    클라이언트가 내는 모의 응답(_mock_cluster_reply)으로 결정적으로
+    파싱된다."""
+    noodle_menus = ["라면", "우동", "짜장면", "쫄면", "냉면"]
+    rows = [_plan_row(MONDAY, name, "메인") for name in noodle_menus]
+    resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200, resp.text
+
+    _seed_voe_comment(db_session, "VOE118A", "한식_voe118a", "국물이 짜요", dt.date.today())
+
+    resp = client.get(
+        "/api/dashboard/weekly-menu/negotiation-export",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=6)).isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert resp.content[:2] == b"PK"
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(resp.content))
+    assert wb.sheetnames == ["규칙 위반", "VOE 클러스터링(최근 2주)"]
+
+    sheet1_rows = list(wb["규칙 위반"].iter_rows(values_only=True))
+    assert sheet1_rows[0] == ("구분", "날짜", "내용")
+    assert any(r[0] == "면류 과다" and r[1] == MONDAY.isoformat() for r in sheet1_rows[1:])
+
+    sheet2_rows = list(wb["VOE 클러스터링(최근 2주)"].iter_rows(values_only=True))
+    assert sheet2_rows[0] == ("주제", "건수", "키워드", "대표 코멘트")
+    assert len(sheet2_rows) >= 2  # header + 최소 1개 클러스터
+
+
+def test_weekly_menu_negotiation_export_no_violations_no_voe(client, db_session):
+    """위반도 VOE 코멘트도 없는 기간 — 안내 행만 들어간다(빈 시트가 아니라
+    "위반 없음"/"이 기간에 등록된 의견이 없습니다" 문구로 명시)."""
+    period_start = dt.date(2026, 3, 2)
+    period_end = period_start + dt.timedelta(days=6)
+
+    resp = client.get(
+        "/api/dashboard/weekly-menu/negotiation-export",
+        params={"period_start": period_start.isoformat(), "period_end": period_end.isoformat()},
+    )
+    assert resp.status_code == 200, resp.text
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(resp.content))
+    sheet1_rows = list(wb["규칙 위반"].iter_rows(values_only=True))
+    assert sheet1_rows[1][0] == "위반 없음"
+    sheet2_rows = list(wb["VOE 클러스터링(최근 2주)"].iter_rows(values_only=True))
+    assert sheet2_rows[1][0] == "이 기간에 등록된 의견이 없습니다"
+
+
+def test_weekly_menu_negotiation_export_surfaces_upstream_failure_as_502(client, db_session, monkeypatch):
+    """VOE 클러스터링 LLM 호출이 실패하면 502로 감싸진다 — 다른 VOE LLM
+    엔드포인트(recompute_voe_clusters)와 같은 관례."""
+    import app.api.dashboard as dashboard_module
+
+    _seed_voe_comment(db_session, "VOE118B", "한식_voe118b", "불만이 있어요", dt.date.today())
+
+    async def failing_chat_complete(self, messages):
+        raise RuntimeError("사내 LLM 채팅 게이트웨이 연결 실패")
+
+    monkeypatch.setattr(dashboard_module.InternalLLMClient, "chat_complete", failing_chat_complete)
+
+    resp = client.get(
+        "/api/dashboard/weekly-menu/negotiation-export",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=6)).isoformat()},
+    )
+    assert resp.status_code == 502
+    assert "사내 LLM" in resp.json()["detail"]
+
+
 def test_simulation_what_if_returns_all_corners(client):
     _ingest_weekly_menu(client)
     resp = client.post(

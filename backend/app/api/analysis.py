@@ -1923,12 +1923,7 @@ def _avg_satisfaction_by_menu(
     return {menu_id: statistics.fmean(scores) for menu_id, scores in by_menu.items()}
 
 
-@router.get("/weekly-menu/plan-rule-check")
-def weekly_menu_plan_rule_check(
-    period_start: dt.date,
-    period_end: dt.date,
-    db: Session = Depends(get_db),
-):
+def _compute_plan_rule_check(db: Session, period_start: dt.date, period_end: dt.date) -> dict:
     """§77~§78(2026-08): 담당자가 준 4개 기준으로 그 주 편성을 검증해 경고한다.
 
     ①해장 메뉴 최소 1개, ②면류(라면 포함) 4개 초과 금지, ③매운(빨간국물)
@@ -1945,6 +1940,9 @@ def weekly_menu_plan_rule_check(
     **지난번 나왔을 때 딱 한 번**을 본다 — 응답의 `last_appearance_date`/
     `last_appearance_headcount`가 그 실제 등장일과 그날 식수다(이번 주
     재편성일과는 다른 날짜).
+
+    §118: `GET /weekly-menu/plan-rule-check`의 바디를 그대로 옮긴 헬퍼 —
+    `dashboard.py`의 식당협의용 엑셀 다운로드에서도 재사용한다.
     """
     plan_rows = (
         db.query(
@@ -2052,6 +2050,20 @@ def weekly_menu_plan_rule_check(
             "violations": low_headcount_violations,
         },
     }
+
+
+@router.get("/weekly-menu/plan-rule-check")
+def weekly_menu_plan_rule_check(
+    period_start: dt.date,
+    period_end: dt.date,
+    db: Session = Depends(get_db),
+):
+    """§77~§78(2026-08): 담당자가 준 4개 기준으로 그 주 편성을 검증해 경고한다.
+
+    실제 계산은 `_compute_plan_rule_check`(§118에서 재사용을 위해 추출)가
+    한다 — 여기선 그 결과를 그대로 반환한다.
+    """
+    return _compute_plan_rule_check(db, period_start, period_end)
 
 
 @router.get("/weekly-menu/rotation")

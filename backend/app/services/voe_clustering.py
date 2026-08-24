@@ -80,6 +80,41 @@ async def cluster_monthly_voe(
     return len(clusters)
 
 
+async def cluster_voe_comments_for_period(
+    db: Session,
+    period_start: dt.date,
+    period_end: dt.date,
+    llm_client: InternalLLMClient,
+    *,
+    max_clusters: int = 5,
+    max_comments: int = _MAX_COMMENTS_DEFAULT,
+) -> list[tuple[str, str, int, list[str]]]:
+    """§118: 식당협의용 엑셀 전용 — cluster_monthly_voe와 달리 임의
+    period_start~period_end를 받고, DB에 저장하지 않고 결과만 반환한다
+    (월 단위 캐시 테이블과 무관한 1회성 계산이라 매번 새로 호출된다)."""
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+
+    comments = [
+        c
+        for (c,) in db.query(MealLog.comment)
+        .filter(
+            MealLog.eaten_at >= period_start_dt,
+            MealLog.eaten_at < period_end_exclusive,
+            MealLog.comment.isnot(None),
+        )
+        .all()
+        if c and c.strip()
+    ]
+    if not comments:
+        return []
+
+    sample = comments[:max_comments]
+    prompt = _build_cluster_prompt(sample, max_clusters)
+    response = await llm_client.chat_complete([{"role": "user", "content": prompt}])
+    return _parse_cluster_response(response, sample)
+
+
 def _build_cluster_prompt(sample: list[str], max_clusters: int) -> str:
     numbered = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(sample))
     return (

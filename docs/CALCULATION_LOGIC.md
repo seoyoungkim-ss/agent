@@ -9406,3 +9406,113 @@ meal_type=None) -> dict[corner_id, dict[date, count]]`를 추가했다 —
   결과 여러 low-sample 메뉴에서 `min_sample_days=2` 적용 시 null이던
   `diff_vs_normal`이 실제 값으로 바뀜을 확인). 콘솔 에러 0건.
 - 문서화(§117) 후 커밋·푸시.
+
+## §118 — 식당협의용 엑셀 다운로드(1단계: 규칙 위반 + 최근 2주 VOE 클러스터링)
+
+### Context
+
+담당자 요청: "엑셀로 분석한 내용을 식당협의용으로 내려받을수있게 하고싶어
+우선은 한 주 식단표 올리면 규칙 위반내용, 최근 2주의 voe 클러스터링 내용
+먼저 넣자". 위탁 식당 업체와의 협의 자리에서 참고할 근거 자료를 엑셀
+한 파일로 뽑고 싶다는 요청이다. 1단계로 두 가지만 담는다: ① 그 주
+식단표의 편성 규칙 위반 내용, ② 최근 2주간의 VOE(주관식 의견)
+클러스터링 내용. AskUserQuestion으로 "최근 2주"는 다운로드 실행 시점
+(오늘) 기준으로, 엑셀은 시트 2개로 분리("규칙 위반"/"VOE 클러스터링")로
+확정했다.
+
+### 설계
+
+**1. 규칙 위반 계산을 재사용 가능한 헬퍼로 추출.**
+`backend/app/api/analysis.py`의 `weekly_menu_plan_rule_check`
+엔드포인트 바디 전체를 `_compute_plan_rule_check(db, period_start,
+period_end) -> dict` 모듈 레벨 함수로 옮기고, 라우터 함수는 그 결과를
+그대로 반환하는 얇은 래퍼로 남겼다 — 응답 스키마/동작은 100% 동일한
+순수 리팩터링(기존 테스트가 그대로 통과함으로 검증).
+
+**2. 임의 기간 VOE 클러스터링 함수 추가.**
+`backend/app/services/voe_clustering.py`에
+`cluster_voe_comments_for_period(db, period_start, period_end,
+llm_client, max_clusters=5, max_comments=150)` 추가. 기존
+`cluster_monthly_voe`는 월 단위로 고정(캐시 테이블
+`MonthlyVoeCluster.period`도 월의 1일로만 키가 잡힘)이라 임의의 2주
+구간에 못 쓴다 — 새 함수는 `_build_cluster_prompt`/
+`_parse_cluster_response`(둘 다 순수 함수, 코멘트 리스트만 받음)를
+그대로 재사용하면서 기간 쿼리 + LLM 호출만 새로 감싸고, **DB에
+저장하지 않고** 결과만 반환한다(월 단위 캐시 테이블과 무관한 1회성
+계산). `InternalLLMClient`는 사내 LLM이 미설정(`internal_llm_base_url`
+빈 문자열)이면 `_mock_cluster_reply`로 결정적인 모의 응답을 내므로,
+사내 LLM 연동 전에도 배선 검증이 가능하다(기존 VOE 클러스터링
+테스트들과 같은 전제).
+
+**3. 신규 엑셀 다운로드 엔드포인트.**
+`backend/app/api/dashboard.py`에 `GET
+/dashboard/weekly-menu/negotiation-export`(`period_start`,
+`period_end`) 추가 — 기존 `weekly-summary/export`/`meal-log/export`와
+같은 `xlsxwriter` 인라인 패턴(`io.BytesIO` → `xlsxwriter.Workbook`
+→ `workbook.close()` → `Response(content=..., media_type=...,
+headers={"Content-Disposition": ...})`)을 그대로 따른다.
+`_compute_plan_rule_check(db, period_start, period_end)`로 그 주
+위반을 구하고, `voe_period_start = today - 13일`,
+`voe_period_end = today`로 최근 2주를 계산해
+`cluster_voe_comments_for_period`를 호출한다. VOE LLM 호출이 실패하면
+다른 VOE LLM 엔드포인트(`recompute_voe_clusters` 등)와 같은 관례로
+502에 원인을 담아 반환한다.
+
+시트 구성:
+- **"규칙 위반"**: 해장/면류/매운빨간국물 중 그날 `ok=False`인 요일만,
+  저조 식수 재편성 위반을 합쳐 "구분/날짜/내용" 3열로 나열한다(위반이
+  하나도 없으면 "위반 없음" 안내 행).
+- **"VOE 클러스터링(최근 2주)"**: 클러스터별 "주제/건수/키워드/대표
+  코멘트" 4열(클러스터가 하나도 없으면 "이 기간에 등록된 의견이
+  없습니다" 안내 행).
+
+`dashboard.py`가 이미 `analysis.py`에서 헬퍼를 import하는 전례
+(`_corner_id_by_menu_from_meal_log, corner_analysis, menu_performance`,
+§76~)가 있어 같은 방식으로 `_compute_plan_rule_check`를 가져다 썼다 —
+순환 임포트 없음(analysis.py는 dashboard.py를 import하지 않음).
+
+**4. 다운로드 버튼.**
+`frontend/src/pages/AnalysisPage.tsx`의 `WeeklyMenuReviewTab` 툴바
+("◀ 이전 주"/"다음 주 ▶"/"일괄 자동 분류(LLM)"/"전체 예측 비교" 버튼이
+있는 곳)에 "엑셀 다운로드 (식당 협의용)" 버튼을 추가했다 — 이 탭이
+이미 `selectedMonday`/`sunday`로 "그 주"를 들고 있어 "한 주 식단표
+올리면"이라는 요청과 자연스럽게 맞는다. `HomePage.tsx`/
+`AnalysisPage.tsx`의 기존 두 다운로드 버튼과 동일하게
+`<a href={url} download><Button>...</Button></a>` 앵커 하나로 끝난다
+— `client.ts` 변경도, JS blob 처리도 필요 없다(브라우저가
+`Content-Disposition: attachment` 헤더로 자동 다운로드).
+
+### 손대지 않는 것 (교차 확인)
+
+- `cluster_monthly_voe`/`MonthlyVoeCluster`(월 단위 캐시), `voe-briefing`
+  엔드포인트들 — 무변경, 이번 신규 함수는 완전히 별도 경로(DB에
+  저장하지 않음).
+- `weekly_menu_plan_rule_check` 엔드포인트의 응답 스키마/동작 — 순수
+  리팩터링(바디를 헬퍼로 옮기고 호출만 함), 기존 프론트/테스트 영향 없음.
+- `weekly-summary/export`/`meal-log/export`(기존 두 엑셀 export) — 무변경,
+  패턴만 참고.
+- `RuleCard.tsx`/규칙 검증 패널 UI — 무변경, 다운로드 버튼은 별개 앵커.
+
+### 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에 3개 추가:
+  `test_weekly_menu_negotiation_export_returns_xlsx_with_violations_and_voe`
+  (면류 5개 편성 + 오늘 날짜 VOE 코멘트 1건 시딩 → 두 시트 모두
+  header/데이터 행 확인), `test_weekly_menu_negotiation_export_no_violations_no_voe`
+  (위반·VOE 둘 다 없는 기간 → "위반 없음"/"이 기간에 등록된 의견이
+  없습니다" 안내 행), `test_weekly_menu_negotiation_export_surfaces_upstream_failure_as_502`
+  (VOE LLM 호출 실패를 monkeypatch로 재현 → 502). 3개 모두 통과,
+  `pytest` 전체 576개 통과(기존에 무관하게 실패 중이던 2개
+  — `test_menu_highlights_...`/`test_new_menu_status_manual_remove_...`
+  — 는 §117 이전부터 실패하던 날짜 기준 픽스처 문제로 §118과 무관).
+- `npx tsc -b` + `npx vite build` 클린.
+- **실제 개발 DB로 직접 확인**: `curl`로 `/api/dashboard/weekly-menu/negotiation-export`를
+  호출해 실제 xlsx(PK 매직 바이트, `Content-Disposition` 파일명)를
+  받고 `openpyxl`로 열어 두 시트 이름·내용을 확인. 개발 DB엔 오늘
+  (2026-08-24) 기준 최근 2주 안에 등록된 VOE 코멘트가 없어 "이 기간에
+  등록된 의견이 없습니다" 안내가 정상 노출됨을 확인 — 별도로
+  `cluster_voe_comments_for_period`를 실제 코멘트가 있는 과거 기간
+  (2026-07-14~27, 35건)으로 직접 호출해 클러스터링 파이프라인 자체는
+  실데이터로 정상 동작함을 검증. Playwright로 "메뉴 편성·운영" 탭에서
+  새 버튼이 툴바에 렌더링되고 콘솔 에러 0건임을 확인.
+- 문서화(§118) 후 커밋·푸시.

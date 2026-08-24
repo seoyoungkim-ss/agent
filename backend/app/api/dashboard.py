@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from app.api.analysis import _corner_id_by_menu_from_meal_log, corner_analysis, menu_performance
+from app.api.analysis import _compute_plan_rule_check, _corner_id_by_menu_from_meal_log, corner_analysis, menu_performance
 from app.config import get_settings
 from app.db import get_db
 from app.models.enums import TASTE_SCORE_POINTS, MealType, MenuRole
@@ -40,7 +40,7 @@ from app.services.menu_highlights import (
 )
 from app.services.voe_category import OTHER_CATEGORY, VOE_CATEGORIES, classify_voe_categories
 from app.services.voe_category_llm import classify_monthly_voe_via_llm
-from app.services.voe_clustering import cluster_monthly_voe
+from app.services.voe_clustering import cluster_monthly_voe, cluster_voe_comments_for_period
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +345,98 @@ def meal_log_export(period_start: dt.date, period_end: dt.date, db: Session = De
     workbook.close()
 
     filename = f"meal-log-{period_start.isoformat()}_{period_end.isoformat()}.xlsx"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/weekly-menu/negotiation-export")
+async def weekly_menu_negotiation_export(
+    period_start: dt.date,
+    period_end: dt.date,
+    db: Session = Depends(get_db),
+):
+    """§118: 식당협의용 엑셀 — 그 주(period_start~period_end) 편성 규칙
+    위반 내용 + 오늘 기준 최근 2주 VOE 클러스터링 내용을 시트 2개로
+    묶는다(1단계, 이후 다른 분석 추가 예정).
+    """
+    rule_check = _compute_plan_rule_check(db, period_start, period_end)
+
+    voe_period_end = dt.date.today()
+    voe_period_start = voe_period_end - dt.timedelta(days=13)  # 최근 2주(14일, 오늘 포함)
+    settings = get_settings()
+    llm_client = InternalLLMClient(settings)
+    try:
+        voe_clusters = await cluster_voe_comments_for_period(db, voe_period_start, voe_period_end, llm_client)
+    except Exception as exc:
+        # 다른 VOE LLM 엔드포인트(recompute_voe_clusters 등)와 같은 관례 —
+        # 원인 불명 500 대신 detail에 실제 예외를 남긴다.
+        raise HTTPException(
+            status_code=502,
+            detail=f"VOE 클러스터링 실패(사내 LLM 채팅 응답 오류 가능성): {exc}",
+        ) from exc
+
+    buffer = io.BytesIO()
+    workbook = xlsxwriter.Workbook(buffer, {"in_memory": True})
+    header_format = workbook.add_format({"bold": True, "bg_color": "#EEF2FF"})
+
+    sheet1 = workbook.add_worksheet("규칙 위반")
+    headers1 = ["구분", "날짜", "내용"]
+    for col, h in enumerate(headers1):
+        sheet1.write(0, col, h, header_format)
+    row = 1
+    rule_labels = {"hangover": "해장 메뉴 미달", "noodle": "면류 과다", "spicy_red_broth": "매운 국물 과다"}
+    for key, label in rule_labels.items():
+        for day in rule_check[key]:
+            if day["ok"]:
+                continue
+            detail = (
+                f"{day['count']}건"
+                + (f"(기준 {day['limit']}건 초과)" if day["limit"] else "(최소 1건 필요, 0건)")
+                + " — "
+                + ", ".join(f"{m['menu_name']}({m['corner_name']})" for m in day["matches"])
+            )
+            sheet1.write(row, 0, label)
+            sheet1.write(row, 1, day["plan_date"])
+            sheet1.write(row, 2, detail)
+            row += 1
+    for v in rule_check["low_headcount_reuse"]["violations"]:
+        sheet1.write(row, 0, "저조 식수 재편성")
+        sheet1.write(row, 1, v["matches"][0]["plan_date"] if v["matches"] else "")
+        sheet1.write(
+            row,
+            2,
+            f"{v['menu_name']}({v['corner_name']}) — 지난 등장 {v['last_appearance_date']}에 "
+            f"{v['last_appearance_headcount']}식(기준 200식 이하)",
+        )
+        row += 1
+    if row == 1:
+        sheet1.write(row, 0, "위반 없음")
+    sheet1.set_column(0, 0, 16)
+    sheet1.set_column(1, 1, 12)
+    sheet1.set_column(2, 2, 70)
+
+    sheet2 = workbook.add_worksheet("VOE 클러스터링(최근 2주)")
+    headers2 = ["주제", "건수", "키워드", "대표 코멘트"]
+    for col, h in enumerate(headers2):
+        sheet2.write(0, col, h, header_format)
+    for i, (label, representative, count, keywords) in enumerate(voe_clusters, start=1):
+        sheet2.write(i, 0, label)
+        sheet2.write(i, 1, count)
+        sheet2.write(i, 2, ", ".join(keywords))
+        sheet2.write(i, 3, representative)
+    if not voe_clusters:
+        sheet2.write(1, 0, "이 기간에 등록된 의견이 없습니다")
+    sheet2.set_column(0, 0, 16)
+    sheet2.set_column(1, 1, 8)
+    sheet2.set_column(2, 2, 30)
+    sheet2.set_column(3, 3, 60)
+
+    workbook.close()
+    buffer.seek(0)
+    filename = f"cafeteria-negotiation-{period_start.isoformat()}_{period_end.isoformat()}.xlsx"
     return Response(
         content=buffer.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
