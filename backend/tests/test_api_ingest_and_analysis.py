@@ -1211,14 +1211,18 @@ def _seed_voe_comment(db_session, employee_id: str, corner_name: str, comment: s
 
 
 def test_weekly_menu_negotiation_export_returns_xlsx_with_violations_and_voe(client, db_session):
-    """§118: 식당협의용 엑셀 — 규칙 위반이 있는 주 + 최근 2주 VOE 코멘트를
-    시딩해 두 시트가 모두 채워지는지 확인. VOE는 LLM 미설정 시 사내 LLM
-    클라이언트가 내는 모의 응답(_mock_cluster_reply)으로 결정적으로
-    파싱된다."""
+    """§118~§119: 식당협의용 엑셀 — 규칙 위반이 있는 주 + 코너별 취식기록 +
+    최근 2주 VOE 코멘트를 시딩해 세 시트가 모두 채워지는지 확인. VOE는
+    LLM 미설정 시 사내 LLM 클라이언트가 내는 모의 응답(_mock_cluster_reply)
+    으로 결정적으로 파싱된다."""
     noodle_menus = ["라면", "우동", "짜장면", "쫄면", "냉면"]
     rows = [_plan_row(MONDAY, name, "메인") for name in noodle_menus]
     resp = client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
     assert resp.status_code == 200, resp.text
+
+    _ingest_meal_log(client, "N1", "맛남", corner_name="한식", eaten_date=MONDAY)
+    _ingest_meal_log(client, "N2", "맛남", corner_name="한식", eaten_date=MONDAY)
+    _ingest_meal_log(client, "N3", "보통", corner_name="분식", eaten_date=MONDAY)
 
     _seed_voe_comment(db_session, "VOE118A", "한식_voe118a", "국물이 짜요", dt.date.today())
 
@@ -1235,20 +1239,26 @@ def test_weekly_menu_negotiation_export_returns_xlsx_with_violations_and_voe(cli
     from openpyxl import load_workbook
 
     wb = load_workbook(io.BytesIO(resp.content))
-    assert wb.sheetnames == ["규칙 위반", "VOE 클러스터링(최근 2주)"]
+    assert wb.sheetnames == ["규칙 위반", "코너별 통계", "VOE 클러스터링(최근 2주)"]
 
     sheet1_rows = list(wb["규칙 위반"].iter_rows(values_only=True))
     assert sheet1_rows[0] == ("구분", "날짜", "내용")
     assert any(r[0] == "면류 과다" and r[1] == MONDAY.isoformat() for r in sheet1_rows[1:])
 
-    sheet2_rows = list(wb["VOE 클러스터링(최근 2주)"].iter_rows(values_only=True))
-    assert sheet2_rows[0] == ("주제", "건수", "키워드", "대표 코멘트")
-    assert len(sheet2_rows) >= 2  # header + 최소 1개 클러스터
+    corner_rows = list(wb["코너별 통계"].iter_rows(values_only=True))
+    assert corner_rows[0] == ("코너명", "평균 식수", "총 식수", "표본(일)", "평균 만족도")
+    body = corner_rows[1:]
+    assert body[0][0] == "한식"  # 2명 > 분식 1명 — 평균 식수 내림차순
+    assert any(r[0] == "분식" for r in body)
+
+    sheet3_rows = list(wb["VOE 클러스터링(최근 2주)"].iter_rows(values_only=True))
+    assert sheet3_rows[0] == ("주제", "건수", "키워드", "대표 코멘트")
+    assert len(sheet3_rows) >= 2  # header + 최소 1개 클러스터
 
 
 def test_weekly_menu_negotiation_export_no_violations_no_voe(client, db_session):
-    """위반도 VOE 코멘트도 없는 기간 — 안내 행만 들어간다(빈 시트가 아니라
-    "위반 없음"/"이 기간에 등록된 의견이 없습니다" 문구로 명시)."""
+    """위반도, 취식기록도, VOE 코멘트도 없는 기간 — 세 시트 모두 안내 행만
+    들어간다(빈 시트가 아니라 문구로 명시)."""
     period_start = dt.date(2026, 3, 2)
     period_end = period_start + dt.timedelta(days=6)
 
@@ -1263,8 +1273,10 @@ def test_weekly_menu_negotiation_export_no_violations_no_voe(client, db_session)
     wb = load_workbook(io.BytesIO(resp.content))
     sheet1_rows = list(wb["규칙 위반"].iter_rows(values_only=True))
     assert sheet1_rows[1][0] == "위반 없음"
-    sheet2_rows = list(wb["VOE 클러스터링(최근 2주)"].iter_rows(values_only=True))
-    assert sheet2_rows[1][0] == "이 기간에 등록된 의견이 없습니다"
+    corner_rows = list(wb["코너별 통계"].iter_rows(values_only=True))
+    assert corner_rows[1][0] == "이 기간에 취식 기록이 없습니다"
+    sheet3_rows = list(wb["VOE 클러스터링(최근 2주)"].iter_rows(values_only=True))
+    assert sheet3_rows[1][0] == "이 기간에 등록된 의견이 없습니다"
 
 
 def test_weekly_menu_negotiation_export_surfaces_upstream_failure_as_502(client, db_session, monkeypatch):

@@ -9516,3 +9516,65 @@ headers={"Content-Disposition": ...})`)을 그대로 따른다.
   실데이터로 정상 동작함을 검증. Playwright로 "메뉴 편성·운영" 탭에서
   새 버튼이 툴바에 렌더링되고 콘솔 에러 0건임을 확인.
 - 문서화(§118) 후 커밋·푸시.
+
+## §119 — 식당협의용 엑셀 다운로드에 "코너별 통계" 시트 추가
+
+### Context
+
+§118 이후 담당자가 "코너별 통계도" 추가를 요청했다. AskUserQuestion으로
+두 가지를 확정했다: (1) 데이터 소스는 기존 "코너별 분석"
+화면(`corner_analysis`, 배치 집계 `daily_corner_stats` 기반이라 그
+기간에 배치가 안 돌았으면 비어서 나올 수 있음)을 재사용하지 않고,
+**취식기록(meal_log) 직접 집계로 새로 만든다** — §117에서 세운 "배치와
+무관하게 항상 최신값을 보여준다" 원칙과 같다. (2) 시트 순서는 **규칙
+위반 → 코너별 통계 → VOE**로 확정했다.
+
+### 설계
+
+`backend/app/api/dashboard.py`에 새 헬퍼
+`_corner_stats_from_meal_log(db, period_start, period_end, meal_type=None)`
+를 추가했다 — §117에서 만든 `_headcount_by_date_by_corner_bulk`(코너별
+일자별 식수를 meal_log에서 직접 집계, `analysis.py`에서 새로 import)로
+`avg_headcount`/`total_headcount`/`day_count`를 구하고, 같은 기간
+`MealLog`를 `corner_id`로 그룹핑해 평균 만족도
+(`TASTE_SCORE_POINTS`)를 별도로 집계한다(식수 집계 쿼리는 맛평가를
+안 보므로 별개 쿼리 필요). `CornerMaster`로 이름을 붙이고
+`avg_headcount` 내림차순 정렬한다. Take Out/미캠회관(전골) 제외는
+적용하지 않는다 — `corner_analysis` 기본값·§117
+`corner_heavy_rain_ranking`과 같은 관례(코너 단위 집계는 제외하지
+않음).
+
+`weekly_menu_negotiation_export`에서 `meal_type=MealType.LUNCH`(중식
+고정, §76 관례와 동일 — 조/중/석식을 섞으면 코너 간 비교가 흐려짐)로
+호출해 "규칙 위반"과 "VOE 클러스터링(최근 2주)" 사이에 "코너별 통계"
+시트를 끼워 넣는다. 헤더 "코너명/평균 식수/총 식수/표본(일)/평균
+만족도" 5열, 취식 기록이 아예 없으면 "이 기간에 취식 기록이 없습니다"
+안내 행(다른 두 시트의 빈 상태 문구와 같은 패턴).
+
+### 손대지 않는 것 (교차 확인)
+
+- `corner_analysis`(`/analysis/corners`, 배치 집계 기반 "코너별 분석"
+  화면) — 무변경, 이번 신규 헬퍼와는 데이터 소스·용도가 다른 별개
+  경로(엑셀 전용, 화면에 노출 안 함).
+- `_headcount_by_date_by_corner_bulk`(§117) — 그대로 재사용, 변경 없음.
+- "규칙 위반"/"VOE 클러스터링(최근 2주)" 시트 내용·순서(맨 앞/맨 뒤) —
+  무변경, 그 사이에 새 시트만 끼워 넣었다.
+
+### 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`: 기존
+  `test_weekly_menu_negotiation_export_returns_xlsx_with_violations_and_voe`
+  에 서로 다른 두 코너(한식 2명, 분식 1명)의 취식기록 시딩을 추가하고
+  `wb.sheetnames`를 3개 시트로, "코너별 통계" 시트가 평균 식수
+  내림차순으로 정렬되는지 검증하도록 갱신. 기존
+  `test_weekly_menu_negotiation_export_no_violations_no_voe`도 "코너별
+  통계" 시트의 빈 상태 안내 문구를 확인하도록 갱신. 둘 다 통과,
+  `pytest` 전체 576개 통과(§118과 동일하게 무관한 사전 실패 2개 제외).
+- 프론트 변경 없음(버튼 URL 동일, 엑셀 내용만 3번째 시트가 늘었다) —
+  `npx tsc -b` 회귀 확인만 클린.
+- **실제 개발 DB로 직접 확인**: `curl`+`openpyxl`로
+  `/api/dashboard/weekly-menu/negotiation-export`(2026-07-20~27)를
+  호출해 "코너별 통계" 시트에 일품/그린미트/한식/Take Out/양식 5개
+  코너가 평균 식수 내림차순(60/53/23.4/6/2.7)으로, 평균 만족도도 함께
+  채워짐을 확인.
+- 문서화(§119) 후 커밋·푸시.

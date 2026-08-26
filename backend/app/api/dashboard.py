@@ -9,7 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from app.api.analysis import _compute_plan_rule_check, _corner_id_by_menu_from_meal_log, corner_analysis, menu_performance
+from app.api.analysis import (
+    _compute_plan_rule_check,
+    _corner_id_by_menu_from_meal_log,
+    _headcount_by_date_by_corner_bulk,
+    corner_analysis,
+    menu_performance,
+)
 from app.config import get_settings
 from app.db import get_db
 from app.models.enums import TASTE_SCORE_POINTS, MealType, MenuRole
@@ -352,17 +358,64 @@ def meal_log_export(period_start: dt.date, period_end: dt.date, db: Session = De
     )
 
 
+def _corner_stats_from_meal_log(
+    db: Session, period_start: dt.date, period_end: dt.date, meal_type: MealType | None = None
+) -> list[dict]:
+    """§119: 코너별 통계를 취식기록(meal_log)에서 직접 집계한다 — 배치 집계
+    (daily_corner_stats) 기반인 corner_analysis와 달리 배치가 그 기간에
+    아직 안 돌았어도 항상 최신값을 보여준다(§117의 데이터 소스 원칙과 동일).
+    Take Out/미캠회관(전골) 제외는 적용하지 않는다 — corner_analysis
+    기본값·§117 corner_heavy_rain_ranking과 같은 관례(코너 단위 집계는
+    제외하지 않음).
+    """
+    headcount_by_corner = _headcount_by_date_by_corner_bulk(db, period_start, period_end, meal_type)
+
+    period_start_dt = dt.datetime.combine(period_start, dt.time())
+    period_end_exclusive = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    taste_query = db.query(MealLog.corner_id, MealLog.taste_score).filter(
+        MealLog.corner_id.isnot(None),
+        MealLog.eaten_at >= period_start_dt,
+        MealLog.eaten_at < period_end_exclusive,
+        MealLog.taste_score.isnot(None),
+    )
+    if meal_type is not None:
+        taste_query = taste_query.filter(MealLog.meal_type == meal_type)
+    scores_by_corner: dict[int, list[int]] = {}
+    for corner_id, taste_score in taste_query.all():
+        scores_by_corner.setdefault(corner_id, []).append(TASTE_SCORE_POINTS[taste_score])
+
+    corners = {c.corner_id: c.corner_name for c in db.query(CornerMaster).all()}
+
+    rows = []
+    for corner_id, headcount_by_date in headcount_by_corner.items():
+        counts = list(headcount_by_date.values())
+        scores = scores_by_corner.get(corner_id, [])
+        rows.append(
+            {
+                "corner_id": corner_id,
+                "corner_name": corners.get(corner_id),
+                "avg_headcount": round(statistics.fmean(counts), 1),
+                "total_headcount": sum(counts),
+                "day_count": len(counts),
+                "avg_taste_score": round(statistics.fmean(scores), 2) if scores else None,
+            }
+        )
+    rows.sort(key=lambda r: -r["avg_headcount"])
+    return rows
+
+
 @router.get("/weekly-menu/negotiation-export")
 async def weekly_menu_negotiation_export(
     period_start: dt.date,
     period_end: dt.date,
     db: Session = Depends(get_db),
 ):
-    """§118: 식당협의용 엑셀 — 그 주(period_start~period_end) 편성 규칙
-    위반 내용 + 오늘 기준 최근 2주 VOE 클러스터링 내용을 시트 2개로
-    묶는다(1단계, 이후 다른 분석 추가 예정).
+    """§118~§119: 식당협의용 엑셀 — 그 주(period_start~period_end) 편성
+    규칙 위반 내용 + 코너별 통계(취식기록 직접 집계) + 오늘 기준 최근 2주
+    VOE 클러스터링 내용을 시트 3개로 묶는다.
     """
     rule_check = _compute_plan_rule_check(db, period_start, period_end)
+    corner_stats = _corner_stats_from_meal_log(db, period_start, period_end, meal_type=MealType.LUNCH)
 
     voe_period_end = dt.date.today()
     voe_period_start = voe_period_end - dt.timedelta(days=13)  # 최근 2주(14일, 오늘 포함)
@@ -418,21 +471,36 @@ async def weekly_menu_negotiation_export(
     sheet1.set_column(1, 1, 12)
     sheet1.set_column(2, 2, 70)
 
-    sheet2 = workbook.add_worksheet("VOE 클러스터링(최근 2주)")
-    headers2 = ["주제", "건수", "키워드", "대표 코멘트"]
+    sheet2 = workbook.add_worksheet("코너별 통계")
+    headers2 = ["코너명", "평균 식수", "총 식수", "표본(일)", "평균 만족도"]
     for col, h in enumerate(headers2):
         sheet2.write(0, col, h, header_format)
+    for i, c in enumerate(corner_stats, start=1):
+        sheet2.write(i, 0, c["corner_name"])
+        sheet2.write(i, 1, c["avg_headcount"])
+        sheet2.write(i, 2, c["total_headcount"])
+        sheet2.write(i, 3, c["day_count"])
+        sheet2.write(i, 4, c["avg_taste_score"] if c["avg_taste_score"] is not None else "")
+    if not corner_stats:
+        sheet2.write(1, 0, "이 기간에 취식 기록이 없습니다")
+    sheet2.set_column(0, 0, 20)
+    sheet2.set_column(1, 4, 12)
+
+    sheet3 = workbook.add_worksheet("VOE 클러스터링(최근 2주)")
+    headers3 = ["주제", "건수", "키워드", "대표 코멘트"]
+    for col, h in enumerate(headers3):
+        sheet3.write(0, col, h, header_format)
     for i, (label, representative, count, keywords) in enumerate(voe_clusters, start=1):
-        sheet2.write(i, 0, label)
-        sheet2.write(i, 1, count)
-        sheet2.write(i, 2, ", ".join(keywords))
-        sheet2.write(i, 3, representative)
+        sheet3.write(i, 0, label)
+        sheet3.write(i, 1, count)
+        sheet3.write(i, 2, ", ".join(keywords))
+        sheet3.write(i, 3, representative)
     if not voe_clusters:
-        sheet2.write(1, 0, "이 기간에 등록된 의견이 없습니다")
-    sheet2.set_column(0, 0, 16)
-    sheet2.set_column(1, 1, 8)
-    sheet2.set_column(2, 2, 30)
-    sheet2.set_column(3, 3, 60)
+        sheet3.write(1, 0, "이 기간에 등록된 의견이 없습니다")
+    sheet3.set_column(0, 0, 16)
+    sheet3.set_column(1, 1, 8)
+    sheet3.set_column(2, 2, 30)
+    sheet3.set_column(3, 3, 60)
 
     workbook.close()
     buffer.seek(0)
