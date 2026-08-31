@@ -13,7 +13,9 @@ import {
   type PredictedNumbersRow,
   type Season,
   type TrendDirection,
+  type VoeCategoryComment,
   type VoeCategoryRow,
+  type VoeCluster,
   type Weather,
   type WeatherCorrelationMetric,
   type WeatherEvent,
@@ -2042,6 +2044,7 @@ function formatMonthLabel(month: string): string {
 function computeTopVoeEntries(categories: VoeCategoryRow[]): {
   topVoeCorner: { name: string; count: number } | null;
   topVoeMenu: { name: string; count: number } | null;
+  comments: VoeCategoryComment[];
 } {
   const seenVoeKeys = new Set<string>();
   const uniqueVoeComments = categories.flatMap((c) => c.comments).filter((c) => {
@@ -2066,6 +2069,73 @@ function computeTopVoeEntries(categories: VoeCategoryRow[]): {
   return {
     topVoeCorner: topVoeEntry((c) => c.corner_name),
     topVoeMenu: topVoeEntry((c) => c.menu_name),
+    comments: uniqueVoeComments,
+  };
+}
+
+// 2026-08: 담당자 요청 — VOE 클러스터링을 참고 이미지(허브·스포크 토픽
+// 네트워크)처럼 도식화. §19에서 코너 코어층 메뉴쌍에 쓰다 §82에서 화면과
+// 함께 삭제된 buildMenuPairGraphOption과 같은 패턴(ECharts graph
+// 시리즈, force 레이아웃)을 재사용한다 — 중심 노드(그 달 VOE 전체) 하나에
+// 클러스터별 노드가 방사형으로 연결되고, 노드 크기는 comment_count에
+// 비례한다.
+function buildVoeClusterGraphOption(
+  clusters: VoeCluster[],
+  monthLabel: string,
+  chartTheme: { text: string; accent: string; surface: string },
+) {
+  const maxCount = Math.max(1, ...clusters.map((c) => c.comment_count));
+  // 2026-08: fixed:true + x/y:0으로 중심 노드를 고정했더니 그래프 좌표계의
+  // 원점(캔버스 왼쪽 위 모서리)에 박혀버렸다(force 레이아웃엔 좌표계가
+  // 따로 없어 x/y가 그대로 픽셀 좌표로 쓰임) — 위치를 고정하지 않고 물리
+  // 시뮬레이션에 맡기면, 모든 클러스터 노드와 연결된(가장 많이 연결된)
+  // 중심 노드가 인력·척력 균형으로 자연스럽게 가운데 쪽에 자리잡는다.
+  const centerNode = {
+    name: monthLabel,
+    symbolSize: 56,
+    itemStyle: { color: chartTheme.surface, borderColor: chartTheme.text, borderWidth: 2 },
+    label: { show: true, color: chartTheme.text, fontSize: 12, fontWeight: 600 as const },
+  };
+  const clusterNodes = clusters.map((c) => ({
+    name: c.cluster_label,
+    symbolSize: 26 + (c.comment_count / maxCount) * 34,
+    value: c.comment_count,
+    itemStyle: { color: chartTheme.accent },
+    label: { show: true, position: "right" as const, color: chartTheme.text, fontSize: 12 },
+  }));
+  const edges = clusters.map((c) => ({
+    source: monthLabel,
+    target: c.cluster_label,
+    lineStyle: {
+      width: 1 + (c.comment_count / maxCount) * 3,
+      color: chartTheme.accent,
+      opacity: 0.45,
+      curveness: 0.15,
+    },
+  }));
+  return {
+    tooltip: {
+      formatter: (params: { dataType?: string; name?: string; data?: { value?: number } }) => {
+        if (params.dataType !== "node" || params.name === monthLabel) return monthLabel;
+        const cluster = clusters.find((c) => c.cluster_label === params.name);
+        if (!cluster) return params.name ?? "";
+        const keywordPart = cluster.keywords.length > 0 ? ` (${cluster.keywords.join(", ")})` : "";
+        return `${cluster.cluster_label}${keywordPart} — ${cluster.comment_count}건`;
+      },
+    },
+    series: [
+      {
+        type: "graph",
+        layout: "force",
+        roam: true,
+        draggable: true,
+        force: { repulsion: 220, edgeLength: [70, 130], gravity: 0.3 },
+        edgeSymbol: ["none", "arrow"],
+        edgeSymbolSize: 8,
+        nodes: [centerNode, ...clusterNodes],
+        edges,
+      },
+    ],
   };
 }
 
@@ -2087,6 +2157,16 @@ function VoeAnalysisTab() {
   const [anchorMonth, setAnchorMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [monthCount, setMonthCount] = useState("3");
   const [selectedVoeCategory, setSelectedVoeCategory] = useState<{ month: string; category: string } | null>(null);
+  // 2026-08: 담당자 요청 — "voe 분류시 최다 코너/최다메뉴 하이라이트 해주고
+  // 클릭하면 관련내용 펼쳐지게". 카테고리 선택과는 별개 상태로 두고, 하나를
+  // 선택하면 다른 쪽은 닫는다(한 번에 하나의 코멘트 목록만 펼쳐 보이게).
+  const [selectedVoeHighlight, setSelectedVoeHighlight] = useState<{
+    month: string;
+    kind: "corner" | "menu";
+    value: string;
+  } | null>(null);
+  // VOE 클러스터링 네트워크 그래프에서 클릭한 클러스터 노드 — 상세 패널에 쓴다.
+  const [selectedVoeCluster, setSelectedVoeCluster] = useState<{ month: string; label: string } | null>(null);
 
   // 최신 달(anchorMonth)이 맨 앞, 과거로 갈수록 뒤.
   const months = Array.from({ length: Number(monthCount) }, (_, i) => monthsBefore(anchorMonth, i));
@@ -2244,7 +2324,7 @@ function VoeAnalysisTab() {
         {voeCategoryMulti.isError && <ErrorState error={voeCategoryMulti.error} />}
         <div className="space-y-6">
           {voeCategoryMulti.data?.map(({ month, data }) => {
-            const { topVoeCorner, topVoeMenu } = computeTopVoeEntries(data.categories);
+            const { topVoeCorner, topVoeMenu, comments: allVoeComments } = computeTopVoeEntries(data.categories);
             const isPendingThisMonth = recomputeVoeCategory.isPending && recomputeVoeCategory.variables === month;
             return (
               <div key={month} className="border-t pt-4 first:border-t-0 first:pt-0" style={{ borderColor: "var(--border)" }}>
@@ -2272,25 +2352,84 @@ function VoeAnalysisTab() {
                       <StatTile
                         label="이 달 VOE 최다 코너"
                         value={topVoeCorner ? topVoeCorner.name : "-"}
-                        sub={topVoeCorner ? `${topVoeCorner.count}건` : undefined}
+                        sub={topVoeCorner ? `${topVoeCorner.count}건 — 클릭하면 관련 코멘트를 볼 수 있어요` : undefined}
+                        tone={topVoeCorner ? "warning" : undefined}
+                        onClick={
+                          topVoeCorner
+                            ? () => {
+                                setSelectedVoeCategory(null);
+                                setSelectedVoeHighlight((cur) =>
+                                  cur?.month === month && cur?.kind === "corner" && cur?.value === topVoeCorner.name
+                                    ? null
+                                    : { month, kind: "corner", value: topVoeCorner.name },
+                                );
+                              }
+                            : undefined
+                        }
                       />
                       <StatTile
                         label="이 달 VOE 최다 메뉴"
                         value={topVoeMenu ? topVoeMenu.name : "-"}
-                        sub={topVoeMenu ? `${topVoeMenu.count}건` : undefined}
+                        sub={topVoeMenu ? `${topVoeMenu.count}건 — 클릭하면 관련 코멘트를 볼 수 있어요` : undefined}
+                        tone={topVoeMenu ? "warning" : undefined}
+                        onClick={
+                          topVoeMenu
+                            ? () => {
+                                setSelectedVoeCategory(null);
+                                setSelectedVoeHighlight((cur) =>
+                                  cur?.month === month && cur?.kind === "menu" && cur?.value === topVoeMenu.name
+                                    ? null
+                                    : { month, kind: "menu", value: topVoeMenu.name },
+                                );
+                              }
+                            : undefined
+                        }
                       />
                     </div>
+                    {selectedVoeHighlight?.month === month && (
+                      <div className="mb-4">
+                        {(() => {
+                          const { kind, value } = selectedVoeHighlight;
+                          const filtered = allVoeComments.filter((c) =>
+                            kind === "corner" ? c.corner_name === value : c.menu_name === value,
+                          );
+                          return (
+                            <>
+                              <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+                                {kind === "corner" ? "코너" : "메뉴"} "{value}" 관련 코멘트 {filtered.length}건
+                              </p>
+                              <Table
+                                columns={[
+                                  { key: "eaten_at", label: "취식일시" },
+                                  { key: "corner_menu", label: "코너·메뉴" },
+                                  { key: "comment", label: "코멘트" },
+                                ]}
+                                rows={filtered.map((c) => ({
+                                  eaten_at: c.eaten_at.replace("T", " "),
+                                  corner_menu: c.corner_name
+                                    ? `${c.corner_name}${c.menu_name ? ` · ${c.menu_name}` : ""}`
+                                    : "-",
+                                  comment: c.comment,
+                                }))}
+                                rowKey={(r, i) => `${r.eaten_at as string}-${i}`}
+                              />
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
                       {data.categories.map((c) => {
                         const isSelected = selectedVoeCategory?.month === month && selectedVoeCategory?.category === c.category;
                         return (
                           <button
                             key={c.category}
-                            onClick={() =>
+                            onClick={() => {
+                              setSelectedVoeHighlight(null);
                               setSelectedVoeCategory((cur) =>
                                 cur?.month === month && cur?.category === c.category ? null : { month, category: c.category },
-                              )
-                            }
+                              );
+                            }}
                             className="rounded-xl border p-3 text-left transition-colors"
                             style={{
                               borderColor: isSelected ? "var(--accent)" : "var(--border)",
@@ -2373,32 +2512,52 @@ function VoeAnalysisTab() {
                   </p>
                 )}
                 {data.length > 0 && (
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {data.map((c, i) => (
-                      <div
-                        key={i}
-                        className="rounded-xl border p-3"
-                        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-[13px] font-medium">{c.cluster_label}</div>
-                          <div className="shrink-0 text-xs" style={{ color: "var(--ink-muted)" }}>
-                            {c.comment_count}건
+                  <>
+                    <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
+                      가운데 원이 이 달 VOE 전체, 주변 원이 각 주제입니다(원이 클수록 코멘트가 많음). 주제를
+                      클릭하면 아래에 상세가 나옵니다. 드래그해서 배치를 바꿀 수 있어요.
+                    </p>
+                    <ReactECharts
+                      option={buildVoeClusterGraphOption(data, formatMonthLabel(month), chartTheme)}
+                      style={{ height: 320 }}
+                      onEvents={{
+                        click: (params: { dataType?: string; name?: string }) => {
+                          if (params.dataType !== "node" || params.name === formatMonthLabel(month)) return;
+                          setSelectedVoeCluster((cur) =>
+                            cur?.month === month && cur?.label === params.name ? null : { month, label: params.name! },
+                          );
+                        },
+                      }}
+                    />
+                    {selectedVoeCluster?.month === month &&
+                      (() => {
+                        const selected = data.find((c) => c.cluster_label === selectedVoeCluster.label);
+                        if (!selected) return null;
+                        return (
+                          <div
+                            className="mt-3 rounded-xl border p-3"
+                            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-[13px] font-medium">{selected.cluster_label}</div>
+                              <div className="shrink-0 text-xs" style={{ color: "var(--ink-muted)" }}>
+                                {selected.comment_count}건
+                              </div>
+                            </div>
+                            {selected.keywords.length > 0 && (
+                              <div className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                                키워드: {selected.keywords.join(", ")}
+                              </div>
+                            )}
+                            {selected.representative_comment && (
+                              <div className="mt-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+                                대표 코멘트: "{selected.representative_comment}"
+                              </div>
+                            )}
                           </div>
-                        </div>
-                        {c.keywords.length > 0 && (
-                          <div className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                            {c.keywords.join(", ")}
-                          </div>
-                        )}
-                        {c.representative_comment && (
-                          <div className="mt-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
-                            "{c.representative_comment}"
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+                        );
+                      })()}
+                  </>
                 )}
               </div>
             );

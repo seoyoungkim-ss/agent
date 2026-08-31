@@ -227,6 +227,10 @@ export function useChartTheme() {
     axis: resolveColor("var(--chart-axis)"),
     grid: resolveColor("var(--chart-gridline)"),
     accent: resolveColor("var(--accent)"),
+    // 2026-08: VOE 클러스터링 네트워크 그래프의 중심(허브) 노드 배경 —
+    // 카드 배경과 같은 톤이라 라이트/다크 모드 모두에서 스포크 노드(accent
+    // 색)와 자연스럽게 구분된다.
+    surface: resolveColor("var(--surface)"),
   };
 }
 
