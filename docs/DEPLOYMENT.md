@@ -224,10 +224,13 @@ copy config.example.json config.json
 사용법:
 ```powershell
 python cli.py weekly-menu "C:\식단표\2026-07-27_주간식단표.xlsx" --week-start 2026-07-27
-python cli.py meal-log "C:\취식로그\mealdata.xlsx"
+python cli.py meal-log "C:\취식로그\POS_취식정보.xlsx" "C:\취식로그\맛평가리스트.xlsx"
 ```
-전송 전 파싱 결과를 보여주고 `y`를 입력해야 실제로 서버에 전송된다. Python 없이
-쓰고 싶으면 `ingestion-tool/README.md`의 PyInstaller `.exe` 빌드 방법을 참고한다.
+`meal-log`는 식당취식정보(POS)와 맛평가 리스트, **두 파일을 함께** 받아 내부에서
+병합한 뒤 전송한다(자세한 컬럼 요구사항·병합 로직은
+`docs/INGEST_GUIDE.md` 참고). 전송 전 파싱 결과를 보여주고 `y`를 입력해야 실제로
+서버에 전송된다. Python 없이 쓰고 싶으면 `ingestion-tool/README.md`의 PyInstaller
+`.exe` 빌드 방법을 참고한다.
 
 > ⚠️ 수동 실행형 도구다. 새 파일을 받을 때마다 실행하는 것을 운영 체크리스트에
 > 넣어두는 것을 권장한다.
