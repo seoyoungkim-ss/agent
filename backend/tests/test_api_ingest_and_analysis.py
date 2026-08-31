@@ -2062,6 +2062,34 @@ def test_headcount_trend_total_matches_division_analysis(client):
     assert new_total == legacy_total
 
 
+def test_headcount_trend_weekly_bucket_clamped_to_period_start(client):
+    """2026-08 담당자 신고: 8/25(화)~8/31(월)처럼 월요일이 아닌 날부터 시작하는
+    7일 범위를 weekly granularity로 조회하면, 화~일(6일)이 요청 범위 밖의
+    날짜(그 주의 월요일, 선택 시작일보다 하루 이른 날)로 뭉쳐 라벨링되던
+    버그. 이제 그 버킷 라벨이 period_start로 clamp돼 항상 요청 범위 안에서
+    나와야 한다."""
+    period_start = MONDAY + dt.timedelta(days=1)  # 화요일
+    period_end = MONDAY + dt.timedelta(days=7)  # 다음주 월요일 (7일 범위)
+    for i, offset in enumerate(range(0, 7)):  # 화~다음주 월요일, 하루 1명씩
+        _ingest_meal_log(client, f"W{i}", "맛남", eaten_date=period_start + dt.timedelta(days=offset))
+
+    rows = _trend(
+        client,
+        period_start=period_start.isoformat(),
+        period_end=period_end.isoformat(),
+        granularity="weekly",
+    )
+    periods = {r["period"] for r in rows}
+    # 버그 이전엔 period_start보다 하루 이른 날짜(월요일)가 라벨로 나왔다 —
+    # 이제 모든 버킷 라벨이 요청 범위 안에 있어야 한다.
+    assert all(p >= period_start.isoformat() for p in periods), periods
+    # 화~일(6일)은 한 주 안이라 period_start로 clamp된 버킷 하나로 뭉치고
+    # (6명), 그 다음주 월요일은 자기 자신이 버킷 라벨인 별도 버킷(1명).
+    by_period = {r["period"]: r["headcount"] for r in rows}
+    assert by_period[period_start.isoformat()] == 6
+    assert by_period[period_end.isoformat()] == 1
+
+
 def test_home_daily_summary_computes_live_headcount_and_avg_taste_score(client):
     """§92: 홈 "금일 식수"/"금일 맛평가 점수" 스탯타일 전용 엔드포인트 —
     daily_corner_stats(나이트 배치) 없이도 meal_log만으로 즉시 값이 나와야

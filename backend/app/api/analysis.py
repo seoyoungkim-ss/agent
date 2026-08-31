@@ -122,11 +122,17 @@ from app.services.weather_correlation import pearson_correlation
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
 
-def _period_bucket(stat_date: dt.date, granularity: str) -> str:
+def _period_bucket(stat_date: dt.date, granularity: str, period_start: dt.date | None = None) -> str:
     if granularity == "monthly":
         return stat_date.strftime("%Y-%m")
     if granularity == "weekly":
         monday = stat_date - dt.timedelta(days=stat_date.weekday())
+        # 선택 범위가 월요일에서 시작하지 않으면 그 주의 월요일이 period_start보다
+        # 이를 수 있다(예: 8/25(화)~8/31(월) 선택 시 8/25~30이 전부 "8/24" 버킷으로
+        # 뭉쳐 범위 밖 날짜가 라벨로 나가버린다) — period_start로 clamp해 버킷 라벨이
+        # 항상 요청 범위 안에 있게 한다.
+        if period_start is not None and monday < period_start:
+            return period_start.isoformat()
         return monday.isoformat()
     return stat_date.isoformat()
 
@@ -311,7 +317,7 @@ def headcount_trend(
         else:
             series_key = series_label = "전체"
 
-        key = (_period_bucket(stat_date, granularity), series_key, series_label)
+        key = (_period_bucket(stat_date, granularity, period_start), series_key, series_label)
         totals[key] = totals.get(key, 0) + cnt
 
     # §91: group_by="corner"일 때 기존 정렬은 series_key(문자열 corner_id)의

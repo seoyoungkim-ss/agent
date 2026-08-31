@@ -46,9 +46,10 @@ function isoDaysAgo(days: number): string {
 const PERIOD_END = isoDaysAgo(0);
 const PERIOD_START = isoDaysAgo(180); // PRD: 취식 데이터 6개월 누적 기준
 
-// §83: 메뉴 중복 점검(재편성 간격 / 부찬 반복)은 6개월 전체보다 최근 한 달이
-// 기본으로 더 유용하다는 피드백 — 이 두 패널만 30일 기본 기간을 쓴다.
-const DUPLICATION_CHECK_PERIOD_START = isoDaysAgo(30);
+// §83/2026-08: 메뉴 중복 점검(재편성 간격 / 부찬 반복)은 6개월 전체보다 최근
+// 기간이 기본으로 더 유용하다는 피드백 — 이 두 패널만 최근 3개월 기본 기간을
+// 쓴다(30일 → 3개월로 확대, 담당자 요청).
+const DUPLICATION_CHECK_PERIOD_START = isoDaysAgo(90);
 const DUPLICATION_CHECK_PERIOD_END = isoDaysAgo(0);
 
 // 마우스를 올리면 나오는 숫자(차트 툴팁)는 표(.toFixed(2))와 자릿수를 맞춰
@@ -2701,7 +2702,10 @@ function RepeatedSideDishPanel() {
   const [repeatEnd, setRepeatEnd] = useState(DUPLICATION_CHECK_PERIOD_END);
   const [repeatCornerId, setRepeatCornerId] = useState<number | null>(null);
   const [showAllRepeated, setShowAllRepeated] = useState(false);
-  const REPEATED_PREVIEW_COUNT = 20;
+  // 2026-08: 담당자 요청 — 기본으로 top5만 보여주고(정렬 기준 변경 시 그 기준의
+  // top5), "전체 보기"로 펼쳐야 전체 랭킹이 나오게 한다(재편성 점검 Top5와
+  // 같은 패턴).
+  const REPEATED_PREVIEW_COUNT = 5;
   // §80: "어떤 부찬이 중복해서 나올 때마다 만족도가 떨어지는지 패턴을 파악하고
   // 싶다" — 횟수/연결 메인 만족도로 정렬 가능하게 한다.
   const [sortKey, setSortKey] = useState<"count" | "satisfaction">("count");
@@ -2807,7 +2811,8 @@ function RepeatedSideDishPanel() {
       {repeatedItems.length > 0 && (
         <>
           <p className="mb-2 text-xs" style={{ color: "var(--ink-muted)" }}>
-            메뉴명을 클릭하면 편성 상세를 볼 수 있습니다.
+            기본으로 Top5만 보여줍니다(정렬 기준을 바꾸면 그 기준의 Top5). 메뉴명을
+            클릭하면 편성 상세를 볼 수 있습니다.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-[13px]">
@@ -3112,6 +3117,12 @@ function MenuDuplicationCheckSection() {
 // §75: 랭킹 표를 기본 top5 상승/top5 하락만 보여주고 나머지는 펼치기로 미룬다
 // — 날씨유형·계절 랭킹 둘 다 같은 헬퍼로 일관되게 처리한다. 기존 |diff|
 // 내림차순 정렬(rows)은 그대로 두고, 접힌 상태에서 보여줄 부분집합만 뽑는다.
+// 2026-08: 기본 표본 기준(5일)에서는 대부분 메뉴가 표본 부족(diff_vs_normal
+// null)이라 risers/fallers가 둘 다 빈 채로 남아 "전체 보기"를 눌러야만 뭔가
+// 보이는 문제가 있었다(담당자 신고 — "업데이트 안 된 것 같다"). 표본 있는
+// 행으로 하나도 못 채우면, 있는 행 중 앞에서부터 최대 n개를 그대로 보여준다
+// — 각 행 렌더러가 이미 low_sample 배지를 붙이므로 표본 부족이라는 사실
+// 자체는 숨기지 않는다(이 세션 관례: 숨기지 않고 배지로만 표시).
 function topMoversAndFallers<T>(rows: T[], getDiff: (row: T) => number | null, n = 5): T[] {
   const risers = rows
     .filter((r) => (getDiff(r) ?? 0) > 0)
@@ -3121,6 +3132,9 @@ function topMoversAndFallers<T>(rows: T[], getDiff: (row: T) => number | null, n
     .filter((r) => (getDiff(r) ?? 0) < 0)
     .sort((a, b) => (getDiff(a) as number) - (getDiff(b) as number))
     .slice(0, n);
+  if (risers.length + fallers.length === 0) {
+    return rows.slice(0, n);
+  }
   return [...risers, ...fallers];
 }
 

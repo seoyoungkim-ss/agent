@@ -309,6 +309,59 @@ def test_collect_voe_briefing_facts_empty_when_no_clusters(db_session):
     assert facts["clusters"] == []
 
 
+def test_collect_voe_briefing_facts_includes_top_corners_and_menus(db_session):
+    """2026-08 담당자 요청: "voe가 많았던 코너, 메뉴도 요약에 포함" —
+    meal_log를 코너/메뉴로 조인해 그 달 코멘트 건수 상위를 facts에 담는다."""
+    from app.models.enums import Division, MealType
+    from app.models.logs import MealLog
+    from app.models.master import CornerMaster, EmployeeMaster, MenuMaster
+
+    hansik = CornerMaster(corner_name="한식")
+    bunsik = CornerMaster(corner_name="분식")
+    kimchi = MenuMaster(menu_name="김치찌개")
+    employee = EmployeeMaster(employee_id="E1", division=Division.OTHER)
+    db_session.add_all([hansik, bunsik, kimchi, employee])
+    db_session.flush()
+
+    # 한식 코멘트 2건(그중 1건은 김치찌개), 분식 코멘트 1건 — 코너는 한식이 1위.
+    db_session.add_all(
+        [
+            MealLog(
+                eaten_at=dt.datetime(2026, 8, 3, 12, 0),
+                employee_id="E1",
+                meal_type=MealType.LUNCH,
+                corner_id=hansik.corner_id,
+                menu_id=kimchi.menu_id,
+                comment="국물이 짜요",
+            ),
+            MealLog(
+                eaten_at=dt.datetime(2026, 8, 4, 12, 0),
+                employee_id="E1",
+                meal_type=MealType.LUNCH,
+                corner_id=hansik.corner_id,
+                comment="맛있어요",
+            ),
+            MealLog(
+                eaten_at=dt.datetime(2026, 8, 5, 12, 0),
+                employee_id="E1",
+                meal_type=MealType.LUNCH,
+                corner_id=bunsik.corner_id,
+                comment="양이 적어요",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    facts = _collect_voe_briefing_facts(db_session, dt.date(2026, 8, 1))
+    assert facts["top_corners"][0] == {"corner_name": "한식", "comment_count": 2}
+    assert {"corner_name": "분식", "comment_count": 1} in facts["top_corners"]
+    assert facts["top_menus"] == [{"menu_name": "김치찌개", "comment_count": 1}]
+
+    prompt = _build_voe_briefing_prompt(facts)
+    assert "한식(2건)" in prompt
+    assert "김치찌개(1건)" in prompt
+
+
 def test_build_voe_briefing_prompt_includes_cluster_details():
     facts = _voe_facts(_voe_cluster())
     prompt = _build_voe_briefing_prompt(facts)

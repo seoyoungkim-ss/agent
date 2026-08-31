@@ -9578,3 +9578,110 @@ headers={"Content-Disposition": ...})`)을 그대로 따른다.
   코너가 평균 식수 내림차순(60/53/23.4/6/2.7)으로, 평균 만족도도 함께
   채워짐을 확인.
 - 문서화(§119) 후 커밋·푸시.
+
+## §120 — 4개 화면 버그수정 + 기본값/표시 개선
+
+### Context
+
+담당자가 4가지를 한 번에 신고했다: (1) 현황 식수추이 기본값을 "가장
+최근 월~금"으로, 8/25~31 같은 7일 범위를 고르면 8/24·8/31 두 점만
+나오는 버그, (2) 메뉴 중복점검(재편성/부찬반복) 기본 기간을 3개월·
+top5로, (3) 시뮬레이션 날씨/계절 랭킹이 "전체 N개 보기"를 눌러야만
+메뉴가 보이는 문제, (4) VOE AI 브리핑에 VOE 많았던 코너·메뉴와 예측
+원인 포함.
+
+### 설계
+
+**1. 식수추이 주간 버킷팅 버그.** `_period_bucket`(`analysis.py:125-`)
+이 `stat_date`를 그 날이 속한 ISO주의 월요일로 무조건 묶었는데, 그
+월요일이 `period_start`보다 이를 수 있었다 — 8/25(화)~8/30(일)이 전부
+"8/24"(월, 요청 범위 밖) 버킷으로 뭉치고 8/31(월)만 따로 남아 두 점만
+보이는 게 원인이었다. `_period_bucket`에 `period_start`를 추가로 받아,
+계산된 월요일이 그보다 이르면 `period_start`로 clamp하도록 고쳤다
+(`headcount_trend`의 호출부만 이 인자를 넘긴다 — `division_analysis`는
+이 버그와 무관해 그대로 둠). 값 합산 로직은 그대로, 부분 주간 버킷의
+"대표 라벨"만 요청 범위 안으로 들어오게 바뀐다.
+
+기본값도 "최근 1주"(`isoDaysAgo(6)`, 오늘 기준 롤링 7일)에서 "이번 주
+월~금"(`currentMonday()` ~ `addDays(currentMonday(), 4)`)으로
+바꿨다(`HomePage.tsx`) — 5일 범위라 기존 daily-fallback 조건
+(`trendRangeDays < 7`)에 걸려 자동으로 daily granularity가 되므로,
+기본 진입 화면에서는 이 버그 케이스 자체가 생기지 않는다.
+
+**2. 메뉴 중복점검 3개월 + top5.** `AnalysisPage.tsx`의
+`DUPLICATION_CHECK_PERIOD_START`를 `isoDaysAgo(30)` → `isoDaysAgo(90)`로
+바꿨다 — 재편성 점검·부찬 반복 랭킹 두 탭의 기본값이 이 상수 하나라
+한 곳만 고치면 둘 다 적용된다. 백엔드 두 엔드포인트 모두 원래부터 긴
+기간에 안전하게 설계돼 있어(재편성은 `lookback_days=180`이 UI 기본값과
+무관하게 항상 적용, 부찬 반복은 애초에 "길어도 됨" 목적으로 설계됨)
+백엔드는 무변경. 재편성 점검은 이미 "가장 이르게 재편성된 메뉴 Top5"가
+있어 그대로 두고, 부찬 반복 랭킹은 top5가 없어(`REPEATED_PREVIEW_COUNT
+=20`) 5로 낮추고 "기본으로 Top5만 보여줍니다" 안내를 추가했다 — 기존
+"전체 N개 보기" 토글은 그대로 남아 있어 필요하면 전체를 볼 수 있다.
+
+**3. 시뮬레이션 top5가 기본으로 빈 화면인 버그.** 날씨유형·계절 랭킹이
+공유하는 `topMoversAndFallers`(`AnalysisPage.tsx:3115-`)가
+`diff_vs_normal`이 `null`(표본 부족)인 행을 top5 후보에서 아예 제외
+했다 — 기본 표본 기준(5일)에서는 대부분 메뉴가 표본 부족이라 top5
+후보 자체가 텅 비어, "전체 N개 보기"를 눌러야 비로소 (표본 부족
+배지가 붙은) 전체 목록이 보였다("데이터가 업데이트 안 된 것 같다"는
+신고의 실제 원인). 유효한 diff로 risers+fallers를 하나도 못 채우면
+(=전부 low_sample) 있는 행 중 앞에서부터 최대 n개를 그대로 반환하도록
+고쳤다 — 각 행 렌더러가 이미 `low_sample` 배지를 붙이므로 표본 부족
+이라는 사실 자체는 여전히 드러난다(이 세션 관례: 숨기지 않고 배지로만
+표시).
+
+**4. VOE AI 브리핑 — 코너·메뉴, 예측 원인.**
+`_collect_voe_briefing_facts`(`llm_analysis.py`)가 기존엔
+`MonthlyVoeCluster`만 읽었는데, `dashboard.py::_compute_voe_by_category`
+가 쓰는 것과 같은 `MealLog ⋈ CornerMaster ⋈ MenuMaster` 조인으로 그 달
+코멘트를 코너별/메뉴별로 세어(`Counter`) 상위 3개씩(`top_corners`/
+`top_menus`)을 facts에 추가했다. `_build_voe_briefing_prompt`에 이
+목록을 불릿으로 넣고, "의견이 많았던 코너·메뉴가 있으면 언급하고,
+짐작 가는 원인이 있으면 완곡한 표현으로 조심스럽게 추정해도 된다"는
+지시를 더했다 — 기존 "사실에 없는 내용은 지어내지 마세요" 지시는
+그대로 유지해 근거 없는 단정을 막는다. `_fallback_voe_briefing`(LLM
+미설정 시 폴백)은 원래부터 클러스터만 나열하는 용도라 변경하지
+않았다 — 코너/메뉴/원인 언급은 실제 LLM이 프롬프트를 받아 문장을 쓸
+때만 나타난다.
+
+### 손대지 않는 것 (교차 확인)
+
+- `_menu_weather_event_summary`/`_menu_season_summary`의 low_sample
+  판정·정렬 로직(백엔드) — 무변경, 프론트의 top5 "선택" 단계만 고쳤다.
+- 재편성 점검의 "편성 기준(N일) 미달" 별도 리스트
+  (`ROTATION_PREVIEW_COUNT=15`) — 이번 요청 대상 아님.
+- `MonthlyVoeCluster`/`cluster_monthly_voe`(월간 클러스터링 저장 로직),
+  `_fallback_voe_briefing` — 무변경.
+- `_trend_cause`(메뉴별 만족도 변화 원인 캐시) — VOE 브리핑과는 별개
+  경로로 그대로 둠. "예측 원인"은 새 LLM 추론 지시로 해결했다.
+- `division_analysis`(`/analysis/divisions`)의 `_period_bucket` 호출 —
+  `period_start` 인자를 안 넘기므로 동작 그대로(이 버그 신고 대상이
+  아니었음).
+
+### 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에
+  `test_headcount_trend_weekly_bucket_clamped_to_period_start` 추가 —
+  8/25~31 시나리오를 그대로 재현해 모든 버킷 라벨이 요청 범위 안에
+  있고(`period_start`로 clamp된 버킷 6명 + 8/31 버킷 1명) 나오는지 확인.
+- `backend/tests/test_llm_analysis.py`에
+  `test_collect_voe_briefing_facts_includes_top_corners_and_menus` 추가
+  — 코너/메뉴별 코멘트 건수 집계와 프롬프트에 반영되는지 확인.
+- `pytest` 전체 578개 통과(기존 무관 사전 실패 2개 제외, §117 이후
+  동일).
+- `npx tsc -b` + `npx vite build` 클린.
+- **실제 개발 DB(컨테이너 재기동으로 새로 시딩) + Playwright**: (1)
+  홈 진입 시 식수추이가 "이번 주 월~금"(08/31~09/04)으로 뜸을 확인,
+  curl로 8/25~31 조회 시 버킷이 `2026-08-25`/`2026-08-31` 두 개로(범위
+  밖 날짜 없이) 나옴을 확인, (2) 메뉴 중복점검 기본 기간이
+  06/02~08/31(3개월)로, 부찬 반복 랭킹에 "기본으로 Top5만 보여줍니다"
+  안내와 함께 뜸을 확인, (3) 시뮬레이션 탭에서 표본 완화 체크박스
+  없이도 "비" 랭킹에 표본 3일짜리 김치찌개가 "표본 부족" 배지와 함께
+  보임을 확인(체크 전엔 빈 테이블이었던 것과 대조), (4) 실제 시딩
+  데이터로 `_collect_voe_briefing_facts`를 직접 호출해 `top_corners`
+  (한식 29건/분식 12건)·`top_menus`(라면 12건 등)가 채워지고, 프롬프트
+  텍스트에 그대로 들어감을 확인(사내 LLM 미설정 환경이라 실제 브리핑
+  문장 생성 자체는 확인 못 함 — 폴백 경로는 의도적으로 무변경). 콘솔
+  에러 0건.
+- 문서화(§120) 후 커밋·푸시.

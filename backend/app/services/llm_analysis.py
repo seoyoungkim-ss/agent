@@ -22,15 +22,17 @@
   (지어내지 못하게 프롬프트에 명시)
 """
 
+import calendar
 import datetime as dt
 import json
 import logging
+from collections import Counter
 
 from sqlalchemy.orm import Session
 
 from app.models.enums import MenuRole
 from app.models.logs import MealLog, WeeklyMenuPlan
-from app.models.master import MenuMaster
+from app.models.master import CornerMaster, MenuMaster
 from app.models.stats import LlmAnalysisCache, MonthlyVoeCluster
 from app.services.llm_client import InternalLLMClient
 
@@ -247,6 +249,9 @@ async def summarize_menu_trend(llm_client: InternalLLMClient, facts: dict) -> tu
 # `MonthlyVoeCluster`가 없으면) 브리핑도 만들 수 없다 — 호출부가 먼저 확인한다.
 
 
+_VOE_BRIEFING_TOP_N = 3
+
+
 def _collect_voe_briefing_facts(db: Session, month_start: dt.date) -> dict:
     clusters = (
         db.query(MonthlyVoeCluster)
@@ -254,6 +259,34 @@ def _collect_voe_briefing_facts(db: Session, month_start: dt.date) -> dict:
         .order_by(MonthlyVoeCluster.comment_count.desc())
         .all()
     )
+
+    # 2026-08: 담당자 요청 — "VOE가 많았던 코너, 메뉴도 요약에 포함". 클러스터
+    # 자체엔 코너/메뉴 축이 없어서(§118 확인) meal_log를 코너/메뉴로 조인해
+    # 그 달 코멘트 건수를 따로 센다 — dashboard.py::_compute_voe_by_category가
+    # 쓰는 것과 같은 조인 패턴.
+    last_day = calendar.monthrange(month_start.year, month_start.month)[1]
+    month_end_exclusive = dt.datetime.combine(month_start.replace(day=last_day) + dt.timedelta(days=1), dt.time())
+    month_start_dt = dt.datetime.combine(month_start, dt.time())
+    comment_rows = (
+        db.query(CornerMaster.corner_name, MenuMaster.menu_name)
+        .select_from(MealLog)
+        .join(CornerMaster, MealLog.corner_id == CornerMaster.corner_id)
+        .outerjoin(MenuMaster, MealLog.menu_id == MenuMaster.menu_id)
+        .filter(
+            MealLog.eaten_at >= month_start_dt,
+            MealLog.eaten_at < month_end_exclusive,
+            MealLog.comment.isnot(None),
+        )
+        .all()
+    )
+    corner_counts: Counter[str] = Counter()
+    menu_counts: Counter[str] = Counter()
+    for corner_name, menu_name in comment_rows:
+        if corner_name:
+            corner_counts[corner_name] += 1
+        if menu_name:
+            menu_counts[menu_name] += 1
+
     return {
         "month": month_start.isoformat(),
         "clusters": [
@@ -265,6 +298,14 @@ def _collect_voe_briefing_facts(db: Session, month_start: dt.date) -> dict:
             }
             for c in clusters
         ],
+        "top_corners": [
+            {"corner_name": name, "comment_count": count}
+            for name, count in corner_counts.most_common(_VOE_BRIEFING_TOP_N)
+        ],
+        "top_menus": [
+            {"menu_name": name, "comment_count": count}
+            for name, count in menu_counts.most_common(_VOE_BRIEFING_TOP_N)
+        ],
     }
 
 
@@ -273,10 +314,18 @@ def _build_voe_briefing_prompt(facts: dict) -> str:
     for c in facts["clusters"]:
         keyword_part = f" (키워드: {', '.join(c['keywords'])})" if c["keywords"] else ""
         lines.append(f"- {c['label']}{keyword_part} — {c['comment_count']}건. 예: \"{c['representative_comment']}\"")
+    if facts.get("top_corners"):
+        corner_part = ", ".join(f"{c['corner_name']}({c['comment_count']}건)" for c in facts["top_corners"])
+        lines.append(f"의견이 많이 달린 코너 순: {corner_part}")
+    if facts.get("top_menus"):
+        menu_part = ", ".join(f"{m['menu_name']}({m['comment_count']}건)" for m in facts["top_menus"])
+        lines.append(f"의견이 많이 달린 메뉴 순: {menu_part}")
     lines.append("")
     lines.append(
-        "위 주제들을 건수 비중을 반영해 한국어 3~4문장의 브리핑으로 요약하세요 — 네이버 리뷰 "
-        "AI 브리핑처럼 이번 달 핵심을 훑어볼 수 있게 씁니다. 사실에 없는 내용은 지어내지 마세요."
+        "위 내용을 건수 비중을 반영해 한국어 3~4문장의 브리핑으로 요약하세요 — 네이버 리뷰 "
+        "AI 브리핑처럼 이번 달 핵심을 훑어볼 수 있게 씁니다. 의견이 많았던 코너·메뉴가 있다면 "
+        "언급하고, 주제 내용상 짐작 가는 원인이 있으면(맛/양/서비스/위생 등) \"~로 보입니다\" "
+        "같은 완곡한 표현으로 조심스럽게 추정해도 됩니다 — 단, 사실에 없는 내용은 지어내지 마세요."
     )
     return "\n".join(lines)
 

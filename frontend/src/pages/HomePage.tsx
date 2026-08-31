@@ -25,7 +25,7 @@ import {
   useChartTheme,
 } from "../components/ui";
 import { CornerMetricComparisonSection } from "./AnalysisPage";
-import { addDays, daysBetweenInclusive, isoDaysAgo, mondayOf, toIsoDate } from "../lib/week";
+import { addDays, currentMonday, daysBetweenInclusive, isoDaysAgo, mondayOf, toIsoDate } from "../lib/week";
 import { CornerLogo } from "../components/CornerLogo";
 
 // 니치 코너(Take Out/미캠회관/그린미트)를 범례에서 기본 숨기던 규칙은 제거됐다
@@ -285,9 +285,11 @@ export function HomePage({
   const [trendCornerIds, setTrendCornerIds] = useState<number[]>([]);
   const [trendDivisions, setTrendDivisions] = useState<Division[]>([]);
   // §95: 조회 기간을 기간 단위(일/주/월)에서 자동으로 정하던 것(§81)을 사용자가
-  // 직접 고르는 방식으로 바꿨다 — 기본값은 "최근 한 주"(오늘 포함 7일).
-  const [trendPeriodStart, setTrendPeriodStart] = useState(() => isoDaysAgo(6));
-  const [trendPeriodEnd, setTrendPeriodEnd] = useState(() => isoDaysAgo(0));
+  // 직접 고르는 방식으로 바꿨다. 기본값은 "가장 최근 월~금"(담당자 요청,
+  // 2026-08) — 이번 주 월요일~금요일. 5일 범위라 아래 daily-fallback
+  // 조건(trendRangeDays < 7)에 걸려 자동으로 daily granularity가 된다.
+  const [trendPeriodStart, setTrendPeriodStart] = useState(() => currentMonday());
+  const [trendPeriodEnd, setTrendPeriodEnd] = useState(() => addDays(currentMonday(), 4));
   const TREND_PERIOD_PRESETS: { label: string; days: number }[] = [
     { label: "최근 1주", days: 6 },
     { label: "최근 4주", days: 27 },
