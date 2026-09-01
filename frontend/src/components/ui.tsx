@@ -75,6 +75,7 @@ export function StatTile({
   trend,
   sparkline,
   variant,
+  size,
 }: {
   label: string;
   value: ReactNode;
@@ -91,10 +92,15 @@ export function StatTile({
   // §101: 탭당 대표 지표 하나를 OS 다크모드 여부와 무관하게 항상 어두운
   // 고정색(--hero-*)으로 강조. 기본값 없음 = 기존 호출부는 전부 무변경.
   variant?: "default" | "dark";
+  // 2026-09: VOE 탭 상단 요약 카드 3개처럼 "숫자만 봐도 상황 파악"이 목적인
+  // 자리는 기본 28px보다 더 크게(32~40px) 키운다 — opt-in이라 기존 호출부는
+  // 전부 무변경.
+  size?: "default" | "lg";
 }) {
   const Tag = onClick ? "button" : "div";
   const toneColor = tone ? STAT_TILE_TONE_COLOR[tone] : undefined;
   const isDark = variant === "dark";
+  const isLarge = size === "lg";
   return (
     <Tag
       className={clsx(
@@ -127,7 +133,7 @@ export function StatTile({
         </div>
         <div className="mt-1 flex items-baseline gap-2">
           <span
-            className="text-[28px] font-bold leading-none"
+            className={clsx("font-bold leading-none", isLarge ? "text-[36px]" : "text-[28px]")}
             style={{ color: isDark ? "var(--hero-accent)" : "var(--ink)" }}
           >
             {value}
