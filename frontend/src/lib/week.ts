@@ -48,6 +48,18 @@ export function currentMonday(): string {
   return mondayOf(new Date());
 }
 
+/** 오늘 이전(오늘 제외)의 가장 최근 "완결된" 평일 5일(월~금) 구간의 월요일.
+ * 오늘이 금요일이어도 그날 데이터가 아직 안 끝났을 수 있어 지난 금요일부터
+ * 거슬러 올라간다 — 예: 오늘이 화요일(9/1)이면 지난 금요일(8/28)이 속한 주의
+ * 월요일(8/24)을 반환한다. 식수추이 기본 기간(2026-09, 담당자 요청)처럼
+ * "항상 데이터가 꽉 찬 최근 평일 구간"이 필요한 화면 진입 기본값으로 쓴다. */
+export function lastCompleteWeekdayMonday(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 1); // 오늘 제외, 어제부터 거슬러 올라간다
+  while (d.getDay() !== 5) d.setDate(d.getDate() - 1); // 5 = 금요일
+  return mondayOf(d);
+}
+
 /** 두 "YYYY-MM-DD" 사이의 일수(양끝 포함). */
 export function daysBetweenInclusive(startIso: string, endIso: string): number {
   const start = new Date(`${startIso}T00:00:00`).getTime();

@@ -6,6 +6,7 @@ import { ClipboardList, MessageSquare, Smile, Users } from "lucide-react";
 import {
   api,
   type Classification,
+  type CornerMealTypeHeadcountResponse,
   type Division,
   type Granularity,
   type HeadcountGroupBy,
@@ -25,7 +26,7 @@ import {
   useChartTheme,
 } from "../components/ui";
 import { CornerMetricComparisonSection } from "./AnalysisPage";
-import { addDays, currentMonday, daysBetweenInclusive, isoDaysAgo, mondayOf, toIsoDate } from "../lib/week";
+import { addDays, daysBetweenInclusive, isoDaysAgo, lastCompleteWeekdayMonday, mondayOf, toIsoDate } from "../lib/week";
 import { CornerLogo } from "../components/CornerLogo";
 
 // 니치 코너(Take Out/미캠회관/그린미트)를 범례에서 기본 숨기던 규칙은 제거됐다
@@ -36,6 +37,65 @@ import { CornerLogo } from "../components/CornerLogo";
 function shortDate(dateIso: string): string {
   const [, m, d] = dateIso.split("-");
   return `${Number(m)}/${Number(d)}`;
+}
+
+// "코너별 조식/중식/석식 식수 현황" 표를 엑셀에 그대로 붙여넣을 수 있게
+// 탭 구분 텍스트(TSV)로 만든다 — 표가 실제로 렌더링하는 값·포맷과 동일하게
+// 맞춘다(2026-09, 담당자 요청: "이 표를 그대로 복사할 수 있는 버튼").
+function formatHeadcountCell(headcount: number): string {
+  return headcount.toLocaleString();
+}
+
+function formatShareCell(share: number | null): string {
+  return share != null ? `${(share * 100).toFixed(1)}%` : "-";
+}
+
+function buildCornerMealTypeHeadcountTsv(
+  data: CornerMealTypeHeadcountResponse,
+  mealTypes: readonly MealType[],
+): string {
+  const lines: string[] = [];
+  lines.push(["구분", ...mealTypes.flatMap((mt) => [mt, "", ""])].join("\t"));
+  lines.push(["", ...mealTypes.flatMap(() => ["메뉴", "수량", "식수율"])].join("\t"));
+
+  for (const row of data.take_in) {
+    const cells = mealTypes.flatMap((mt) => {
+      const cell = row.meals[mt];
+      return [cell?.menu_name ?? "-", formatHeadcountCell(cell?.headcount ?? 0), formatShareCell(cell?.share_of_traffic ?? null)];
+    });
+    lines.push([row.corner_name, ...cells].join("\t"));
+  }
+
+  lines.push(
+    [
+      "소계",
+      ...mealTypes.flatMap((mt) => {
+        const bucket = data.subtotal[mt];
+        return ["", formatHeadcountCell(bucket?.headcount ?? 0), formatShareCell(bucket?.share_of_traffic ?? null)];
+      }),
+    ].join("\t"),
+  );
+
+  if (data.take_out) {
+    const takeOut = data.take_out;
+    const cells = mealTypes.flatMap((mt) => {
+      const cell = takeOut.meals[mt];
+      return [cell?.menu_name ?? "-", formatHeadcountCell(cell?.headcount ?? 0), formatShareCell(cell?.share_of_traffic ?? null)];
+    });
+    lines.push([takeOut.corner_name, ...cells].join("\t"));
+  }
+
+  lines.push(
+    [
+      "합계",
+      ...mealTypes.flatMap((mt) => {
+        const bucket = data.total[mt];
+        return ["", formatHeadcountCell(bucket?.headcount ?? 0), formatShareCell(bucket?.share_of_traffic ?? null)];
+      }),
+    ].join("\t"),
+  );
+
+  return lines.join("\n");
 }
 
 const RECOMPUTE_PERIOD_START = isoDaysAgo(180); // PRD: 취식 데이터 6개월 누적 기준
@@ -285,11 +345,15 @@ export function HomePage({
   const [trendCornerIds, setTrendCornerIds] = useState<number[]>([]);
   const [trendDivisions, setTrendDivisions] = useState<Division[]>([]);
   // §95: 조회 기간을 기간 단위(일/주/월)에서 자동으로 정하던 것(§81)을 사용자가
-  // 직접 고르는 방식으로 바꿨다. 기본값은 "가장 최근 월~금"(담당자 요청,
-  // 2026-08) — 이번 주 월요일~금요일. 5일 범위라 아래 daily-fallback
-  // 조건(trendRangeDays < 7)에 걸려 자동으로 daily granularity가 된다.
-  const [trendPeriodStart, setTrendPeriodStart] = useState(() => currentMonday());
-  const [trendPeriodEnd, setTrendPeriodEnd] = useState(() => addDays(currentMonday(), 4));
+  // 직접 고르는 방식으로 바꿨다. 기본값은 "가장 최근 완결된 평일 5일"(담당자
+  // 요청, 2026-09) — 단순히 "이번 주 월~금"으로 하면 오늘이 그 주의 금요일
+  // 이전일 때 아직 지나지 않은 미래 날짜까지 범위에 섞여 빈 데이터가 보였다
+  // (예: 오늘이 화요일이면 이번 주 목·금은 아직 데이터가 없음) — 항상 데이터가
+  // 꽉 찬 지난 완결 주(오늘이 화요일 9/1이면 8/24~28)를 기본으로 보여준다.
+  // 5일 범위라 아래 daily-fallback 조건(trendRangeDays < 7)에 걸려 자동으로
+  // daily granularity가 되는 동작은 그대로다.
+  const [trendPeriodStart, setTrendPeriodStart] = useState(() => lastCompleteWeekdayMonday());
+  const [trendPeriodEnd, setTrendPeriodEnd] = useState(() => addDays(lastCompleteWeekdayMonday(), 4));
   const TREND_PERIOD_PRESETS: { label: string; days: number }[] = [
     { label: "최근 1주", days: 6 },
     { label: "최근 4주", days: 27 },
@@ -310,6 +374,16 @@ export function HomePage({
     queryKey: ["corner-meal-type-headcount", mealTypeHeadcountDate],
     queryFn: () => api.cornerMealTypeHeadcount({ target_date: mealTypeHeadcountDate }),
   });
+  // 표 복사 버튼 클릭 피드백 — 복사 성공 시 잠깐 "복사됨"으로 라벨을 바꿨다가
+  // 원복한다(2026-09).
+  const [mealTypeHeadcountCopied, setMealTypeHeadcountCopied] = useState(false);
+  async function copyMealTypeHeadcountTable() {
+    if (!cornerMealTypeHeadcountQuery.data) return;
+    const tsv = buildCornerMealTypeHeadcountTsv(cornerMealTypeHeadcountQuery.data, MEAL_TYPE_OPTIONS);
+    await navigator.clipboard.writeText(tsv);
+    setMealTypeHeadcountCopied(true);
+    setTimeout(() => setMealTypeHeadcountCopied(false), 1500);
+  }
 
   // §81: 담당자가 지정한 7개 코너를 기본으로 켠 상태로 시작한다. 코너 목록은
   // DB 기반이라(하드코딩된 마스터 리스트 없음) cornerListQuery가 로드된 뒤
@@ -864,7 +938,7 @@ export function HomePage({
       </Card>
 
       <Card title="코너별 조식/중식/석식 식수 현황">
-        <div className="mb-3 flex items-center gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-[13px]" style={{ color: "var(--ink-secondary)" }}>
           <label className="flex items-center gap-1.5">
             날짜
             <input
@@ -876,6 +950,13 @@ export function HomePage({
               style={{ borderColor: "var(--border)", background: "var(--surface)" }}
             />
           </label>
+          <Button
+            variant="secondary"
+            onClick={copyMealTypeHeadcountTable}
+            disabled={!cornerMealTypeHeadcountQuery.data}
+          >
+            {mealTypeHeadcountCopied ? "복사됨" : "표 복사"}
+          </Button>
         </div>
         {cornerMealTypeHeadcountQuery.isLoading && <LoadingState />}
         {cornerMealTypeHeadcountQuery.isError && <ErrorState error={cornerMealTypeHeadcountQuery.error} />}
