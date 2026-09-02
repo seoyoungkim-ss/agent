@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import type { LucideIcon } from "lucide-react";
-import { ClipboardList, MessageSquare, Smile, Users } from "lucide-react";
+import { Check, ClipboardList, Copy, MessageSquare, Smile, Users } from "lucide-react";
 import {
   api,
   type Classification,
@@ -27,6 +27,7 @@ import {
 } from "../components/ui";
 import { CornerMetricComparisonSection } from "./AnalysisPage";
 import { addDays, daysBetweenInclusive, isoDaysAgo, lastCompleteWeekdayMonday, mondayOf, toIsoDate } from "../lib/week";
+import { copyTextToClipboard } from "../lib/clipboard";
 import { CornerLogo } from "../components/CornerLogo";
 
 // 니치 코너(Take Out/미캠회관/그린미트)를 범례에서 기본 숨기던 규칙은 제거됐다
@@ -374,15 +375,21 @@ export function HomePage({
     queryKey: ["corner-meal-type-headcount", mealTypeHeadcountDate],
     queryFn: () => api.cornerMealTypeHeadcount({ target_date: mealTypeHeadcountDate }),
   });
-  // 표 복사 버튼 클릭 피드백 — 복사 성공 시 잠깐 "복사됨"으로 라벨을 바꿨다가
-  // 원복한다(2026-09).
-  const [mealTypeHeadcountCopied, setMealTypeHeadcountCopied] = useState(false);
+  // 표 복사 버튼 클릭 피드백 — 성공/실패에 따라 아이콘을 잠깐 바꿨다가
+  // 원복한다(2026-09). "idle"이 기본, 클릭 후 결과에 따라 success/error로
+  // 바뀌었다가 1.5초 뒤 idle로 돌아간다.
+  const [mealTypeHeadcountCopyState, setMealTypeHeadcountCopyState] = useState<"idle" | "success" | "error">("idle");
   async function copyMealTypeHeadcountTable() {
     if (!cornerMealTypeHeadcountQuery.data) return;
     const tsv = buildCornerMealTypeHeadcountTsv(cornerMealTypeHeadcountQuery.data, MEAL_TYPE_OPTIONS);
-    await navigator.clipboard.writeText(tsv);
-    setMealTypeHeadcountCopied(true);
-    setTimeout(() => setMealTypeHeadcountCopied(false), 1500);
+    // navigator.clipboard(Async Clipboard API)는 보안 컨텍스트(HTTPS/localhost)
+    // 에서만 존재한다 — 이 서비스는 사내망에 평문 HTTP로 배포돼(docs/DEPLOYMENT.md)
+    // 실제 사용 환경에서 navigator.clipboard가 undefined라 조용히 실패했었다
+    // (2026-09 신고). copyTextToClipboard가 document.execCommand("copy") 폴백을
+    // 갖고 있어 보안 컨텍스트가 아니어도 동작한다.
+    const ok = await copyTextToClipboard(tsv);
+    setMealTypeHeadcountCopyState(ok ? "success" : "error");
+    setTimeout(() => setMealTypeHeadcountCopyState("idle"), 1500);
   }
 
   // §81: 담당자가 지정한 7개 코너를 기본으로 켠 상태로 시작한다. 코너 목록은
@@ -950,13 +957,35 @@ export function HomePage({
               style={{ borderColor: "var(--border)", background: "var(--surface)" }}
             />
           </label>
-          <Button
-            variant="secondary"
+          {/* 텍스트 "표 복사" 대신 복사 아이콘(종이 두 장 겹친 모양)으로 —
+              담당자 요청(2026-09). Button은 텍스트 버튼용 패딩(px-4 py-2)이라
+              아이콘 하나만 담기엔 넓어, 여기선 Button과 같은 secondary
+              스타일(테두리·ink-secondary)을 쓰는 일반 button을 직접 쓴다. */}
+          <button
+            type="button"
             onClick={copyMealTypeHeadcountTable}
             disabled={!cornerMealTypeHeadcountQuery.data}
+            title={
+              mealTypeHeadcountCopyState === "success"
+                ? "복사됨"
+                : mealTypeHeadcountCopyState === "error"
+                  ? "복사 실패 — 다시 시도해주세요"
+                  : "표 복사"
+            }
+            aria-label="표 복사"
+            className="rounded-xl border p-2 transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
+            style={{
+              borderColor: "var(--border)",
+              background: "var(--surface)",
+              color: mealTypeHeadcountCopyState === "error" ? "var(--critical)" : "var(--ink-secondary)",
+            }}
           >
-            {mealTypeHeadcountCopied ? "복사됨" : "표 복사"}
-          </Button>
+            {mealTypeHeadcountCopyState === "success" ? (
+              <Check size={16} strokeWidth={2} />
+            ) : (
+              <Copy size={16} strokeWidth={2} />
+            )}
+          </button>
         </div>
         {cornerMealTypeHeadcountQuery.isLoading && <LoadingState />}
         {cornerMealTypeHeadcountQuery.isError && <ErrorState error={cornerMealTypeHeadcountQuery.error} />}

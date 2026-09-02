@@ -9941,3 +9941,68 @@ daily granularity로 동작하는 건 무변경.
   탭 구분으로 화면 표와 정확히 일치함을 확인, 버튼 라벨이 "복사됨"으로
   바뀜을 확인. 콘솔 에러 0건.
 - 문서화(§123) 후 커밋·푸시.
+
+## §124 — 표 복사 버튼 실제 동작 안 함 버그 수정 + 아이콘으로 교체
+
+### Context
+
+§123에서 추가한 "코너별 조식/중식/석식 식수 현황" 표 복사 버튼을
+담당자가 실제 사내 환경에서 눌러보니 복사가 안 된다고 신고했다.
+`docs/DEPLOYMENT.md`에 이 서비스는 `http://<서버 IP>:8000`처럼 **평문
+HTTP**로 사내망에 배포된다고 명시돼 있다 — 브라우저 `navigator.clipboard`
+(Async Clipboard API)는 **보안 컨텍스트(HTTPS 또는 localhost)에서만**
+존재하고, 그 외(사내 IP로 접속하는 평문 HTTP)에서는 `navigator.clipboard`
+자체가 `undefined`라 `.writeText()` 호출이 예외를 던지며 조용히 실패한다
+(에러 핸들링이 없어 "그냥 안 눌리는" 것처럼 보였다). §123 검증 때
+Playwright가 성공했던 건 `localhost`라 보안 컨텍스트였기 때문 — 실제
+사내 배포 조건(HTTP+IP)과 달랐다. 추가로 "표 복사" 텍스트 워딩 대신
+복사 아이콘(종이 두 장 겹친 모양)으로 바꿔달라는 요청도 함께 받았다.
+
+### 설계
+
+**1. 클립보드 복사 폴백.** 새 파일 `frontend/src/lib/clipboard.ts`에
+`copyTextToClipboard(text): Promise<boolean>` 추가 — `navigator.clipboard
+?.writeText`가 있으면 먼저 시도하고(성공하면 true), 없거나 실패하면
+레거시 `document.execCommand("copy")`로 폴백한다(숨겨진 `<textarea>`에
+값을 넣고 select 후 복사, 끝나면 제거). `execCommand`는 보안 컨텍스트
+여부와 무관하게 동작해 평문 HTTP 배포에서도 복사가 된다. `HomePage.tsx`
+의 `copyMealTypeHeadcountTable()`이 이 헬퍼를 쓰도록 바꾸고, 반환값에
+따라 `mealTypeHeadcountCopyState`를 `"success"`/`"error"`로 나눠
+성공/실패를 구분해서 보여준다(표본부족을 숨기지 않는 것과 같은 원칙 —
+실패를 성공처럼 보이게 하지 않는다).
+
+**2. 아이콘 교체.** `lucide-react`의 `Copy`(겹친 종이 두 장)/`Check`
+아이콘을 새로 import(기존 `App.tsx`/`HomePage.tsx`의 `<Icon size={17}
+strokeWidth={2} />` 관례 재사용, 크기만 16으로 살짝 작게). `Button`
+컴포넌트는 텍스트 버튼용 패딩(px-4 py-2)이라 아이콘 하나만 담기엔
+넓어서, 이 버튼만 `Button`과 같은 secondary 시각 스타일(테두리·
+`--ink-secondary`)을 쓰는 일반 `<button>`을 직접 써서 패딩을 `p-2`로
+줄였다(새 공용 컴포넌트는 만들지 않음). 상태별 아이콘: 평소엔 `Copy`,
+성공 시 1.5초간 `Check`, 실패 시 1.5초간 `Copy`를 `--critical` 색으로.
+`title`/`aria-label`은 "표 복사"→"복사됨"/"복사 실패 — 다시
+시도해주세요"로 텍스트 워딩을 유지해 접근성은 그대로 지킨다(시각
+워딩만 아이콘으로 바뀜).
+
+### 손대지 않는 것 (교차 확인)
+
+- `buildCornerMealTypeHeadcountTsv()`(TSV 생성 로직, §123) — 무변경,
+  복사 메커니즘만 고쳤다.
+- 표 자체의 렌더링/데이터 로직, 식수추이 기본 기간(§123) — 무변경.
+- `Button` 컴포넌트(`ui.tsx`) 자체는 무변경 — 이 아이콘 버튼만 별도
+  인라인 `<button>`을 썼다.
+
+### 테스트/검증
+
+- 프론트 전용 변경(백엔드 파일 무변경) — `npx tsc -b` + `npx vite build`
+  클린.
+- **실제 개발 DB + Playwright, 2가지 케이스**: (1) 정상 케이스(보안
+  컨텍스트=localhost) — 아이콘 클릭 후 `navigator.clipboard.readText()`
+  로 읽은 내용이 표와 일치, 아이콘이 체크 모양으로 바뀜을 확인(회귀
+  없음). (2) **비보안 컨텍스트 재현(이번 버그의 실제 조건)** —
+  `navigator.clipboard`를 `undefined`로 강제 오버라이드한 브라우저
+  컨텍스트에서 같은 버튼을 클릭 → `execCommand` 폴백 경로가 예외 없이
+  완주해 버튼이 "성공"(체크 아이콘, title="복사됨") 상태로 바뀜을
+  확인 — §123의 검증 환경(localhost)에서는 드러나지 않던 실제 배포
+  조건의 버그가 이번엔 재현·수정됨을 함께 확인했다. 두 케이스 모두
+  콘솔 에러 0건.
+- 문서화(§124) 후 커밋·푸시.
