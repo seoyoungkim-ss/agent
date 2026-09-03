@@ -806,6 +806,109 @@ def test_improvement_points_falls_back_to_congestion_when_nothing_higher_priorit
     assert "한식" in body["point"] or "한식" in body["evidence"]
 
 
+# ---------------------------------------------------------------------------
+# "개선 필요 포인트"의 편성·운영 축 — 담당자 요청(2026-09)으로 3개 체크 중
+# "반복편성"은 범용 반찬만 제외하고 유지, "취식기록 없음"·"재료 중복"은
+# 이 카드에서 완전히 뺐다. 아래 4개는 각각을 확인한다.
+# ---------------------------------------------------------------------------
+
+
+def test_improvement_points_ignores_excluded_generic_repeated_side_dish(client):
+    """§116에서 "부찬 반복 랭킹" 화면에 이미 적용한 범용 반찬 제외 목록
+    (포기김치/음료/수제피클/할라피뇨)을 이 카드의 "반복 편성" 체크에도
+    적용했다 — 포기김치가 같은 코너에 4번 편성돼도(임계 3회 초과) 더 이상
+    이슈로 잡히지 않아야 한다. 취식 기록을 전혀 안 넣어 다른 축(만족도/
+    VOE/혼잡도)은 애초에 신호가 없다."""
+    rows = [_plan_row(MONDAY + dt.timedelta(days=i), "포기김치", "부찬") for i in range(4)]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+
+    resp = client.get(
+        "/api/dashboard/improvement-points",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=5)).isoformat()},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "no_issue"}
+
+
+def test_improvement_points_still_flags_non_excluded_repeated_menu(client):
+    """위 테스트의 대조군 — 범용 제외 목록에 없는 메뉴가 반복 편성되면
+    "반복 편성" 체크 자체는 여전히 살아있어야 한다(완전히 꺼둔 게 아니라
+    범용 항목만 뺀 것임을 확인)."""
+    rows = [_plan_row(MONDAY + dt.timedelta(days=i), "시금치나물", "부찬") for i in range(4)]
+    client.post("/api/ingest/weekly-menu", json={"rows": rows}, headers=AUTH_HEADERS)
+
+    resp = client.get(
+        "/api/dashboard/improvement-points",
+        params={"period_start": MONDAY.isoformat(), "period_end": (MONDAY + dt.timedelta(days=5)).isoformat()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "issue"
+    assert body["axis"] == "planning"
+    assert "시금치나물" in body["evidence"]
+
+
+def test_improvement_points_ignores_menus_with_no_intake(client):
+    """편성됐지만 취식 기록이 없는 메뉴는 더 이상 이 카드의 이슈로 잡히지
+    않는다(메뉴명 표기 불일치로 인한 잡음이 많다는 피드백, 2026-09)."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={"rows": [_plan_row(MONDAY, "특별메뉴", "메인")]},
+        headers=AUTH_HEADERS,
+    )
+    # 위 메뉴에 대한 meal-log는 하나도 안 넣는다 — "취식 기록 없음" 조건.
+
+    resp = client.get(
+        "/api/dashboard/improvement-points",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "no_issue"}
+
+
+def test_improvement_points_ignores_ingredient_clash(client):
+    """한 끼 구성 안 재료 중복(메인+부찬)도 더 이상 이 카드의 이슈로 잡히지
+    않는다 — 이미 "메뉴 편성·운영" 탭에 상세 점검 화면이 따로 있다."""
+    client.post(
+        "/api/ingest/weekly-menu",
+        json={
+            "rows": [
+                _plan_row(MONDAY, "콩나물국밥", "메인"),
+                _plan_row(MONDAY, "콩나물무침", "부찬"),
+            ]
+        },
+        headers=AUTH_HEADERS,
+    )
+
+    resp = client.get(
+        "/api/dashboard/improvement-points",
+        params={"period_start": MONDAY.isoformat(), "period_end": MONDAY.isoformat()},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "no_issue"}
+
+
+def test_improvement_points_voe_axis_uses_rolling_30_day_window(client):
+    """VOE 축은 달력월이 아니라 "최근 한달"(오늘 기준 롤링 30일)을 본다
+    (담당자 요청, 2026-09). period_end를 그달 3일로 잡으면, 달력월 기준
+    "이번 달"엔 코멘트가 하나도 없어 VOE 후보가 없지만(과거 동작), 롤링
+    30일 창은 지난달 말(달력월 기준 "지난달")까지 포함해 같은 코멘트를
+    "최근" 것으로 잡아 이슈가 뜬다."""
+    period_end = dt.date(2026, 7, 3)
+    for i, eaten_date in enumerate([dt.date(2026, 6, 29), dt.date(2026, 6, 30)]):
+        _ingest_meal_log(client, f"V{i}", "맛남", comment="위생이 너무 안 좋아요", eaten_date=eaten_date)
+
+    resp = client.get(
+        "/api/dashboard/improvement-points",
+        params={"period_start": period_end.isoformat(), "period_end": period_end.isoformat()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "issue"
+    assert body["axis"] == "voe"
+    assert "위생" in body["point"] or "위생" in body["evidence"]
+
+
 def test_list_weekly_menu_groups_main_and_sides_with_deadline(client):
     _ingest_weekly_menu(client)  # 제육볶음(메인)/계란후라이(부찬), 한식, MONDAY
 

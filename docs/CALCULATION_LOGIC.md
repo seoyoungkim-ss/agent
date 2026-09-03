@@ -10006,3 +10006,87 @@ strokeWidth={2} />` 관례 재사용, 크기만 16으로 살짝 작게). `Button
   조건의 버그가 이번엔 재현·수정됨을 함께 확인했다. 두 케이스 모두
   콘솔 에러 0건.
 - 문서화(§124) 후 커밋·푸시.
+
+## §125 — "개선 필요 포인트" VOE 최근 1개월 롤링 + 편성 체크 3종 제외
+
+### Context
+
+담당자 요청(오타 포함 원문): "개선필요 포인트 보여줄 때 최근 한달 voe를
+기준으로 해주고 포기김치 반복편성, 취식기록넣는거, 재료 중복은 제외해줘".
+홈 화면 "개선 필요 포인트" 카드(만족도→VOE→편성·운영→혼잡도 순으로 가장
+급한 이슈 하나만 보여주는 카드)를 조사해 세 항목을 정확히 특정했다:
+
+- **VOE 축 기준 기간**: 지금까지 `period_end`가 속한 **달력월**(그달
+  1일~오늘)이었다 — 월초엔 데이터가 며칠치뿐이라
+  `_VOE_MIN_REPEAT_COUNT`(2건) 문턱조차 못 넘기기 쉬웠다. "최근 한달"은
+  안정적인 롤링 30일을 뜻한다.
+- **"포기김치 반복편성"** = §116에서 "부찬 반복 랭킹" 화면에 이미 적용한
+  `REPEATED_SIDE_DISH_EXCLUDED_MENU_NAMES = {"포기김치", "음료", "수제피클",
+  "할라피뇨"}`와 똑같은 요청 — 이 카드의 "반복 편성" 체크
+  (`weekly_menu_rotation()["overused"]`)엔 아직 이 제외 목록이 안 걸려
+  있어 같은 범용 반찬이 또 걸렸다.
+- **"취식기록 넣는거"** = `_no_intake_main_menus`(편성됐지만 취식 기록이
+  없는 메뉴) — 코드 주석에도 "메뉴명 표기 불일치일 수도 있음"이라 적혀
+  있던, 실제 이슈보다 데이터 정합성 잡음에 가까운 체크.
+- **"재료 중복"** = `weekly_menu_combination_check()`의 재료·특성 겹침
+  슬롯 수(`clash_slot_count`) 체크.
+
+이 세 항목은 **이 카드에서만** 빼는 것이 요청의 정확한 범위다 — "메뉴
+편성·운영" 탭의 재편성/부찬반복/재료중복 상세 점검 화면은 그대로 둔다
+(요청 대상이 아니고, 상세 점검용으로는 여전히 유용함).
+
+### 설계
+
+**1. VOE 롤링 30일.** `backend/app/api/dashboard.py::_compute_voe_by_category
+(db, period)`는 `/voe-by-category`(§122 VOE 탭 — 사용자가 "월"을 직접
+고름)가 그대로 쓰고 있어 달력월 동작을 바꾸면 안 된다. 쿼리+분류 로직을
+`_compute_voe_by_category_range(db, start_dt, end_dt)`로 뽑아 공유하고,
+`_compute_voe_by_category`는 달력월 범위를 계산해 그 함수를 부르는 얇은
+래퍼가 됐다. `improvement_points()`는 이제 `period_end` 기준 최근 30일
+(`current`)과 그 이전 30일(`prior`)을 `_compute_voe_by_category_range`로
+직접 계산한다(`_VOE_ROLLING_WINDOW_DAYS = 30`). 반환 딕셔너리 모양이
+그대로라 `_find_voe_finding`과 `voe_summary` 조회(`current_voe["categories"]`
+재사용) 둘 다 무변경으로 동작한다.
+
+**2. 편성·운영 축 3종 → `_collect_planning_facts` 하나만 축소.** 이
+함수는 이 카드 전용(다른 화면은 안 씀, 조사로 확인)이라 여기만 고쳤다:
+`weekly_menu_rotation()["overused"]`를 `REPEATED_SIDE_DISH_EXCLUDED_
+MENU_NAMES`로 필터링한 뒤 `collect_planning_issues`에
+`no_intake_menus=[]`, `clash_slot_count=0`으로 고정해서 넘긴다.
+`weekly_menu_combination_check()` 호출 자체를 없애 안 쓰는 계산을 하지
+않게 했고, 다른 소비자가 없어진 `_no_intake_main_menus` 함수는 삭제했다.
+`collect_planning_issues`/`_find_planning_finding`(순수 함수,
+`test_improvement_points.py`에 직접 단위테스트가 있음)은 시그니처·로직
+그대로 — 세 신호를 다 처리하는 능력 자체는 남겨두고 호출부만 줄였다.
+
+### 손대지 않는 것 (교차 확인)
+
+- `_compute_voe_by_category`의 달력월 동작과 `/voe-by-category`
+  엔드포인트(§122 VOE 탭) — 무변경.
+- `collect_planning_issues`/`_find_planning_finding`(순수 함수) — 시그니처·
+  동작 무변경.
+- `weekly_menu_rotation`/`weekly_menu_combination_check`(다른 화면 "메뉴
+  편성·운영" 탭이 씀) — 무변경, 결과를 이 카드에서 안 쓸 뿐.
+- `REPEATED_SIDE_DISH_EXCLUDED_MENU_NAMES`(analysis.py, §116) — 무변경,
+  이 카드에서도 재사용만 한다.
+- `_find_satisfaction_finding`/`_find_congestion_finding`(1·4순위) — 무변경.
+
+### 테스트/검증
+
+- `backend/tests/test_api_ingest_and_analysis.py`에 `/improvement-points`
+  엔드포인트 레벨 테스트 5개 추가: (1) 포기김치를 같은 코너에 4번 반복
+  편성해도(임계 3회 초과) 더 이상 이슈로 안 뜸(`no_issue`), (2) 대조군 —
+  제외 목록에 없는 "시금치나물"을 똑같이 반복 편성하면 여전히
+  `axis="planning"`으로 뜸(체크 자체를 끈 게 아님을 확인), (3) 취식
+  기록이 아예 없는 메뉴만 편성돼 있어도 `no_issue`, (4) 콩나물국밥(메인)
+  +콩나물무침(부찬) 재료 중복 슬롯이 있어도 `no_issue`, (5) VOE 롤링
+  윈도우 — `period_end`를 그달 3일로 잡고 지난달 말(6/29~30)에 "위생"
+  코멘트 2건만 넣으면(달력월 기준이면 "지난달" 취급돼 후보가 안 됨)
+  롤링 30일 창에서는 "최근"으로 잡혀 `axis="voe"`가 뜸을 확인 — 달력월
+  vs 롤링의 실제 차이가 드러나는 케이스.
+- `pytest` 전체 583개 중 581개 통과(무관 사전 실패 2개, 날짜 경계
+  의존 기존 이슈 — 이번 변경과 무관, 백엔드 다른 파일 무변경 확인).
+- 실제 개발 DB로 `/api/dashboard/improvement-points` 스모크 테스트 —
+  200 OK, VOE 축(간 관련, 최근 30일 55건 vs 이전 30일 54건)이 정상
+  응답됨을 확인(에러 없음).
+- 문서화(§125) 후 커밋·푸시.

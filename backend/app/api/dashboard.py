@@ -68,64 +68,31 @@ def _trend_cause(db: Session, menu_id: int) -> dict:
     }
 
 
-def _no_intake_main_menus(db: Session, period_start: dt.date, period_end: dt.date) -> list[dict]:
-    """§86: 편성됐지만(MAIN) 그 기간 취식 기록이 0인 메뉴 — 예전엔
-    menu_plan_performance의 action == "취식 기록 없음" 항목을 재사용했지만,
-    그 엔드포인트가 편성 빈도×성과 재설계로 삭제돼 여기서 직접 계산한다.
-    """
-    plan_rows = (
-        db.query(WeeklyMenuPlan.menu_id, MenuMaster.menu_name)
-        .join(MenuMaster, WeeklyMenuPlan.menu_id == MenuMaster.menu_id)
-        .filter(
-            WeeklyMenuPlan.menu_role == MenuRole.MAIN,
-            WeeklyMenuPlan.plan_date.between(period_start, period_end),
-        )
-        .all()
-    )
-    plan_name_by_id = {menu_id: menu_name for menu_id, menu_name in plan_rows}
-    if not plan_name_by_id:
-        return []
-
-    log_start = dt.datetime.combine(period_start, dt.time())
-    log_end = dt.datetime.combine(period_end, dt.time()) + dt.timedelta(days=1)
-    logged_ids = {
-        menu_id
-        for (menu_id,) in db.query(MealLog.menu_id)
-        .filter(MealLog.eaten_at >= log_start, MealLog.eaten_at < log_end, MealLog.menu_id.in_(plan_name_by_id))
-        .distinct()
-        .all()
-    }
-    no_intake_ids = set(plan_name_by_id) - logged_ids
-    return [{"menu_name": plan_name_by_id[mid]} for mid in sorted(no_intake_ids, key=lambda mid: plan_name_by_id[mid])]
-
-
 def _collect_planning_facts(db: Session, period_start: dt.date, period_end: dt.date) -> list[str]:
-    """편성 축 사실 수집 — 이미 만들어 둔 순수 함수들을 조합만 한다(§36.1 관례).
+    """편성 축 사실 수집 — "개선 필요 포인트" 카드 전용(다른 화면은 이 함수를
+    안 씀). 담당자 요청(2026-09)으로 반복편성만 남기고(그나마도 §116에서
+    "부찬 반복 랭킹" 화면에 적용한 것과 같은 범용 반찬/음료 제외 목록을
+    재사용) 취식기록 없음/재료 중복 체크는 이 카드에서 뺐다 — 둘 다 "실제
+    이슈"보다 "메뉴명 표기 불일치/일상적 재료 겹침" 잡음이 많다는 피드백.
+    재료 중복 체크 자체(analysis.py::weekly_menu_combination_check)와 그걸
+    쓰는 "메뉴 편성·운영" 탭 상세 화면은 무변경 — 이 카드가 그 결과를 더는
+    반영하지 않을 뿐이다. 취식기록 없음 체크는 이 카드에서만 쓰던 계산이라
+    (§86에서 만들어졌고 다른 소비자가 없었다) 함께 삭제했다.
 
     지연 임포트: analysis.py가 dashboard.py를 참조하지 않도록 호출 시점에 가져온다.
     """
-    from app.api.analysis import weekly_menu_combination_check, weekly_menu_rotation
+    from app.api.analysis import REPEATED_SIDE_DISH_EXCLUDED_MENU_NAMES, weekly_menu_rotation
 
     rotation = weekly_menu_rotation(period_start=period_start, period_end=period_end, db=db)
-    clash = weekly_menu_combination_check(period_start=period_start, period_end=period_end, db=db)
-
-    clash_slots = [
-        s
-        for s in clash["slots"]
-        if s["ingredient_clashes"] or s["vector_clashes"]
-    ]
-    no_intake = _no_intake_main_menus(db, period_start, period_end)
-    return collect_planning_issues(
-        overused=rotation["overused"],
-        no_intake_menus=no_intake,
-        clash_slot_count=len(clash_slots),
-    )
+    overused = [o for o in rotation["overused"] if o["menu_name"] not in REPEATED_SIDE_DISH_EXCLUDED_MENU_NAMES]
+    return collect_planning_issues(overused=overused, no_intake_menus=[], clash_slot_count=0)
 
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 MENU_HIGHLIGHTS_WINDOW_DAYS = 180  # 6.3절 menu_performance_stats 롤링 윈도우와 동일 범위
 NEW_MENU_WINDOW_DAYS = 30  # "최근 도입된 신메뉴"로 볼 기간
+_VOE_ROLLING_WINDOW_DAYS = 30  # "개선 필요 포인트" 카드의 VOE 축 — 담당자 요청(2026-09) "최근 한달"
 
 
 def _compute_weekly_summary(
@@ -534,11 +501,21 @@ def voe_clusters(period: dt.date, db: Session = Depends(get_db)):
 
 
 def _compute_voe_by_category(db: Session, period: dt.date) -> dict:
+    """`/voe-by-category`(§122 VOE 탭 — 사용자가 "월"을 직접 고름) 전용.
+    달력월(그달 1일~말일) 범위로 집계한다 — 이 동작은 그대로 유지해야 한다.
+    """
     month_start = period.replace(day=1)
     last_day = calendar.monthrange(month_start.year, month_start.month)[1]
     month_end_exclusive = dt.datetime.combine(month_start.replace(day=last_day) + dt.timedelta(days=1), dt.time())
     month_start_dt = dt.datetime.combine(month_start, dt.time())
+    return _compute_voe_by_category_range(db, month_start_dt, month_end_exclusive)
 
+
+def _compute_voe_by_category_range(db: Session, start_dt: dt.datetime, end_dt: dt.datetime) -> dict:
+    """`_compute_voe_by_category`의 공통 핵심 — 임의 [start_dt, end_dt) 범위로
+    집계한다. "개선 필요 포인트" 카드(2026-09, 담당자 요청 "최근 한달")가
+    달력월이 아니라 롤링 30일 윈도우를 쓰려고 분리했다 — 이 함수 자체는
+    범위만 받을 뿐 달력월 개념이 없다."""
     rows = (
         db.query(
             MealLog.comment, MealLog.eaten_at, CornerMaster.corner_name, MenuMaster.menu_name, MealLog.voe_categories
@@ -546,8 +523,8 @@ def _compute_voe_by_category(db: Session, period: dt.date) -> dict:
         .join(CornerMaster, MealLog.corner_id == CornerMaster.corner_id)
         .outerjoin(MenuMaster, MealLog.menu_id == MenuMaster.menu_id)  # menu_id는 nullable(2026-08)
         .filter(
-            MealLog.eaten_at >= month_start_dt,
-            MealLog.eaten_at < month_end_exclusive,
+            MealLog.eaten_at >= start_dt,
+            MealLog.eaten_at < end_dt,
             MealLog.comment.isnot(None),
         )
         .all()
@@ -832,8 +809,8 @@ async def improvement_points(period_start: dt.date, period_end: dt.date, db: Ses
 
     전부 이미 계산된 값을 재사용한다: 코너 통계(`analysis.py::corner_analysis`),
     메뉴 4분면(`analysis.py::menu_performance` — 사전에 recompute가 돼 있어야
-    함), 이번 달/지난 달 VOE 카테고리 집계(`_compute_voe_by_category`), 편성
-    사실(`_collect_planning_facts`).
+    함), 최근 30일/그 이전 30일 VOE 카테고리 집계(`_compute_voe_by_category_range`),
+    편성 사실(`_collect_planning_facts`).
 
     선정된 이슈가 VOE 축이면, 해당 카테고리의 원문 코멘트 일부를 사내 LLM에
     보내 만든 1~2문장 요약(voe_summary)을 덧붙인다 — 건수만으로는 "무슨
@@ -842,11 +819,17 @@ async def improvement_points(period_start: dt.date, period_end: dt.date, db: Ses
     corners = corner_analysis(period_start=period_start, period_end=period_end, db=db)
     menu_rows = menu_performance(period_start=period_start, period_end=period_end, db=db)
 
-    current_month = period_end.replace(day=1)
-    prior_month_end = current_month - dt.timedelta(days=1)
-    prior_month = prior_month_end.replace(day=1)
-    current_voe = _compute_voe_by_category(db, current_month)
-    prior_voe = _compute_voe_by_category(db, prior_month) if prior_month != current_month else None
+    # 담당자 요청(2026-09) — VOE 축은 달력월(그달 1일~오늘)이 아니라 "최근
+    # 한달"을 롤링 30일 윈도우로 본다. 달력월 기준이면 월초엔 데이터가
+    # 며칠치뿐이라 _VOE_MIN_REPEAT_COUNT(2건) 문턱조차 못 넘기기 쉬웠다 —
+    # `/voe-by-category`(§122 VOE 탭, 사용자가 "월"을 직접 고름)는 달력월
+    # 동작을 그대로 유지해야 해서 이 카드 전용으로 range 버전을 따로 쓴다.
+    current_end_dt = dt.datetime.combine(period_end + dt.timedelta(days=1), dt.time())
+    current_start_dt = current_end_dt - dt.timedelta(days=_VOE_ROLLING_WINDOW_DAYS)
+    prior_end_dt = current_start_dt
+    prior_start_dt = prior_end_dt - dt.timedelta(days=_VOE_ROLLING_WINDOW_DAYS)
+    current_voe = _compute_voe_by_category_range(db, current_start_dt, current_end_dt)
+    prior_voe = _compute_voe_by_category_range(db, prior_start_dt, prior_end_dt)
 
     planning_issues: list[str] = []
     try:
