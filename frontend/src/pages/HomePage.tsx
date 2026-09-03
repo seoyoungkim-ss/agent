@@ -878,14 +878,28 @@ export function HomePage({
               코너 필터
             </span>
             {(cornerListQuery.data ?? []).map((c) => {
-              const active = trendCornerIds.includes(c.corner_id);
+              // trendCornerIds가 빈 배열이면 "코너 필터 없음(전체 표시)"
+              // 이라 쿼리 쪽엔 모든 코너가 그대로 나간다(아래 headcountTrend
+              // 호출의 length>0 분기) — 그런데 버튼은 예전엔 includes()만
+              // 봐서 이 상태에서 전부 "꺼짐"으로 보였다. 실제로는 전부
+              // 보이는 중이니 전부 "켜짐"으로 보여야 앞뒤가 맞는다(담당자
+              // 신고: "테이크아웃 버튼은 꺼져있는데 그래프엔 나옴", 2026-09).
+              const active = trendCornerIds.length === 0 || trendCornerIds.includes(c.corner_id);
               return (
                 <button
                   key={c.corner_id}
                   onClick={() =>
-                    setTrendCornerIds((cur) =>
-                      cur.includes(c.corner_id) ? cur.filter((id) => id !== c.corner_id) : [...cur, c.corner_id],
-                    )
+                    setTrendCornerIds((cur) => {
+                      // 빈 배열(암묵적 "전체 선택") 상태에서 하나를 끄는
+                      // 클릭은 "전체 목록에서 이것만 뺀 명시적 리스트"로
+                      // 바뀌어야 한다 — 그냥 [...cur, id]로 추가하면 오히려
+                      // "이 코너만 보기"가 돼 정반대로 동작한다.
+                      const allIds = (cornerListQuery.data ?? []).map((x) => x.corner_id);
+                      const effective = cur.length === 0 ? allIds : cur;
+                      return effective.includes(c.corner_id)
+                        ? effective.filter((id) => id !== c.corner_id)
+                        : [...effective, c.corner_id];
+                    })
                   }
                   className="rounded border px-2 py-0.5 text-xs transition-colors"
                   style={{
